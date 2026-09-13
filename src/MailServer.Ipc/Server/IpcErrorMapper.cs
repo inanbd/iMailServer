@@ -51,6 +51,31 @@ internal static class IpcErrorMapper
                 Message = maintenance.Message,
             },
 
+            // Authentication failures and lockouts carry their own kind so the client can
+            // distinguish "wrong password" from "signed in but not permitted" and show the
+            // right screen. The message is already the generic one - the handler decided what
+            // may be revealed; this layer does not second-guess it.
+            AuthenticationFailedException authentication => new IpcError
+            {
+                Kind = IpcErrorKind.AuthenticationFailed,
+                Code = authentication.Code,
+                Message = authentication.Message,
+            },
+
+            AccountLockedOutException lockedOut => new IpcError
+            {
+                Kind = IpcErrorKind.AuthenticationFailed,
+                Code = lockedOut.Code,
+                Message = lockedOut.Message,
+            },
+
+            PasswordChangeRequiredException passwordChange => new IpcError
+            {
+                Kind = IpcErrorKind.PasswordChangeRequired,
+                Code = passwordChange.Code,
+                Message = passwordChange.Message,
+            },
+
             EntityNotFoundException notFound => new IpcError
             {
                 Kind = IpcErrorKind.NotFound,

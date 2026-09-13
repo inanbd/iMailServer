@@ -28,6 +28,9 @@ public sealed class SystemAdminContext : IAdminContext
 
     public AdminPermission Permissions => AdminPermission.FullControl;
 
+    /// <summary>Always false: service-initiated work never owes a password change.</summary>
+    public bool MustChangePassword => false;
+
     public bool HasPermission(AdminPermission permission) =>
         (Permissions & permission) == permission;
 }
@@ -61,12 +64,22 @@ public sealed class MutableAdminContext : IAdminContext, IAdminContextInitialize
 
     public AdminPermission Permissions { get; private set; } = AdminPermission.None;
 
+    /// <summary>
+    /// True when this identity must change its password before anything else is permitted.
+    /// </summary>
+    /// <remarks>
+    /// Carried from the session rather than re-read from the account on every request, so a
+    /// single database read at sign-in decides it for the session's lifetime.
+    /// </remarks>
+    public bool MustChangePassword { get; private set; }
+
     /// <summary>Populates the context after the caller has been authenticated.</summary>
     public void Assign(
         string administrator,
         string? sessionIdentifier,
         AdminPermission permissions,
-        bool isSystem = false)
+        bool isSystem = false,
+        bool mustChangePassword = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(administrator);
 
@@ -74,6 +87,7 @@ public sealed class MutableAdminContext : IAdminContext, IAdminContextInitialize
         SessionIdentifier = sessionIdentifier;
         Permissions = permissions;
         IsSystem = isSystem;
+        MustChangePassword = mustChangePassword;
         IsAuthenticated = true;
     }
 

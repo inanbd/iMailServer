@@ -143,6 +143,62 @@ public readonly record struct CertificateId(Guid Value) : IEntityId
     public override string ToString() => Value.ToString("D");
 }
 
+/// <summary>Identifies the administrator account aggregate.</summary>
+public readonly record struct AdminAccountId(Guid Value) : IEntityId
+{
+    public static AdminAccountId New() => new(Guid.CreateVersion7());
+
+    public static AdminAccountId Empty => new(Guid.Empty);
+
+    public bool IsEmpty => Value == Guid.Empty;
+
+    public override string ToString() => Value.ToString("D");
+}
+
+/// <summary>Identifies an administrative session.</summary>
+public readonly record struct AdminSessionId(Guid Value) : IEntityId
+{
+    public static AdminSessionId New() => new(Guid.CreateVersion7());
+
+    public static AdminSessionId Empty => new(Guid.Empty);
+
+    public bool IsEmpty => Value == Guid.Empty;
+
+    /// <summary>
+    /// Parses the session identifier carried on <c>IAdminContext.SessionIdentifier</c>.
+    /// </summary>
+    /// <remarks>
+    /// That property is a nullable string because it also carries non-session origins for
+    /// system-initiated work. Returning false rather than throwing keeps callers from having
+    /// to distinguish "no session" from "malformed session" at every use site.
+    /// </remarks>
+    public static bool TryParseIdentifier(string? identifier, out AdminSessionId result)
+    {
+        if (Guid.TryParse(identifier, out Guid parsed))
+        {
+            result = new AdminSessionId(parsed);
+            return true;
+        }
+
+        result = Empty;
+        return false;
+    }
+
+    public override string ToString() => Value.ToString("D");
+}
+
+/// <summary>Identifies a security event.</summary>
+public readonly record struct SecurityEventId(Guid Value) : IEntityId
+{
+    public static SecurityEventId New() => new(Guid.CreateVersion7());
+
+    public static SecurityEventId Empty => new(Guid.Empty);
+
+    public bool IsEmpty => Value == Guid.Empty;
+
+    public override string ToString() => Value.ToString("D");
+}
+
 /// <summary>Identifies an audit record.</summary>
 public readonly record struct AuditId(Guid Value) : IEntityId
 {

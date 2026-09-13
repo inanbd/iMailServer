@@ -15,13 +15,24 @@ public static class IpcProtocol
     /// <summary>
     /// Current protocol version. Increment on any breaking change to the envelope shape.
     /// </summary>
-    public const int Version = 1;
+    /// <remarks>
+    /// Version 2 (Milestone 2) added <see cref="IpcRequest.SessionToken"/> and made a valid
+    /// session mandatory for every command except the four anonymous ones. A version 1 client
+    /// would be rejected on every administrative operation rather than merely failing to send
+    /// a field, so this is a breaking change and the version is raised rather than the field
+    /// quietly added.
+    /// </remarks>
+    public const int Version = 2;
 
     /// <summary>
-    /// Oldest client version this server still accepts. Kept equal to
-    /// <see cref="Version"/> until there is a compatibility story worth supporting.
+    /// Oldest client version this server still accepts.
     /// </summary>
-    public const int MinimumSupportedVersion = 1;
+    /// <remarks>
+    /// Equal to <see cref="Version"/>: a version 1 client cannot authenticate at all, so
+    /// accepting it would only produce a confusing sequence of authorization failures instead
+    /// of one clear "upgrade the administration application".
+    /// </remarks>
+    public const int MinimumSupportedVersion = 2;
 
     /// <summary>Absolute ceiling on a single frame, independent of configuration.</summary>
     /// <remarks>
@@ -61,6 +72,22 @@ public sealed record IpcRequest
     /// Sanitised on arrival before it reaches any log line.
     /// </summary>
     public string? CorrelationId { get; init; }
+
+    /// <summary>
+    /// The administrative session token, for every command except the anonymous four.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Carried per request rather than established once for the connection. A connection-scoped
+    /// session would survive a reconnect the client did not intend and would tie session
+    /// lifetime to pipe lifetime, which are different concerns: a console can hold one pipe
+    /// open for hours across several sign-ins and lock screens.
+    /// </para>
+    /// <para>
+    /// <b>Never logged.</b> The dispatcher logs the resolved session id, never this value.
+    /// </para>
+    /// </remarks>
+    public string? SessionToken { get; init; }
 }
 
 /// <summary>A response from the service.</summary>
@@ -151,4 +178,20 @@ public enum IpcErrorKind
 
     /// <summary>The service is stopping and is no longer accepting work.</summary>
     ServiceStopping = 9,
+
+    /// <summary>
+    /// No valid session was presented. The UI must show the sign-in screen.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="Authorization"/>, which means "signed in, but not permitted".
+    /// Conflating them would leave the client unable to tell whether to prompt for a password
+    /// or to report a permissions problem.
+    /// </remarks>
+    Unauthenticated = 10,
+
+    /// <summary>Authentication failed, or the account is locked out.</summary>
+    AuthenticationFailed = 11,
+
+    /// <summary>A password change is outstanding and must be completed first.</summary>
+    PasswordChangeRequired = 12,
 }

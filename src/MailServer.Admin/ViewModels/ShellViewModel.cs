@@ -18,19 +18,43 @@ public sealed record NavigationEntry(string Title, string Group, Type ViewModelT
 /// tells an operator what this product is going to be, and makes the delivery plan visible
 /// rather than hiding it behind menus that appear one release at a time.
 /// </remarks>
-public sealed partial class ShellViewModel : ObservableObject
+public sealed partial class ShellViewModel : ObservableObject, IDisposable
 {
     private readonly INavigationService _navigation;
+    private readonly IIdleMonitor _idleMonitor;
 
-    public ShellViewModel(INavigationService navigation)
+    public ShellViewModel(
+        INavigationService navigation,
+        AuthenticationViewModel authentication,
+        IIdleMonitor idleMonitor)
     {
         ArgumentNullException.ThrowIfNull(navigation);
+        ArgumentNullException.ThrowIfNull(authentication);
+        ArgumentNullException.ThrowIfNull(idleMonitor);
 
         _navigation = navigation;
         _navigation.Navigated += (_, page) => CurrentPage = page;
 
+        Authentication = authentication;
+        _idleMonitor = idleMonitor;
+
+        Authentication.Authenticated += OnAuthenticated;
+        Authentication.SignedOut += OnSignedOut;
+
+        // The idle timer is the client half of auto-lock. The server enforces the same timeout
+        // on the session independently, so a client that simply declined to lock itself would
+        // still find its next request refused - this half exists to clear the screen promptly,
+        // not to be the control.
+        _idleMonitor.IdleTimeoutElapsed += OnIdleTimeoutElapsed;
+
         NavigationEntries = BuildNavigationTree();
     }
+
+    /// <summary>The authentication overlay. Gates everything else in the shell.</summary>
+    public AuthenticationViewModel Authentication { get; }
+
+    /// <summary>True when the shell's content should be visible.</summary>
+    public bool IsUnlocked => Authentication.IsAuthenticated;
 
     [ObservableProperty]
     public partial PageViewModel? CurrentPage { get; set; }
@@ -52,16 +76,64 @@ public sealed partial class ShellViewModel : ObservableObject
     [RelayCommand]
     private void Navigate(NavigationEntry? entry)
     {
-        if (entry is null || !entry.IsAvailable)
+        if (entry is null || !entry.IsAvailable || !IsUnlocked)
         {
             return;
         }
 
+        _idleMonitor.RecordActivity();
         _navigation.NavigateTo(entry.ViewModelType);
     }
 
-    /// <summary>Opens the default page.</summary>
-    public void Start() => _navigation.NavigateTo<DashboardViewModel>();
+    /// <summary>Locks the console on request.</summary>
+    [RelayCommand]
+    private Task LockAsync() => Authentication.LockAsync(isAutoLock: false);
+
+    /// <summary>Begins by asking the service whether setup is required.</summary>
+    public Task StartAsync() => Authentication.InitializeAsync();
+
+    /// <summary>Records user activity, resetting the idle timer.</summary>
+    public void RecordActivity() => _idleMonitor.RecordActivity();
+
+    private void OnAuthenticated(object? sender, EventArgs e)
+    {
+        OnPropertyChanged(nameof(IsUnlocked));
+
+        _idleMonitor.Start(TimeSpan.FromSeconds(Authentication.IdleTimeoutSeconds));
+        _navigation.NavigateTo<DashboardViewModel>();
+    }
+
+    private void OnSignedOut(object? sender, EventArgs e)
+    {
+        _idleMonitor.Stop();
+
+        // Dispose the page before dropping it: the dashboard holds a background refresh loop
+        // that would otherwise keep polling with a token the server has already rejected.
+        if (CurrentPage is IDisposable disposable)
+        {
+            disposable.Dispose();
+        }
+
+        CurrentPage = null;
+        OnPropertyChanged(nameof(IsUnlocked));
+    }
+
+    private void OnIdleTimeoutElapsed(object? sender, EventArgs e) =>
+        _ = Authentication.LockAsync(isAutoLock: true);
+
+    public void Dispose()
+    {
+        _idleMonitor.IdleTimeoutElapsed -= OnIdleTimeoutElapsed;
+        Authentication.Authenticated -= OnAuthenticated;
+        Authentication.SignedOut -= OnSignedOut;
+
+        _idleMonitor.Dispose();
+
+        if (CurrentPage is IDisposable disposable)
+        {
+            disposable.Dispose();
+        }
+    }
 
     /// <summary>
     /// The full product navigation tree.
@@ -87,11 +159,12 @@ public sealed partial class ShellViewModel : ObservableObject
         new("Storage", "Server", typeof(DashboardViewModel), IsAvailable: false),
         new("Database", "Server", typeof(DashboardViewModel), IsAvailable: false),
 
-        new("Authentication", "Security", typeof(DashboardViewModel), IsAvailable: false),
+        new("Overview", "Security", typeof(SecurityViewModel)),
+        new("Security Events", "Security", typeof(SecurityEventsViewModel)),
+        new("Audit Log", "Security", typeof(AuditLogViewModel)),
         new("IP Rules", "Security", typeof(DashboardViewModel), IsAvailable: false),
         new("Rate Limits", "Security", typeof(DashboardViewModel), IsAvailable: false),
         new("Anti-Spam", "Security", typeof(DashboardViewModel), IsAvailable: false),
-        new("Security Events", "Security", typeof(DashboardViewModel), IsAvailable: false),
 
         new("Overview", "Deliverability", typeof(DashboardViewModel), IsAvailable: false),
         new("DNS", "Deliverability", typeof(DashboardViewModel), IsAvailable: false),

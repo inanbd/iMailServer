@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Windows;
+using System.Windows.Input;
 using MailServer.Admin.ViewModels;
 
 namespace MailServer.Admin.Views;
@@ -19,18 +20,25 @@ public partial class MainWindow : Window
         InitializeComponent();
 
         Loaded += OnLoaded;
+
+        // Tunnelling handlers, so activity is recorded even when a child control handles the
+        // event. Bubbling ones would miss a keystroke consumed by a text box - which is most of
+        // them, and would make the idle timer fire while somebody was actively typing.
+        PreviewMouseDown += OnUserActivity;
+        PreviewKeyDown += OnUserActivity;
+        PreviewMouseWheel += OnUserActivity;
     }
 
-    private void OnLoaded(object sender, RoutedEventArgs e) => _shell.Start();
+    private async void OnLoaded(object sender, RoutedEventArgs e) =>
+        await _shell.StartAsync().ConfigureAwait(true);
+
+    private void OnUserActivity(object sender, InputEventArgs e) => _shell.RecordActivity();
 
     protected override void OnClosing(CancelEventArgs e)
     {
-        // The dashboard holds a background refresh loop. Cancelling it here stops a
-        // pointless IPC round trip every few seconds after the window has gone.
-        if (_shell.CurrentPage is IDisposable disposable)
-        {
-            disposable.Dispose();
-        }
+        // Disposes the idle timer and the current page, which for the dashboard means stopping
+        // a background refresh loop that would otherwise keep polling after the window has gone.
+        _shell.Dispose();
 
         base.OnClosing(e);
     }

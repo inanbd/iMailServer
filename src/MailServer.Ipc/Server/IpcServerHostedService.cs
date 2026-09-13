@@ -184,9 +184,18 @@ public sealed class IpcServerHostedService : BackgroundService
     /// Identifies the connecting process.
     /// </summary>
     /// <remarks>
-    /// The pipe ACL has already restricted connections to local administrators, so anyone who
-    /// reaches this point is entitled to administer the server. Milestone 2 layers the master
-    /// password on top, at which point <see cref="AdminPermission"/> narrows per session.
+    /// <para>
+    /// Two layers of access control apply, and this is the outer one. The pipe ACL has already
+    /// restricted connections to local administrators; this records <i>which</i> one, so that a
+    /// security event can be attributed to a Windows account even when the sign-in it describes
+    /// failed.
+    /// </para>
+    /// <para>
+    /// <b>It confers no permissions.</b> From Milestone 2, permissions come exclusively from an
+    /// authenticated session validated by the dispatcher. Windows identity gets a caller as far
+    /// as the sign-in screen and no further, which is why <see cref="AdminPermission.None"/> is
+    /// passed here rather than <c>FullControl</c>.
+    /// </para>
     /// </remarks>
     private IpcCallerIdentity ResolveCaller(NamedPipeServerStream pipe)
     {
@@ -198,7 +207,7 @@ public sealed class IpcServerHostedService : BackgroundService
         return new IpcCallerIdentity(
             $"{Environment.UserName}@{Environment.MachineName} (development)",
             SessionIdentifier: null,
-            AdminPermission.FullControl);
+            AdminPermission.None);
     }
 
     [SupportedOSPlatform("windows")]
@@ -211,7 +220,9 @@ public sealed class IpcServerHostedService : BackgroundService
             return new IpcCallerIdentity(
                 string.IsNullOrWhiteSpace(userName) ? "(unknown)" : userName,
                 SessionIdentifier: null,
-                AdminPermission.FullControl);
+
+                // No permissions from transport identity alone. The session decides.
+                AdminPermission.None);
         }
         catch (IOException ex)
         {
@@ -223,7 +234,7 @@ public sealed class IpcServerHostedService : BackgroundService
             return new IpcCallerIdentity(
                 $"(unidentified administrator on {Environment.MachineName})",
                 SessionIdentifier: null,
-                AdminPermission.FullControl);
+                AdminPermission.None);
         }
     }
 }

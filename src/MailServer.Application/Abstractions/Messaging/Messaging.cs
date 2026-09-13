@@ -52,6 +52,35 @@ public interface IAuditableRequest
 }
 
 /// <summary>
+/// Marks a request as reachable <b>without</b> an authenticated session.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Applied to exactly four requests: asking whether setup is required, completing setup,
+/// signing in, and resetting the password with a recovery key. Nothing else may carry it.
+/// </para>
+/// <para>
+/// <c>IpcCommandRegistry</c> cross-checks this marker against each command descriptor's
+/// <c>RequiresSession</c> flag and refuses to build if the two disagree. A command whose
+/// descriptor says "no session needed" but whose type is not marked anonymous — or the
+/// reverse — is a bug that would either expose an administrative operation or make an
+/// unreachable sign-in screen, so it fails at startup rather than in production.
+/// </para>
+/// </remarks>
+public interface IAnonymousRequest;
+
+/// <summary>
+/// Marks a request as permitted while the signed-in administrator still owes a password
+/// change.
+/// </summary>
+/// <remarks>
+/// After a recovery-key reset the administrator holds a valid session but has not yet chosen a
+/// password. That session must be able to change the password and to sign out, and nothing
+/// else — otherwise a recovery key would be a permanent bypass of the password entirely.
+/// </remarks>
+public interface IAllowedWhenPasswordChangeRequired;
+
+/// <summary>
 /// Opts a request into permission enforcement.
 /// </summary>
 /// <remarks>

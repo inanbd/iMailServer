@@ -12,6 +12,7 @@ using MailServer.Application.Domains.Dtos;
 using MailServer.Application.Monitoring.Dtos;
 using MailServer.Domain.Entities;
 using MailServer.Domain.Enums;
+using MailServer.Domain.Policies;
 using MailServer.Domain.ValueObjects;
 
 namespace MailServer.Ipc.Tests.Doubles;
@@ -319,16 +320,20 @@ internal sealed class ScopedAdminContext : IAdminContext, IAdminContextInitializ
 
     public AdminPermission Permissions { get; private set; } = AdminPermission.None;
 
+    public bool MustChangePassword { get; private set; }
+
     public void Assign(
         string administrator,
         string? sessionIdentifier,
         AdminPermission permissions,
-        bool isSystem = false)
+        bool isSystem = false,
+        bool mustChangePassword = false)
     {
         Administrator = administrator;
         SessionIdentifier = sessionIdentifier;
         Permissions = permissions;
         IsSystem = isSystem;
+        MustChangePassword = mustChangePassword;
         IsAuthenticated = true;
     }
 
@@ -391,4 +396,73 @@ internal sealed class PassThroughTransactionManager : ITransactionManager
     public Task<T> ExecuteScopedAsync<T>(
         Func<CancellationToken, Task<T>> action,
         CancellationToken cancellationToken = default) => action(cancellationToken);
+}
+
+/// <summary>Buffers security events in memory so tests can assert on them.</summary>
+internal sealed class RecordingSecurityEventRecorder : ISecurityEventRecorder
+{
+    private readonly List<(SecurityEventType Type, string? Subject, string Description)> _pending = [];
+
+    public List<(SecurityEventType Type, string? Subject, string Description)> Flushed { get; } = [];
+
+    public bool HasPendingEvents => _pending.Count > 0;
+
+    public Task RecordAsync(
+        SecurityEventType eventType,
+        string? subject,
+        string? origin,
+        string description,
+        CancellationToken cancellationToken)
+    {
+        _pending.Add((eventType, subject, description));
+        return Task.CompletedTask;
+    }
+
+    public Task FlushAsync(CancellationToken cancellationToken)
+    {
+        Flushed.AddRange(_pending);
+        _pending.Clear();
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>Security settings with short timeouts, so expiry is testable.</summary>
+internal sealed class FakeSecuritySettings : ISecuritySettings
+{
+    public TimeSpan SessionIdleTimeout { get; set; } = TimeSpan.FromMinutes(10);
+
+    public TimeSpan SessionAbsoluteTimeout { get; set; } = TimeSpan.FromHours(12);
+
+    public LockoutPolicy LockoutPolicy { get; } = new();
+
+    public int MinimumPasswordLength => 12;
+}
+
+/// <summary>
+/// An admin account repository holding nothing, so the server under test looks like one that
+/// has not been through first-run setup.
+/// </summary>
+/// <remarks>
+/// That is the state in which the four anonymous commands matter most, and it lets the
+/// authorization tests prove those commands are genuinely reachable without a session rather
+/// than merely failing differently.
+/// </remarks>
+internal sealed class EmptyAdminAccountRepository : IAdminAccountRepository
+{
+    public Task<AdminAccount?> GetBuiltInAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<AdminAccount?>(null);
+
+    public Task<AdminAccount?> GetByIdAsync(AdminAccountId id, CancellationToken cancellationToken) =>
+        Task.FromResult<AdminAccount?>(null);
+
+    public Task<AdminAccount?> GetByNameAsync(string name, CancellationToken cancellationToken) =>
+        Task.FromResult<AdminAccount?>(null);
+
+    public Task<bool> AnyAsync(CancellationToken cancellationToken) => Task.FromResult(false);
+
+    public Task AddAsync(AdminAccount account, CancellationToken cancellationToken) =>
+        Task.CompletedTask;
+
+    public Task UpdateAsync(AdminAccount account, CancellationToken cancellationToken) =>
+        Task.CompletedTask;
 }

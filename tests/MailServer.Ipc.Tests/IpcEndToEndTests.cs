@@ -11,12 +11,14 @@ using MailServer.Application.Common;
 using MailServer.Application.Domains.Commands;
 using MailServer.Application.Domains.Dtos;
 using MailServer.Application.Domains.Queries;
+using MailServer.Application.Security.Dtos;
 using MailServer.Domain.Entities;
 using MailServer.Domain.Enums;
 using MailServer.Domain.ValueObjects;
 using MailServer.Ipc.Protocol;
 using MailServer.Ipc.Server;
 using MailServer.Ipc.Tests.Doubles;
+using MailServer.Infrastructure.Security;
 using MediatR;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -44,6 +46,8 @@ public sealed class IpcEndToEndTests : IAsyncLifetime
     private readonly string _pipeName = $"aethermail-test-{Guid.NewGuid():N}";
     private ServiceProvider _services = null!;
     private IpcRequestDispatcher _dispatcher = null!;
+    private IAdminSessionManager _sessions = null!;
+    private string _sessionToken = null!;
     private FakeDomainRepository _domains = null!;
     private CancellationTokenSource _serverCancellation = null!;
     private Task _serverLoop = null!;
@@ -75,16 +79,41 @@ public sealed class IpcEndToEndTests : IAsyncLifetime
         services.AddScoped<ICorrelationContext, ScopedCorrelationContext>();
         services.AddScoped<IAuditTrail, RecordingAuditTrail>();
 
+        // A real session manager, so the dispatcher's session enforcement is exercised rather
+        // than stubbed - that enforcement is the point of these tests from Milestone 2 on.
+        services.AddSingleton<ISecuritySettings>(new FakeSecuritySettings());
+        services.AddSingleton<IAdminAccountRepository, EmptyAdminAccountRepository>();
+        services.AddSingleton<IAdminSessionManager, AdminSessionManager>();
+        services.AddScoped<ISecurityEventRecorder, RecordingSecurityEventRecorder>();
+
         // No transaction manager is registered because nothing in these tests is marked
         // transactional at the persistence level; TransactionBehavior resolves it lazily.
         services.AddScoped<ITransactionManager, PassThroughTransactionManager>();
 
         _services = services.BuildServiceProvider();
 
+        _sessions = _services.GetRequiredService<IAdminSessionManager>();
+
         _dispatcher = new IpcRequestDispatcher(
             _services.GetRequiredService<IServiceScopeFactory>(),
             new IpcCommandRegistry(),
+            _sessions,
             NullLogger<IpcRequestDispatcher>.Instance);
+
+        // A session issued directly, rather than through the sign-in command, so these tests
+        // stay focused on the transport and dispatch layers. The full authentication flow is
+        // covered end to end in MailServer.SecurityTests.
+        (AdminSession _, string token) = _sessions
+            .CreateAsync(
+                "test-admin",
+                AdminPermission.FullControl,
+                "test",
+                mustChangePassword: false,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+
+        _sessionToken = token;
 
         _serverCancellation = new CancellationTokenSource();
         _serverLoop = RunServerAsync(_serverCancellation.Token);
@@ -164,16 +193,10 @@ public sealed class IpcEndToEndTests : IAsyncLifetime
     private async Task<IpcResponse> SendAsync(
         string command,
         object payload,
-        int protocolVersion = IpcProtocol.Version)
+        int protocolVersion = IpcProtocol.Version,
+        string? sessionToken = null,
+        bool omitSessionToken = false)
     {
-        await using NamedPipeClientStream client = new(
-            ".",
-            _pipeName,
-            PipeDirection.InOut,
-            PipeOptions.Asynchronous);
-
-        await client.ConnectAsync(10_000, CancellationToken.None);
-
         IpcRequest request = new()
         {
             ProtocolVersion = protocolVersion,
@@ -181,17 +204,55 @@ public sealed class IpcEndToEndTests : IAsyncLifetime
             Command = command,
             Payload = IpcFrame.SerializePayload(payload),
             CorrelationId = "test-correlation",
+            SessionToken = omitSessionToken ? null : sessionToken ?? _sessionToken,
         };
 
-        await IpcFrame.WriteAsync(client, request, 1024 * 1024, CancellationToken.None);
+        // Connect-and-exchange is retried because of a quirk of the harness, not of the
+        // protocol. This accept loop serves one connection at a time, so between requests there
+        // is a moment when the previous NamedPipeServerStream is being retired and its
+        // replacement is not yet listening. On Unix, where .NET implements named pipes over
+        // domain sockets, a client can connect into that dying listener's backlog and then see
+        // the connection reset on its first read. The real service keeps several server
+        // instances open concurrently and does not have the gap; treating it as fatal here
+        // would make an unrelated harness detail look like a protocol defect.
+        IOException? lastFailure = null;
 
-        IpcResponse? response =
-            await IpcFrame.ReadAsync<IpcResponse>(client, 1024 * 1024, CancellationToken.None);
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            try
+            {
+                await using NamedPipeClientStream client = new(
+                    ".",
+                    _pipeName,
+                    PipeDirection.InOut,
+                    PipeOptions.Asynchronous);
 
-        response.ShouldNotBeNull();
-        response.RequestId.ShouldBe(request.RequestId);
+                await client.ConnectAsync(10_000, CancellationToken.None);
 
-        return response;
+                await IpcFrame.WriteAsync(client, request, 1024 * 1024, CancellationToken.None);
+
+                IpcResponse? response = await IpcFrame
+                    .ReadAsync<IpcResponse>(client, 1024 * 1024, CancellationToken.None);
+
+                if (response is null)
+                {
+                    lastFailure = new IOException("The server closed the pipe without replying.");
+                    continue;
+                }
+
+                response.RequestId.ShouldBe(request.RequestId);
+
+                return response;
+            }
+            catch (IOException ex)
+            {
+                lastFailure = ex;
+                await Task.Delay(20, CancellationToken.None);
+            }
+        }
+
+        throw new IOException(
+            $"Could not complete '{command}' over the test pipe after 5 attempts.", lastFailure);
     }
 
     [Fact]
@@ -348,6 +409,8 @@ public sealed class IpcEndToEndTests : IAsyncLifetime
                 Command = "Domains.Create",
                 Payload = IpcFrame.SerializePayload(
                     new CreateDomainCommand { Name = $"d{i}.example" }),
+                CorrelationId = "test-correlation",
+                SessionToken = _sessionToken,
             };
 
             await IpcFrame.WriteAsync(client, request, 1024 * 1024, CancellationToken.None);
@@ -362,5 +425,144 @@ public sealed class IpcEndToEndTests : IAsyncLifetime
         }
 
         _domains.All.Count.ShouldBe(5);
+    }
+
+    // ---- Session enforcement -------------------------------------------------------------
+    //
+    // Protocol v2's central security property: a Windows identity that can open the pipe is
+    // necessary but no longer sufficient. Every administrative command needs a session token
+    // issued by a successful sign-in, and exactly four commands do not.
+
+    public static TheoryData<string> SessionRequiredCommands
+    {
+        get
+        {
+            TheoryData<string> data = [];
+
+            foreach (IpcCommandDescriptor descriptor in new IpcCommandRegistry().Commands)
+            {
+                if (descriptor.RequiresSession)
+                {
+                    data.Add(descriptor.Name);
+                }
+            }
+
+            return data;
+        }
+    }
+
+    public static TheoryData<string> AnonymousCommands
+    {
+        get
+        {
+            TheoryData<string> data = [];
+
+            foreach (IpcCommandDescriptor descriptor in new IpcCommandRegistry().Commands)
+            {
+                if (!descriptor.RequiresSession)
+                {
+                    data.Add(descriptor.Name);
+                }
+            }
+
+            return data;
+        }
+    }
+
+    /// <summary>
+    /// Driven from the registry rather than a hand-written list, so a command added in a later
+    /// milestone is covered the moment it is registered.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(SessionRequiredCommands))]
+    public async Task Every_session_required_command_is_refused_without_a_token(string command)
+    {
+        IpcResponse response = await SendAsync(command, new { }, omitSessionToken: true);
+
+        response.Success.ShouldBeFalse();
+        response.Error.ShouldNotBeNull();
+        response.Error!.Kind.ShouldBe(IpcErrorKind.Unauthenticated);
+    }
+
+    [Theory]
+    [MemberData(nameof(SessionRequiredCommands))]
+    public async Task Every_session_required_command_is_refused_with_a_forged_token(string command)
+    {
+        // 32 bytes of the right shape but never issued: the manager stores hashes of tokens it
+        // created, so a structurally valid token it has not seen must not validate.
+        string forged = Convert.ToBase64String(
+            Enumerable.Range(0, 32).Select(static i => (byte)i).ToArray());
+
+        IpcResponse response = await SendAsync(command, new { }, sessionToken: forged);
+
+        response.Success.ShouldBeFalse();
+        response.Error.ShouldNotBeNull();
+        response.Error!.Kind.ShouldBe(IpcErrorKind.Unauthenticated);
+    }
+
+    [Theory]
+    [MemberData(nameof(AnonymousCommands))]
+    public async Task An_anonymous_command_is_not_refused_for_want_of_a_session(string command)
+    {
+        IpcResponse response = await SendAsync(command, new { }, omitSessionToken: true);
+
+        // The payloads here are empty, so most of these fail validation - which is the point.
+        // Reaching validation means the session gate let them through.
+        if (!response.Success)
+        {
+            response.Error.ShouldNotBeNull();
+            response.Error!.Kind.ShouldNotBe(IpcErrorKind.Unauthenticated);
+        }
+    }
+
+    [Fact]
+    public async Task Setup_status_is_readable_before_sign_in()
+    {
+        IpcResponse response = await SendAsync(
+            "Security.SetupStatus",
+            new { },
+            omitSessionToken: true);
+
+        response.Success.ShouldBeTrue();
+
+        SetupStatusDto status = IpcFrame.DeserializePayload<SetupStatusDto>(response.Payload)!;
+
+        status.RequiresSetup.ShouldBeTrue();
+        status.IsLockedOut.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task A_revoked_session_stops_working_immediately()
+    {
+        (AdminSession session, string token) = await _sessions.CreateAsync(
+            "revocation-test",
+            AdminPermission.FullControl,
+            "test",
+            mustChangePassword: false,
+            CancellationToken.None);
+
+        IpcResponse before = await SendAsync("Domains.List", new { }, sessionToken: token);
+        before.Success.ShouldBeTrue();
+
+        await _sessions.RevokeAsync(session.Id, CancellationToken.None);
+
+        IpcResponse after = await SendAsync("Domains.List", new { }, sessionToken: token);
+
+        after.Success.ShouldBeFalse();
+        after.Error!.Kind.ShouldBe(IpcErrorKind.Unauthenticated);
+    }
+
+    /// <summary>
+    /// The refusal must not distinguish "no such session" from "expired" or "revoked": that
+    /// distinction is useful only to somebody probing, and it is recorded in the log instead.
+    /// </summary>
+    [Fact]
+    public async Task Refusals_do_not_reveal_why_the_session_was_rejected()
+    {
+        IpcResponse missing = await SendAsync("Domains.List", new { }, omitSessionToken: true);
+        IpcResponse forged = await SendAsync("Domains.List", new { }, sessionToken: "not-a-token");
+
+        missing.Error!.Code.ShouldBe(forged.Error!.Code);
+        missing.Error!.Message.ShouldBe(forged.Error!.Message);
     }
 }

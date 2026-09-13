@@ -1,3 +1,4 @@
+using MailServer.Application.Abstractions.Security;
 using MailServer.Ipc.Client;
 using MailServer.Ipc.Protocol;
 using MailServer.Ipc.Server;
@@ -35,6 +36,7 @@ public static class DependencyInjection
         services.TryAddSingleton(sp => new IpcRequestDispatcher(
             sp.GetRequiredService<IServiceScopeFactory>(),
             sp.GetRequiredService<IpcCommandRegistry>(),
+            sp.GetRequiredService<IAdminSessionManager>(),
             sp.GetRequiredService<ILogger<IpcRequestDispatcher>>()));
 
         services.AddHostedService(sp => new IpcServerHostedService(

@@ -11,3 +11,4 @@ using System.Runtime.CompilerServices;
 // two things this layer exists to get right.
 [assembly: InternalsVisibleTo("MailServer.Persistence.Tests")]
 [assembly: InternalsVisibleTo("MailServer.Infrastructure.Tests")]
+[assembly: InternalsVisibleTo("MailServer.SecurityTests")]

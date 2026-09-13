@@ -18,6 +18,10 @@
             <conv:StringToVisibilityConverter x:Key="StringToVisibility" />
             <conv:MaintenanceModeToVisibilityConverter x:Key="MaintenanceModeToVisibility" />
             <conv:InverseBooleanConverter x:Key="InverseBool" />
+            <conv:BoolToVisibilityConverter x:Key="BoolToVisibility" />
+            <conv:AuthenticationStageToVisibilityConverter x:Key="StageToVisibility" />
+            <conv:SecurityEventToBrushConverter x:Key="SecurityEventToBrush" />
+            <conv:AuditResultToBrushConverter x:Key="AuditResultToBrush" />
 
             <!--
                 View-model-first navigation: the shell binds a ContentControl to the current
@@ -30,6 +34,18 @@
 
             <DataTemplate DataType="{x:Type vm:DomainsViewModel}">
                 <pages:DomainsView />
+            </DataTemplate>
+
+            <DataTemplate DataType="{x:Type vm:SecurityViewModel}">
+                <pages:SecurityView />
+            </DataTemplate>
+
+            <DataTemplate DataType="{x:Type vm:AuditLogViewModel}">
+                <pages:AuditLogView />
+            </DataTemplate>
+
+            <DataTemplate DataType="{x:Type vm:SecurityEventsViewModel}">
+                <pages:SecurityEventsView />
             </DataTemplate>
 
         </ResourceDictionary>

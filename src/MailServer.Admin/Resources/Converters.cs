@@ -117,3 +117,86 @@ public sealed class InverseBooleanConverter : IValueConverter
     public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) =>
         value is bool b && !b;
 }
+
+/// <summary>
+/// Shows an element only when the authentication stage matches the converter parameter.
+/// </summary>
+/// <remarks>
+/// The overlay holds every stage's markup in one control and shows one at a time, rather than
+/// swapping user controls. With six stages that share a frame, a title and an error banner,
+/// one control with visibility triggers is markedly less code than six near-identical views
+/// plus a selector.
+/// </remarks>
+public sealed class AuthenticationStageToVisibilityConverter : IValueConverter
+{
+    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        if (value is not ViewModels.AuthenticationStage stage ||
+            parameter is not string expected ||
+            !Enum.TryParse(expected, out ViewModels.AuthenticationStage target))
+        {
+            return Visibility.Collapsed;
+        }
+
+        return stage == target ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) =>
+        throw new NotSupportedException();
+}
+
+/// <summary>Maps a security event type to a brush, reusing the four-state health vocabulary.</summary>
+public sealed class SecurityEventToBrushConverter : IValueConverter
+{
+    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        // Alarming is the flag that matters; the specific type only refines the shade.
+        string key = value is SecurityEventType type
+            ? type switch
+            {
+                SecurityEventType.AdminAccountLockedOut or
+                SecurityEventType.InvalidSessionPresented or
+                SecurityEventType.RecoveryKeyRejected or
+                SecurityEventType.IpcProtocolViolation => "State.Critical",
+
+                SecurityEventType.AdminSignInFailed or
+                SecurityEventType.AdminSignInBlockedByLockout or
+                SecurityEventType.MasterPasswordResetWithRecoveryKey or
+                SecurityEventType.AuthorizationDenied => "State.Warning",
+
+                SecurityEventType.AdminSignInSucceeded or
+                SecurityEventType.MasterPasswordCreated or
+                SecurityEventType.MasterPasswordChanged => "State.Healthy",
+
+                _ => "State.Unknown",
+            }
+            : "State.Unknown";
+
+        return System.Windows.Application.Current?.TryFindResource(key) as Brush ?? Brushes.Gray;
+    }
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) =>
+        throw new NotSupportedException();
+}
+
+/// <summary>Maps an audit result to a brush.</summary>
+public sealed class AuditResultToBrushConverter : IValueConverter
+{
+    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        string key = value is AuditResult result
+            ? result switch
+            {
+                AuditResult.Success => "State.Healthy",
+                AuditResult.Failure => "State.Critical",
+                AuditResult.Denied => "State.Warning",
+                _ => "State.Unknown",
+            }
+            : "State.Unknown";
+
+        return System.Windows.Application.Current?.TryFindResource(key) as Brush ?? Brushes.Gray;
+    }
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) =>
+        throw new NotSupportedException();
+}

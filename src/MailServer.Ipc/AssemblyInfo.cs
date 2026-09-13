@@ -6,3 +6,4 @@ using System.Runtime.CompilerServices;
 // version checks, command-registry lookup, identity assignment - and those must be tested
 // directly rather than inferred from the outside.
 [assembly: InternalsVisibleTo("MailServer.Ipc.Tests")]
+[assembly: InternalsVisibleTo("MailServer.SecurityTests")]

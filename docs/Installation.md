@@ -139,7 +139,35 @@ SQL connection string is present inline.
 Upgrades never touch the data root except through migrations. A migration marked
 `-- @Destructive` refuses to run unattended until backups exist.
 
-## The first-run wizard (Milestone 13)
+## First-run administrator setup
+
+The server ships with **no account and no default password**. The first time the administration
+application connects, it presents a setup wizard that creates the single built-in administrator
+and then displays a recovery key once.
+
+```text
+Connect → Choose master password (minimum 12 characters) → Recovery key shown once → Signed in
+```
+
+Three things matter here, and all three are deliberate:
+
+* **Record the recovery key before continuing.** It is stored only as an Argon2id hash and
+  cannot be redisplayed. There is no support backdoor and no file you can delete to reset the
+  password. If the password and the key are both lost, the database must be recreated.
+* **There are no composition rules.** Length is what is enforced (12 minimum, 256 maximum),
+  following NIST SP 800-63B. A long passphrase is the recommended choice.
+* **Being a local administrator is no longer sufficient.** Every launch after setup asks for
+  the master password, and the pipe ACL is now defence in depth rather than the authorisation
+  mechanism.
+
+After five consecutive failures the account locks for 15 minutes, doubling at each further
+multiple of five up to eight hours. The lock is recorded in the database, so restarting the
+service does not clear it. Use the recovery key if you are locked out and need in now — it
+deliberately bypasses the lockout.
+
+---
+
+## The full first-run wizard (Milestone 13)
 
 Sixteen steps, in this order, because each depends on the last:
 

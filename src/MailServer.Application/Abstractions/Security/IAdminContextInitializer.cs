@@ -27,5 +27,6 @@ public interface IAdminContextInitializer
         string administrator,
         string? sessionIdentifier,
         AdminPermission permissions,
-        bool isSystem = false);
+        bool isSystem = false,
+        bool mustChangePassword = false);
 }

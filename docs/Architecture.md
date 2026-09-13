@@ -1670,4 +1670,69 @@ Nothing in items 9 and 10 blocks Milestone 1, so implementation begins now.
 
 ---
 
-*Document version 1.0 — baseline for Milestone 1.*
+## Addendum — decisions taken during Milestone 2
+
+The baseline above stands. Four decisions were made or changed while implementing the security
+layer, and they are recorded here rather than edited into the sections above, so the difference
+between what was designed and what was learned stays visible.
+
+### A2.1 — Sessions replace Windows identity as the authorization principal
+
+§21 proposed the pipe ACL as the primary control, with the caller's Windows identity mapped to
+a permission set. That is now defence in depth only. `ResolveCaller` returns
+`AdminPermission.None`, and permissions come exclusively from a session issued by a successful
+sign-in.
+
+The ACL answers "may this process open the pipe"; it cannot answer "is a human present who
+knows the master password". Treating the first as an answer to the second would mean any
+process running elevated — including a compromised unrelated tool — could reconfigure mail
+routing for every hosted domain.
+
+IPC protocol version 2 therefore refuses version 1 outright, rather than negotiating down. A v1
+client is by definition one that expects to administer the server without signing in, and a
+compatibility path for it would be a documented bypass.
+
+### A2.2 — Security events are buffered, audit records are transactional
+
+§21 treated the audit trail and the security event log as one concern. They are not, and the
+distinction is about consistency direction:
+
+- An audit record must **not** survive the rollback of the change it describes. It joins the
+  request's transaction.
+- A security event **must** survive the rollback of the operation it describes — a failed
+  sign-in is exactly the case where the operation is rejected and the record must persist. It
+  is buffered during the request and flushed after commit or rollback.
+
+This was forced by a defect, not foreseen. Writing security events on a second connection
+inside an open write transaction deadlocked against SQLite's single-writer lock: each event
+stalled for the full busy timeout and was then silently dropped. The design comments in
+`ITransactionManager` had warned about exactly this; the code did it anyway, and the tests
+caught it.
+
+### A2.3 — Authentication is not transactional
+
+`AuthenticateCommand` deliberately carries no `ITransactionalRequest` marker. A failed attempt
+increments the persisted failure counter and then throws, and `TransactionBehavior` rolls back
+on exception — so a transaction would discard the increment that drives lockout, leaving
+brute-force protection inert while appearing correct everywhere an operator would look.
+
+This too was a real defect caught by tests rather than by review, which is the argument for the
+security suite existing at all. A structural test now asserts the marker's absence, because a
+behavioural test alone would catch the regression without explaining it.
+
+Nothing is lost by dropping the transaction: every path performs at most one row update, the
+session lives in memory, and security events are flushed out of band per A2.2.
+
+### A2.4 — The recovery key is the only recovery path
+
+No support backdoor, no file-deletion reset, no vendor override. 125 bits of entropy, stored
+Argon2id-hashed, single-use, and it bypasses lockout so that an attacker who can trigger a
+lockout cannot thereby deny the administrator their own recovery path.
+
+If both the password and the key are lost, the database must be recreated. That is the correct
+trade: any recovery mechanism weaker than the credential it recovers *is* the credential, and
+would be the thing actually attacked.
+
+---
+
+*Document version 1.1 — baseline for Milestone 1, with the Milestone 2 addendum.*

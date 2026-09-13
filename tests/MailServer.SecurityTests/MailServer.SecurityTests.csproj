@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Security tests are a separate project rather than a folder in another suite, on purpose.
+    They are the suite that must never be skipped to get a build green, and keeping them
+    separately named makes "did the security tests run?" answerable from CI output alone.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>MailServer.SecurityTests</RootNamespace>
+    <AssemblyName>MailServer.SecurityTests</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MailServer.Domain\MailServer.Domain.csproj" />
+    <ProjectReference Include="..\..\src\MailServer.Application\MailServer.Application.csproj" />
+    <ProjectReference Include="..\..\src\MailServer.Infrastructure\MailServer.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\MailServer.Ipc\MailServer.Ipc.csproj" />
+    <ProjectReference Include="..\..\src\MailServer.Persistence.Sqlite\MailServer.Persistence.Sqlite.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Shouldly" />
+    <PackageReference Include="Microsoft.Extensions.Logging" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Using Include="Shouldly" />
+  </ItemGroup>
+
+</Project>

@@ -33,6 +33,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MailServer.Persistence.Test
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MailServer.Service", "src\MailServer.Service\MailServer.Service.csproj", "{D7869712-EAAC-4C37-92BD-B00FCB2E6473}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MailServer.SecurityTests", "tests\MailServer.SecurityTests\MailServer.SecurityTests.csproj", "{F6E2CD3A-C857-456A-9B7E-F4F1022DCEF7}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -199,6 +201,18 @@ Global
 		{D7869712-EAAC-4C37-92BD-B00FCB2E6473}.Release|x64.Build.0 = Release|Any CPU
 		{D7869712-EAAC-4C37-92BD-B00FCB2E6473}.Release|x86.ActiveCfg = Release|Any CPU
 		{D7869712-EAAC-4C37-92BD-B00FCB2E6473}.Release|x86.Build.0 = Release|Any CPU
+		{F6E2CD3A-C857-456A-9B7E-F4F1022DCEF7}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F6E2CD3A-C857-456A-9B7E-F4F1022DCEF7}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F6E2CD3A-C857-456A-9B7E-F4F1022DCEF7}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{F6E2CD3A-C857-456A-9B7E-F4F1022DCEF7}.Debug|x64.Build.0 = Debug|Any CPU
+		{F6E2CD3A-C857-456A-9B7E-F4F1022DCEF7}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{F6E2CD3A-C857-456A-9B7E-F4F1022DCEF7}.Debug|x86.Build.0 = Debug|Any CPU
+		{F6E2CD3A-C857-456A-9B7E-F4F1022DCEF7}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F6E2CD3A-C857-456A-9B7E-F4F1022DCEF7}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F6E2CD3A-C857-456A-9B7E-F4F1022DCEF7}.Release|x64.ActiveCfg = Release|Any CPU
+		{F6E2CD3A-C857-456A-9B7E-F4F1022DCEF7}.Release|x64.Build.0 = Release|Any CPU
+		{F6E2CD3A-C857-456A-9B7E-F4F1022DCEF7}.Release|x86.ActiveCfg = Release|Any CPU
+		{F6E2CD3A-C857-456A-9B7E-F4F1022DCEF7}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -217,5 +231,6 @@ Global
 		{AA3FF004-415F-4648-8EE8-30EA6F191C05} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{727B56B9-25B8-4B8B-A87D-4FAC992BA780} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{D7869712-EAAC-4C37-92BD-B00FCB2E6473} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{F6E2CD3A-C857-456A-9B7E-F4F1022DCEF7} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 	EndGlobalSection
 EndGlobal

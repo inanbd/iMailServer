@@ -88,6 +88,30 @@ public static class DependencyInjection
 
         services.TryAddScoped<IAuditTrail, AuditTrail>();
 
+        // ---- Security: Milestone 2 -----------------------------------------------------
+        services.TryAddSingleton<ISecuritySettings, SecuritySettings>();
+
+        // Singleton: the hasher computes its dummy verifier once at construction so that
+        // VerifyAgainstDummy costs the same as a real verification without re-hashing a
+        // throwaway password on every unauthenticated attempt.
+        services.TryAddSingleton<IPasswordHasher, Argon2PasswordHasher>();
+        services.TryAddSingleton<IRecoveryKeyGenerator, RecoveryKeyGenerator>();
+
+        // Singleton, and in memory: sessions deliberately do not survive a restart. See
+        // AdminSessionManager for why, and why lockout state is persisted instead.
+        services.TryAddSingleton<IAdminSessionManager, AdminSessionManager>();
+
+        // Scoped: it reads the ambient correlation id so each event joins the operation
+        // that produced it, even though the write itself is out of band.
+        services.TryAddScoped<ISecurityEventRecorder, SecurityEventRecorder>();
+        services.TryAddScoped<ISecretStore, DatabaseSecretStore>();
+
+        services.TryAddScoped<IAdminAccountRepository, AdminAccountRepository>();
+        services.TryAddScoped<ISecurityEventRepository, SecurityEventRepository>();
+
+        services.TryAddScoped<IAuditQueries, AuditQueries>();
+        services.TryAddScoped<ISecurityEventQueries, SecurityEventQueries>();
+
         // ---- Monitoring ----------------------------------------------------------------
         services.TryAddSingleton<IHealthRegistry, HealthRegistry>();
         services.TryAddSingleton<MaintenanceModeAccessor>();

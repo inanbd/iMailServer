@@ -39,7 +39,13 @@ public sealed class AuthorizationBehavior<TRequest, TResponse>(
         RequestHandlerDelegate<TResponse> next,
         CancellationToken cancellationToken)
     {
-        if (request is IAuthorizedRequest authorized)
+        // Four requests are reachable without a session: asking whether setup is required,
+        // completing setup, signing in, and resetting with a recovery key. Everything else
+        // requires an authenticated identity. IpcCommandRegistry cross-checks this marker
+        // against each command's descriptor and refuses to build if they disagree.
+        bool isAnonymous = request is IAnonymousRequest;
+
+        if (request is IAuthorizedRequest authorized && !isAnonymous)
         {
             AdminPermission required = authorized.RequiredPermission;
 
@@ -54,6 +60,23 @@ public sealed class AuthorizationBehavior<TRequest, TResponse>(
                 QueueDenial(request, $"Missing permission {required}.");
                 throw new AuthorizationFailedException(required);
             }
+        }
+
+        // An administrator who reset with a recovery key holds a valid session but has not yet
+        // chosen a password. That session may change the password and sign out, and nothing
+        // else - otherwise a recovery key would be a standing bypass of the password itself.
+        if (!isAnonymous &&
+            adminContext.IsAuthenticated &&
+            adminContext.MustChangePassword &&
+            request is not IAllowedWhenPasswordChangeRequired)
+        {
+            logger.LogWarning(
+                "Refused {RequestName}: {Administrator} must change their password first.",
+                typeof(TRequest).Name,
+                adminContext.Administrator);
+
+            QueueDenial(request, "A password change is outstanding.");
+            throw new PasswordChangeRequiredException();
         }
 
         // A command that mutates state is refused while the server is read-only or in full

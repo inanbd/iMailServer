@@ -46,6 +46,16 @@ public sealed class IpcClient : IAsyncDisposable
     private NamedPipeClientStream? _pipe;
     private bool _disposed;
 
+    /// <summary>
+    /// The current session token, held in memory only.
+    /// </summary>
+    /// <remarks>
+    /// Never written to disk, never to the log, never to a settings file. Persisting it would
+    /// turn a stolen user profile into an authenticated session that outlives the console it
+    /// came from - and the server-side session would still be valid when it was replayed.
+    /// </remarks>
+    private volatile string? _sessionToken;
+
     public IpcClient(IpcClientOptions options, ILogger<IpcClient> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -56,6 +66,28 @@ public sealed class IpcClient : IAsyncDisposable
 
     /// <summary>True when a pipe is currently open.</summary>
     public bool IsConnected => _pipe is { IsConnected: true };
+
+    /// <summary>True when a session token is held.</summary>
+    /// <remarks>
+    /// Says only that the client <i>has</i> a token, not that the server still accepts it. A
+    /// session can expire server-side at any moment; the authoritative answer arrives as an
+    /// <see cref="IpcErrorKind.Unauthenticated"/> response.
+    /// </remarks>
+    public bool HasSession => !string.IsNullOrEmpty(_sessionToken);
+
+    /// <summary>Adopts the token returned by a successful sign-in.</summary>
+    public void SetSessionToken(string? token) => _sessionToken = token;
+
+    /// <summary>
+    /// Discards the held token.
+    /// </summary>
+    /// <remarks>
+    /// Called on sign-out, on lock, and whenever the server reports the session is no longer
+    /// valid. Clearing it locally matters even though the server has already rejected it:
+    /// otherwise every subsequent request would retry a token known to be dead and each would
+    /// be recorded as another invalid-session security event.
+    /// </remarks>
+    public void ClearSessionToken() => _sessionToken = null;
 
     /// <summary>
     /// Sends a command and returns the deserialised result.
@@ -82,14 +114,22 @@ public sealed class IpcClient : IAsyncDisposable
 
             if (!response.Success)
             {
-                throw new IpcRequestException(
-                    response.Error ?? new IpcError
-                    {
-                        Kind = IpcErrorKind.Internal,
-                        Code = "ipc.malformed_error",
-                        Message = "The server reported a failure but supplied no detail.",
-                    },
-                    response.CorrelationId);
+                IpcError error = response.Error ?? new IpcError
+                {
+                    Kind = IpcErrorKind.Internal,
+                    Code = "ipc.malformed_error",
+                    Message = "The server reported a failure but supplied no detail.",
+                };
+
+                // The server has rejected our token. Drop it, so the next request does not
+                // replay a credential known to be dead and generate another invalid-session
+                // security event.
+                if (error.Kind == IpcErrorKind.Unauthenticated)
+                {
+                    ClearSessionToken();
+                }
+
+                throw new IpcRequestException(error, response.CorrelationId);
             }
 
             return IpcFrame.DeserializePayload<TResponse>(response.Payload);
@@ -123,6 +163,11 @@ public sealed class IpcClient : IAsyncDisposable
                     Command = command,
                     Payload = payload,
                     CorrelationId = correlationId,
+
+                    // Sent on every request. The server decides which commands need it; the
+                    // client does not try to guess, because a client that withheld the token
+                    // from a command it believed anonymous would simply fail.
+                    SessionToken = _sessionToken,
                 };
 
                 using CancellationTokenSource timeout = CancellationTokenSource

@@ -35,6 +35,16 @@ public interface IAdminContext
     /// <summary>Permissions held by this identity.</summary>
     AdminPermission Permissions { get; }
 
+    /// <summary>
+    /// True when this identity must change its password before doing anything else.
+    /// </summary>
+    /// <remarks>
+    /// Set after a recovery-key reset. The authorization behavior refuses every request except
+    /// those marked <see cref="Messaging.IAllowedWhenPasswordChangeRequired"/>, so a recovery
+    /// key grants a path back in rather than a standing bypass of the password.
+    /// </remarks>
+    bool MustChangePassword { get; }
+
     /// <summary>True when every bit in <paramref name="permission"/> is held.</summary>
     bool HasPermission(AdminPermission permission);
 }

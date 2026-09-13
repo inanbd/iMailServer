@@ -93,6 +93,12 @@ public partial class App : System.Windows.Application
         });
 
         builder.Services.AddSingleton<INavigationService, NavigationService>();
+        builder.Services.AddSingleton<IIdleMonitor, IdleMonitor>();
+
+        // Singleton: the authentication state is the shell's, and a transient one would lose
+        // the signed-in identity the moment anything re-resolved it.
+        builder.Services.AddSingleton<AuthenticationViewModel>();
+
         builder.Services.AddSingleton<ShellViewModel>();
         builder.Services.AddSingleton<MainWindow>();
 
@@ -100,6 +106,9 @@ public partial class App : System.Windows.Application
         // console showing counts from the last time a page was open is worse than a reload.
         builder.Services.AddTransient<DashboardViewModel>();
         builder.Services.AddTransient<DomainsViewModel>();
+        builder.Services.AddTransient<SecurityViewModel>();
+        builder.Services.AddTransient<AuditLogViewModel>();
+        builder.Services.AddTransient<SecurityEventsViewModel>();
 
         return builder.Build();
     }

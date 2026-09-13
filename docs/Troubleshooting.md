@@ -125,7 +125,38 @@ PRAGMA foreign_keys;   -- must be: 1
 4. Is `Admin:ServerName` correct? `.` is the local machine.
 
 A protocol-mismatch error means the two were built from different versions; upgrade the admin
-application to match the service.
+application to match the service. From protocol version 2 there is no negotiation down to
+version 1: a v1 client expects to administer the server without signing in, so accepting one
+would be a documented authentication bypass.
+
+---
+
+## I am locked out of the administration application
+
+Five consecutive wrong passwords lock the account for 15 minutes. The duration doubles at each
+further multiple of five, to a maximum of eight hours, and the counter resets after an hour
+with no failures. The lock is stored in the database — restarting the service will not clear
+it, by design.
+
+Use the recovery key issued during first-run setup. Its reset path deliberately bypasses the
+lockout, so that being locked out does not also close your way back in. The key is single-use:
+a successful reset consumes it, issues a replacement, and requires you to choose a new password
+before anything else becomes reachable.
+
+If the recovery key is also lost, there is no way in. That is the design, not an oversight — see
+`docs/Security.md`.
+
+---
+
+## I signed in, but every action is refused
+
+If the sign-in reported `MustChangePassword` — which a recovery-key reset always sets — the
+session can do exactly two things: change the password, and sign out. Everything else is
+refused until the password has been changed.
+
+A session also expires two ways: after 20 minutes idle, and after 12 hours regardless of
+activity. Sessions are held in memory only, so restarting the service signs everyone out.
+Lockout state, by contrast, is persisted; the asymmetry is intentional.
 
 ---
 

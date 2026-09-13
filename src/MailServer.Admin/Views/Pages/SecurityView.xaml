@@ -1,0 +1,151 @@
+<UserControl x:Class="MailServer.Admin.Views.Pages.SecurityView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="clr-namespace:MailServer.Admin.ViewModels"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=vm:SecurityViewModel}">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="16">
+        <StackPanel>
+
+            <TextBlock Text="Security" Style="{StaticResource PageTitle}" />
+            <TextBlock Style="{StaticResource Caption}"
+                       Text="Administrator credentials, active sessions, and the protection applied to stored secrets." />
+
+            <Border Style="{StaticResource ErrorBanner}" Margin="0,12,0,0"
+                    Visibility="{Binding ErrorMessage, Converter={StaticResource StringToVisibility}}">
+                <TextBlock Text="{Binding ErrorMessage}" TextWrapping="Wrap" />
+            </Border>
+
+            <!-- Conditions worth acting on, shown before anything else. -->
+            <Border Background="#FFFDE7E9" BorderBrush="{StaticResource State.Critical}"
+                    BorderThickness="1" Padding="10" Margin="0,12,0,0"
+                    Visibility="{Binding HasSecretProtectionWarning, Converter={StaticResource BoolToVisibility}}">
+                <TextBlock TextWrapping="Wrap">
+                    <Run Text="Secrets are protected with the " />
+                    <Run Text="{Binding Status.SecretProtectionScheme, Mode=OneWay}" FontWeight="SemiBold" />
+                    <Run Text=" scheme, which stores its key on disk beside the data it protects. This is not suitable for production. Set MailServer:Security:SecretProtection to 'Dpapi' on Windows Server." />
+                </TextBlock>
+            </Border>
+
+            <Border Background="#FFFFF4CE" BorderBrush="{StaticResource State.Warning}"
+                    BorderThickness="1" Padding="10" Margin="0,8,0,0"
+                    Visibility="{Binding HasNoRecoveryKey, Converter={StaticResource BoolToVisibility}}">
+                <TextBlock TextWrapping="Wrap"
+                           Text="No recovery key is available. If the master password is lost, this server cannot be recovered. A new key is issued automatically the next time the password is reset." />
+            </Border>
+
+            <!-- Posture -->
+            <TextBlock Text="Administrator" Style="{StaticResource SectionHeader}" />
+            <WrapPanel>
+                <Border Style="{StaticResource Card}" Width="230">
+                    <StackPanel>
+                        <TextBlock Text="{Binding Status.Administrator, FallbackValue=-}"
+                                   FontSize="16" FontWeight="SemiBold" />
+                        <TextBlock Text="Account" Style="{StaticResource Caption}" />
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource Card}" Width="230">
+                    <StackPanel>
+                        <TextBlock FontSize="16" FontWeight="SemiBold"
+                                   Text="{Binding Status.LastSignInUtc, StringFormat=yyyy-MM-dd HH:mm, FallbackValue=Never}" />
+                        <TextBlock Text="Last sign-in (UTC)" Style="{StaticResource Caption}" />
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource Card}" Width="230">
+                    <StackPanel>
+                        <TextBlock FontSize="16" FontWeight="SemiBold"
+                                   Text="{Binding Status.PasswordChangedUtc, StringFormat=yyyy-MM-dd HH:mm, FallbackValue=-}" />
+                        <TextBlock Text="Password last changed (UTC)" Style="{StaticResource Caption}" />
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource Card}" Width="180">
+                    <StackPanel>
+                        <TextBlock Text="{Binding Status.FailedAttemptsInLastDay, FallbackValue=0}"
+                                   Style="{StaticResource MetricValue}" />
+                        <TextBlock Text="Failed attempts (24h)" Style="{StaticResource Caption}" />
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource Card}" Width="180">
+                    <StackPanel>
+                        <TextBlock Text="{Binding Status.ActiveSessionCount, FallbackValue=0}"
+                                   Style="{StaticResource MetricValue}" />
+                        <TextBlock Text="Active sessions" Style="{StaticResource Caption}" />
+                    </StackPanel>
+                </Border>
+            </WrapPanel>
+
+            <TextBlock Text="Cryptography" Style="{StaticResource SectionHeader}" />
+            <Border Style="{StaticResource Card}">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource Caption}">
+                        <Run Text="Password hashing: " />
+                        <Run Text="{Binding Status.PasswordHashingDescription, Mode=OneWay, FallbackValue=-}"
+                             FontFamily="Consolas" />
+                    </TextBlock>
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,4,0,0">
+                        <Run Text="Secret protection: " />
+                        <Run Text="{Binding Status.SecretProtectionScheme, Mode=OneWay, FallbackValue=-}"
+                             FontFamily="Consolas" />
+                    </TextBlock>
+                </StackPanel>
+            </Border>
+
+            <!-- Sessions -->
+            <TextBlock Text="Active sessions" Style="{StaticResource SectionHeader}" />
+            <DataGrid ItemsSource="{Binding Sessions}"
+                      SelectedItem="{Binding SelectedSession, Mode=TwoWay}"
+                      MaxHeight="220">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Administrator" Binding="{Binding Administrator}" Width="180" />
+                    <DataGridTextColumn Header="Origin" Binding="{Binding Origin}" Width="220" />
+                    <DataGridTextColumn Header="Signed in (UTC)"
+                                        Binding="{Binding CreatedUtc, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="150" />
+                    <DataGridTextColumn Header="Last activity (UTC)"
+                                        Binding="{Binding LastActivityUtc, StringFormat=HH:mm:ss}" Width="130" />
+                    <DataGridCheckBoxColumn Header="This session" Binding="{Binding IsCurrent}" Width="*" />
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                <Button Content="Refresh" Command="{Binding RefreshCommand}" />
+                <Button Content="Revoke session" Command="{Binding RevokeSessionCommand}" MinWidth="140" />
+                <TextBlock Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="10,0,0,0"
+                           Text="Sessions end after the configured idle period and do not survive a service restart." />
+            </StackPanel>
+
+            <!-- Password change -->
+            <TextBlock Text="Change master password" Style="{StaticResource SectionHeader}" />
+            <Border Style="{StaticResource Card}" HorizontalAlignment="Left" Width="460">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,10"
+                               Text="Changing the password revokes every session by default, including this one. Leave that on if the change is a response to a suspected compromise." />
+
+                    <TextBlock Text="Current password" Style="{StaticResource Caption}" />
+                    <PasswordBox x:Name="CurrentPassword" Margin="0,2,0,8" Padding="4,4" />
+
+                    <TextBlock Text="New password" Style="{StaticResource Caption}" />
+                    <PasswordBox x:Name="NewPassword" Margin="0,2,0,8" Padding="4,4" />
+
+                    <TextBlock Text="Confirm new password" Style="{StaticResource Caption}" />
+                    <PasswordBox x:Name="ConfirmPassword" Margin="0,2,0,10" Padding="4,4" />
+
+                    <CheckBox x:Name="KeepOtherSessions" Margin="0,0,0,10"
+                              Content="Keep other sessions signed in" />
+
+                    <Button Content="Change password" Click="OnChangePassword"
+                            HorizontalAlignment="Left" MinWidth="150"
+                            IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,10,0,0" TextWrapping="Wrap"
+                               Foreground="{StaticResource State.Healthy}"
+                               Text="{Binding PasswordChangeMessage}"
+                               Visibility="{Binding PasswordChangeMessage, Converter={StaticResource StringToVisibility}}" />
+                </StackPanel>
+            </Border>
+
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

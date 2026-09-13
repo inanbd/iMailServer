@@ -1,5 +1,8 @@
 using MailServer.Application.Common;
 using MailServer.Application.Domains.Commands;
+using MailServer.Application.Security.Commands;
+using MailServer.Application.Security.Dtos;
+using MailServer.Application.Security.Queries;
 using MailServer.Application.Domains.Dtos;
 using MailServer.Application.Domains.Queries;
 using MailServer.Application.Monitoring.Dtos;
@@ -23,6 +26,66 @@ namespace MailServer.Ipc.Client;
 /// </remarks>
 public interface IAdminGateway
 {
+    // ---- Security ------------------------------------------------------------------------
+
+    /// <summary>True when a session token is held locally.</summary>
+    bool HasSession { get; }
+
+    /// <summary>Asks whether setup is required. The one call permitted before signing in.</summary>
+    Task<SetupStatusDto> GetSetupStatusAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Completes first-run setup and signs in.
+    /// </summary>
+    /// <remarks>
+    /// The returned recovery key is the only time it exists in plaintext outside the
+    /// administrator's head. The caller must display it before the result goes out of scope.
+    /// </remarks>
+    Task<SetupResultDto> CompleteSetupAsync(
+        string password,
+        string confirmPassword,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Signs in and adopts the resulting session.</summary>
+    Task<AuthenticationResultDto> AuthenticateAsync(
+        string password,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Resets the master password using the recovery key, returning a replacement key.</summary>
+    Task<RecoveryKeyDto> ResetPasswordWithRecoveryKeyAsync(
+        string recoveryKey,
+        string newPassword,
+        string confirmNewPassword,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Ends the session, locally and on the server.</summary>
+    Task SignOutAsync(bool isAutoLock = false, CancellationToken cancellationToken = default);
+
+    /// <summary>Changes the master password.</summary>
+    Task ChangeMasterPasswordAsync(
+        string currentPassword,
+        string newPassword,
+        string confirmNewPassword,
+        bool keepOtherSessions = false,
+        CancellationToken cancellationToken = default);
+
+    Task<SecurityStatusDto> GetSecurityStatusAsync(CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<AdminSessionDto>> GetActiveSessionsAsync(
+        CancellationToken cancellationToken = default);
+
+    Task RevokeSessionAsync(Guid sessionId, CancellationToken cancellationToken = default);
+
+    Task<PagedResult<AuditRecordDto>> GetAuditLogAsync(
+        GetAuditLogQuery query,
+        CancellationToken cancellationToken = default);
+
+    Task<PagedResult<SecurityEventDto>> GetSecurityEventsAsync(
+        GetSecurityEventsQuery query,
+        CancellationToken cancellationToken = default);
+
+    // ---- Monitoring and domains ------------------------------------------------------------
+
     Task<DashboardDto> GetDashboardAsync(CancellationToken cancellationToken = default);
 
     Task<PagedResult<DomainSummaryDto>> GetDomainsAsync(
@@ -48,6 +111,211 @@ public interface IAdminGateway
 /// <summary>Implements <see cref="IAdminGateway"/> over <see cref="IpcClient"/>.</summary>
 public sealed class AdminGateway(IpcClient client) : IAdminGateway
 {
+    public bool HasSession => client.HasSession;
+
+    public async Task<SetupStatusDto> GetSetupStatusAsync(
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetSetupStatusQuery, SetupStatusDto>(
+                "Security.SetupStatus",
+                new GetSetupStatusQuery(),
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException("The service returned an empty setup status.");
+
+    public async Task<SetupResultDto> CompleteSetupAsync(
+        string password,
+        string confirmPassword,
+        CancellationToken cancellationToken = default)
+    {
+        SetupResultDto result = await client
+            .SendAsync<CompleteSetupCommand, SetupResultDto>(
+                "Security.CompleteSetup",
+                new CompleteSetupCommand
+                {
+                    Password = password,
+                    ConfirmPassword = confirmPassword,
+                    Origin = DescribeOrigin(),
+                },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+            ?? throw new InvalidOperationException("The service returned an empty setup result.");
+
+        // Setup signs the administrator in, so adopt the session immediately.
+        client.SetSessionToken(result.Authentication.SessionToken);
+
+        return result;
+    }
+
+    public async Task<AuthenticationResultDto> AuthenticateAsync(
+        string password,
+        CancellationToken cancellationToken = default)
+    {
+        // Any previous token is discarded first. Retrying a sign-in while holding a dead token
+        // would attach it to the request and generate a spurious invalid-session event.
+        client.ClearSessionToken();
+
+        AuthenticationResultDto result = await client
+            .SendAsync<AuthenticateCommand, AuthenticationResultDto>(
+                "Security.Authenticate",
+                new AuthenticateCommand { Password = password, Origin = DescribeOrigin() },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+            ?? throw new InvalidOperationException("The service returned an empty sign-in result.");
+
+        client.SetSessionToken(result.SessionToken);
+
+        return result;
+    }
+
+    public async Task<RecoveryKeyDto> ResetPasswordWithRecoveryKeyAsync(
+        string recoveryKey,
+        string newPassword,
+        string confirmNewPassword,
+        CancellationToken cancellationToken = default)
+    {
+        client.ClearSessionToken();
+
+        return await client
+            .SendAsync<ResetPasswordWithRecoveryKeyCommand, RecoveryKeyDto>(
+                "Security.ResetPasswordWithRecoveryKey",
+                new ResetPasswordWithRecoveryKeyCommand
+                {
+                    RecoveryKey = recoveryKey,
+                    NewPassword = newPassword,
+                    ConfirmNewPassword = confirmNewPassword,
+                    Origin = DescribeOrigin(),
+                },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+            ?? throw new InvalidOperationException("The service returned an empty recovery result.");
+    }
+
+    public async Task SignOutAsync(
+        bool isAutoLock = false,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await client
+                .SendAsync<SignOutCommand, Unit>(
+                    "Security.SignOut",
+                    new SignOutCommand { IsAutoLock = isAutoLock },
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (IpcRequestException)
+        {
+            // The session may already be gone - that is exactly when sign-out is most likely
+            // to be called. Failing to tell the server about a session it has already forgotten
+            // must not stop the console from locking locally.
+        }
+        finally
+        {
+            client.ClearSessionToken();
+        }
+    }
+
+    public async Task ChangeMasterPasswordAsync(
+        string currentPassword,
+        string newPassword,
+        string confirmNewPassword,
+        bool keepOtherSessions = false,
+        CancellationToken cancellationToken = default)
+    {
+        await client
+            .SendAsync<ChangeMasterPasswordCommand, Unit>(
+                "Security.ChangeMasterPassword",
+                new ChangeMasterPasswordCommand
+                {
+                    CurrentPassword = currentPassword,
+                    NewPassword = newPassword,
+                    ConfirmNewPassword = confirmNewPassword,
+                    KeepOtherSessions = keepOtherSessions,
+                },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!keepOtherSessions)
+        {
+            // The server revoked every session including this one. Drop the token so the UI
+            // returns to the sign-in screen rather than discovering it one request later.
+            client.ClearSessionToken();
+        }
+    }
+
+    public async Task<SecurityStatusDto> GetSecurityStatusAsync(
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetSecurityStatusQuery, SecurityStatusDto>(
+                "Security.Status",
+                new GetSecurityStatusQuery(),
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException("The service returned an empty security status.");
+
+    public async Task<IReadOnlyList<AdminSessionDto>> GetActiveSessionsAsync(
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetActiveSessionsQuery, IReadOnlyList<AdminSessionDto>>(
+                "Security.Sessions",
+                new GetActiveSessionsQuery(),
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? [];
+
+    public async Task RevokeSessionAsync(
+        Guid sessionId,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<RevokeSessionCommand, Unit>(
+                "Security.RevokeSession",
+                new RevokeSessionCommand { SessionId = sessionId },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+    public async Task<PagedResult<AuditRecordDto>> GetAuditLogAsync(
+        GetAuditLogQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+
+        return await client
+            .SendAsync<GetAuditLogQuery, PagedResult<AuditRecordDto>>(
+                "Security.AuditLog",
+                query,
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+            ?? PagedResult<AuditRecordDto>.Empty(query.PageSize);
+    }
+
+    public async Task<PagedResult<SecurityEventDto>> GetSecurityEventsAsync(
+        GetSecurityEventsQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+
+        return await client
+            .SendAsync<GetSecurityEventsQuery, PagedResult<SecurityEventDto>>(
+                "Security.Events",
+                query,
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+            ?? PagedResult<SecurityEventDto>.Empty(query.PageSize);
+    }
+
+    /// <summary>
+    /// Describes where this console is running, for the security event log.
+    /// </summary>
+    /// <remarks>
+    /// Client-supplied and therefore untrusted — the server truncates it and never treats it as
+    /// an identity. It is a convenience for reading the log ("which machine was that from?"),
+    /// not an authentication factor. The authoritative origin is the Windows identity the
+    /// server reads from the pipe itself.
+    /// </remarks>
+    private static string DescribeOrigin() =>
+        $"{Environment.UserName}@{Environment.MachineName}";
+
     public async Task<DashboardDto> GetDashboardAsync(CancellationToken cancellationToken = default) =>
         await client
             .SendAsync<GetDashboardQuery, DashboardDto>(

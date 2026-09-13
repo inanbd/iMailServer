@@ -6,8 +6,9 @@ This is a complete mail platform — SMTP receipt, authenticated submission, dir
 delivery, IMAP access, DKIM/SPF/DMARC, automatic TLS certificates and deliverability
 diagnostics — not an SMTP sending utility.
 
-> **Status: Milestone 1 of 13 complete.** The foundation is built, compiles with warnings as
-> errors, and is covered by 277 passing tests. It does not yet send or receive mail; see
+> **Status: Milestone 2 of 13 complete.** The foundation and the security layer are built,
+> compile with warnings as errors, and are covered by 392 passing tests. It does not yet send
+> or receive mail; see
 > [Roadmap](#roadmap) for what lands when, and `docs/Standards.md` for exactly which standards
 > are implemented versus planned. Nothing is described as working until it has tests.
 
@@ -25,7 +26,11 @@ diagnostics — not an SMTP sending utility.
 | Migration runner (checksums, advisory lock, fail-safe) | Built and tested |
 | Secure named-pipe IPC (framed, ACL'd, allow-listed commands) | Built and tested end to end |
 | Windows Service host with startup gates and resilient workers | Built; starts, migrates, serves IPC |
-| WPF administration application | Built; dashboard and domain management over IPC |
+| WPF administration application | Built; setup wizard, lock screen, dashboard and domain management over IPC |
+| Administrator authentication (Argon2id, lockout, recovery key) | Built and tested end to end |
+| Session-based IPC authorization (protocol v2) | Built; enforcement driven from the command registry by tests |
+| DPAPI-backed secret store | Built and tested; DPAPI path needs Windows CI |
+| Audit trail and security event log | Built and tested |
 | SMTP, IMAP, POP3, DKIM, ACME, queue, filtering | **Not yet built** — milestones 4–12 |
 
 ---
@@ -143,6 +148,20 @@ dotnet run          # Windows only at runtime
 It requires elevation: the pipe's ACL admits only the local Administrators group and the
 service account, so an unelevated process cannot connect at all.
 
+#### First run
+
+The server ships with **no account and no default password**. On first connection the
+application shows a setup wizard that creates the single built-in administrator, then displays
+a recovery key **once**.
+
+Write the recovery key down before continuing. It cannot be shown again, it is stored only as
+an Argon2id hash, and there is no other way back in — no support backdoor and no "delete a file
+to reset". That is deliberate: any recovery path weaker than the credential it recovers becomes
+the real credential. If both the password and the key are lost, the database must be recreated.
+
+After setup, every subsequent launch asks for the master password. Being a local administrator
+is no longer sufficient to administer the server; see [Security.md](docs/Security.md).
+
 ---
 
 ## Repository layout
@@ -167,8 +186,9 @@ tests/
   MailServer.Domain.Tests/           #  99 tests
   MailServer.Application.Tests/      #  50 tests
   MailServer.Infrastructure.Tests/   #  49 tests
-  MailServer.Ipc.Tests/              #  42 tests (10 end-to-end over a real pipe)
+  MailServer.Ipc.Tests/              #  77 tests (end to end over a real pipe, incl. session enforcement)
   MailServer.Persistence.Tests/      #  37 tests (against real SQLite)
+  MailServer.SecurityTests/          #  80 tests (real Argon2, real SQLite, real pipeline)
 ```
 
 Projects for milestones 4–13 are created **in** those milestones. A solution full of empty
@@ -186,7 +206,7 @@ assemblies looks finished and provides no compile-time value.
 | [Persistence.md](docs/Persistence.md) | Repositories, transactions, migrations |
 | [Sqlite.md](docs/Sqlite.md) | WAL, write serialisation, when to move to SQL Server |
 | [SqlServer.md](docs/SqlServer.md) | Isolation, queue patterns, backups |
-| [Security.md](docs/Security.md) | Threat model and defence-in-depth layers |
+| [Security.md](docs/Security.md) | Threat model, authentication, sessions, audit |
 | [Standards.md](docs/Standards.md) | Every standard, with an honest Implemented/Partial/Planned status |
 | [Installation.md](docs/Installation.md) | Installing and configuring |
 | [Troubleshooting.md](docs/Troubleshooting.md) | Port 25, DNS, certificates, reputation |
@@ -204,8 +224,8 @@ assemblies looks finished and provides no compile-time value.
 | # | Milestone | Status |
 |---|---|---|
 | 1 | Core Foundation | **Complete** |
-| 2 | Security & Administration (Argon2id, DPAPI store, audit) | Next |
-| 3 | Certificate Infrastructure | Planned |
+| 2 | Security & Administration (Argon2id, DPAPI store, audit) | **Complete** |
+| 3 | Certificate Infrastructure | Next |
 | 4 | ACME / Let's Encrypt | Planned |
 | 5 | Domain Administration (mailboxes, aliases, quotas) | Planned |
 | 6 | SMTP Inbound + relay protection | Planned |

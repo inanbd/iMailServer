@@ -128,6 +128,7 @@ public static class Program
         // milestones add their listeners and processors after this line, never before it.
         builder.Services.AddHostedService<DatabaseBootstrapService>();
         builder.Services.AddHostedService<ServiceHealthMonitor>();
+        builder.Services.AddHostedService<SecurityMaintenanceService>();
 
         return builder.Build();
     }

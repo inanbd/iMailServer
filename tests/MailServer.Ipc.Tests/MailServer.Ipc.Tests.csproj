@@ -12,6 +12,9 @@
     <ProjectReference Include="..\..\src\MailServer.Domain\MailServer.Domain.csproj" />
     <ProjectReference Include="..\..\src\MailServer.Application\MailServer.Application.csproj" />
     <ProjectReference Include="..\..\src\MailServer.Ipc\MailServer.Ipc.csproj" />
+    <!-- The end-to-end tests drive the real session manager, because the property under
+         test is that the dispatcher refuses requests without a valid session token. -->
+    <ProjectReference Include="..\..\src\MailServer.Infrastructure\MailServer.Infrastructure.csproj" />
   </ItemGroup>
 
   <ItemGroup>

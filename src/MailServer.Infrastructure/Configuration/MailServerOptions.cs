@@ -208,12 +208,62 @@ public sealed class SecurityOptions
     [Range(1, 100)]
     public int AdminLockoutThreshold { get; set; } = 5;
 
+    /// <summary>
+    /// Duration of the first lockout. Subsequent lockouts double, up to
+    /// <see cref="AdminLockoutMaximumMinutes"/>.
+    /// </summary>
     [Range(1, 1_440)]
     public int AdminLockoutMinutes { get; set; } = 15;
 
-    /// <summary>Idle minutes before the admin application locks itself.</summary>
+    /// <summary>Ceiling on the escalated lockout duration.</summary>
+    [Range(1, 10_080)]
+    public int AdminLockoutMaximumMinutes { get; set; } = 480;
+
+    /// <summary>Idle period after which the failure counter resets.</summary>
+    [Range(1, 10_080)]
+    public int AdminLockoutCounterResetMinutes { get; set; } = 60;
+
+    /// <summary>
+    /// Idle minutes before an administrative session ends and the console locks.
+    /// </summary>
+    /// <remarks>
+    /// Enforced server-side on the session, not merely by a client-side timer. A client that
+    /// simply declined to lock itself would otherwise keep a session alive indefinitely.
+    /// </remarks>
     [Range(1, 1_440)]
     public int AutoLockMinutes { get; set; } = 10;
+
+    /// <summary>
+    /// Hard lifetime of a session regardless of activity.
+    /// </summary>
+    /// <remarks>
+    /// A sliding idle window alone means a console left open on an unattended desktop, with
+    /// something periodically refreshing it, stays authenticated forever.
+    /// </remarks>
+    [Range(1, 168)]
+    public int SessionMaximumHours { get; set; } = 12;
+
+    /// <summary>Minimum acceptable master password length.</summary>
+    [Range(8, 128)]
+    public int MinimumPasswordLength { get; set; } = 12;
+
+    /// <summary>
+    /// Argon2id memory cost in kibibytes. 65536 is 64 MiB, per RFC 9106.
+    /// </summary>
+    /// <remarks>
+    /// The memory cost is what makes parallel GPU cracking expensive. Lowering it to speed up
+    /// sign-in trades away the main thing Argon2 provides over PBKDF2.
+    /// </remarks>
+    [Range(8_192, 1_048_576)]
+    public int Argon2MemoryKib { get; set; } = 65_536;
+
+    /// <summary>Argon2id time cost: number of passes.</summary>
+    [Range(1, 20)]
+    public int Argon2Iterations { get; set; } = 3;
+
+    /// <summary>Argon2id degree of parallelism (lanes).</summary>
+    [Range(1, 16)]
+    public int Argon2Parallelism { get; set; } = 2;
 }
 
 /// <summary>Available secret-protection schemes.</summary>

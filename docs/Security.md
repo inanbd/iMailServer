@@ -146,17 +146,192 @@ protected secret unrecoverable, so a corrupt file refuses startup with an explan
 
 ---
 
-## Passwords (Milestone 2)
+## Administrator authentication
 
-Argon2id, via `Konscious.Security.Cryptography.Argon2`. The BCL has no Argon2, and PBKDF2 is
-materially weaker against GPU attack.
+Milestone 2 replaces "whoever can open the pipe is an administrator" with an explicit
+credential. This is the change that makes the rest of the product defensible: before it, any
+process running as a local administrator could drive the service.
 
-Stored separately from the mailbox record: hash, salt, algorithm, work factor, created
-timestamp. Never encrypted for reversible storage — anything that goes through
-`ISecretProtector` is something the server must read back, and a password is not.
+### First-run setup
 
-Validation is constant-time. Failures produce a generic message regardless of whether the
-account exists, because a distinguishable "no such user" is a username-enumeration oracle.
+The server ships with no account and no default password. `Security.SetupStatus` reports
+`RequiresSetup`, the administration application shows the setup wizard, and
+`Security.CompleteSetup` creates the single built-in administrator.
+
+`CompleteSetup` refuses outright once an account exists. Without that refusal it would be a
+remote "seize this server" endpoint, since it is reachable without a session.
+
+Setup returns a **recovery key** exactly once. It is shown, it is not stored in plaintext, and
+it cannot be re-displayed. See [Recovery](#recovery) below.
+
+### Password storage
+
+Argon2id (RFC 9106), via `Konscious.Security.Cryptography.Argon2`. The BCL has no Argon2, and
+PBKDF2 is materially weaker against GPU attack.
+
+Defaults are 64 MiB of memory, 3 passes, 2 lanes. They are configurable upward, and the stored
+verifier is self-describing:
+
+```
+$argon2id$v=19$m=65536,t=3,p=2$<salt>$<digest>
+```
+
+Because the work factors travel with the hash, raising them does not invalidate existing
+passwords. `Verify` reports `NeedsRehash`, and the handler re-hashes at the one moment the
+plaintext is legitimately available — immediately after a successful sign-in.
+
+Passwords are never encrypted for reversible storage. Anything passed to `ISecretProtector` is
+something the server must read back; a password is not.
+
+`PasswordHash.ToString()` deliberately omits the digest, so an accidentally logged or
+serialised value yields `argon2id (m=65536,t=3,p=2)` and nothing else.
+
+### Password policy
+
+Minimum 12 characters, maximum 256, and a short list of forbidden values. There are
+deliberately **no composition rules** — no "one uppercase, one digit, one symbol". NIST
+SP 800-63B withdrew that guidance because it reliably produces `Password1!` while blocking
+genuinely strong passphrases. Length and a blocklist are what remain effective.
+
+The maximum exists because Argon2 cost is not bounded by input length and a megabyte-long
+password is a cheap way to make the server work hard.
+
+### Failure handling
+
+Every authentication failure returns the same message — "The master password is not correct." —
+whether the account does not exist, the password is wrong, or the stored verifier is corrupt.
+Distinguishable messages are an enumeration oracle.
+
+Timing is equalised as well as wording:
+
+- No account: `VerifyAgainstDummy` spends the full Argon2 cost against a built-in verifier, so
+  "not set up" and "wrong password" cannot be told apart by how long the call took.
+- An **empty** candidate also spends the full cost. Konscious throws on empty password bytes,
+  and an exception has both a different shape and a different duration from an ordinary
+  failure — which would reopen the oracle the rest of this design closes.
+
+A test asserts the ratio between the two timings stays inside a 0.2–5.0 band. It is a coarse
+bound on purpose: a tight one would flake on a shared build agent, and a coarse one still
+catches the failure that matters, which is a whole Argon2 computation being skipped.
+
+### Lockout
+
+Consecutive failures are counted in the database, not in memory, because lockout that resets on
+service restart is no lockout at all. After five failures the account locks for 15 minutes, and
+the duration doubles at each further multiple of the threshold up to a cap of 8 hours. The
+counter resets after an hour without a failure, so an administrator who mistypes twice a month
+never accumulates a lockout.
+
+Lockout is checked **before** the password is verified, so a locked-out attacker cannot keep
+the server doing Argon2 work. That makes a locked-out attempt observably faster, which is
+acceptable: lockout state is not a secret, and `Security.SetupStatus` reports it so the sign-in
+screen can show a countdown rather than a bare rejection.
+
+> **`AuthenticateCommand` is deliberately not transactional, and this is a security property.**
+> A failed attempt increments the persisted counter and then throws, and `TransactionBehavior`
+> rolls back on exception — so a transaction here would discard the very increment that drives
+> lockout. Brute-force protection would be silently inert while appearing entirely correct in
+> configuration and in the logs. This was a real defect in development, caught by the tests in
+> `MailServer.SecurityTests`, and there is now a structural test asserting the marker interface
+> is absent.
+
+### Recovery
+
+The recovery key is 25 characters of Crockford base32 — `I`, `L`, `O` and `U` are excluded, so
+it can be read aloud and transcribed without ambiguity — giving 125 bits of entropy. It is
+stored Argon2id-hashed, exactly like a password.
+
+`Security.ResetPasswordWithRecoveryKey` is reachable without a session, which it must be, and
+is safe for that reason: 125 bits is not guessable. It deliberately **bypasses lockout**,
+because an attacker who can trigger lockout should not thereby be able to lock the legitimate
+administrator out of their own recovery path.
+
+The key is single-use. A successful reset consumes it, issues a replacement, and sets
+`MustChangePassword` so the next sign-in must choose a new password before anything else is
+reachable.
+
+There is no other recovery path. No support backdoor, no "reset by deleting a file". If the key
+and the password are both lost, the database must be recreated — which is the correct trade,
+because any recovery mechanism weaker than the credential it recovers becomes the real
+credential.
+
+---
+
+## Sessions
+
+A successful sign-in issues a 256-bit random token. The client holds it in memory; the server
+stores only its SHA-256 hash, so a memory dump of the service or a stray log line does not yield
+a usable token.
+
+**Sessions live in memory only and do not survive a service restart.** That is the intended
+behaviour: a restart is the one moment when "sign in again" is both cheap and unambiguous, and
+persisted sessions would be one more thing a database copy could steal. Lockout state, by
+contrast, *is* persisted — the asymmetry is deliberate. Restarting must never clear a lockout,
+and it must never preserve a session.
+
+Two independent timeouts apply. An idle timeout (default 20 minutes) slides on each validated
+request; an absolute timeout (default 12 hours) does not. The idle timer is what the WPF
+`IdleMonitor` mirrors locally so the UI locks itself before the server would refuse it.
+
+At most 128 concurrent sessions are held, with least-recently-used eviction. The bound exists so
+a client in a reconnect loop cannot grow the table without limit.
+
+Every session-bearing operation runs under the identity the *session* carries. The Windows
+identity of the calling process no longer confers any permission — `ResolveCaller` returns
+`AdminPermission.None` — so the pipe ACL is now defence in depth rather than the authorisation
+mechanism.
+
+### IPC protocol version 2
+
+Version 2 adds a per-request `SessionToken` and refuses version 1 outright, because a v1 client
+is by definition one that expects to administer the server without signing in.
+
+Exactly four commands are reachable without a session, and the registry enforces agreement
+between the descriptor's `RequiresSession` flag and the request type's `IAnonymousRequest`
+marker **in both directions** — a mismatch throws at construction, in the service's first second
+of life:
+
+| Command | Why it is safe without a session |
+|---|---|
+| `Security.SetupStatus` | Reveals only whether setup is needed and whether sign-in is locked out — both required to draw the right screen |
+| `Security.CompleteSetup` | Refuses once an account exists |
+| `Security.Authenticate` | Is the sign-in itself |
+| `Security.ResetPasswordWithRecoveryKey` | Gated by 125 bits of entropy |
+
+Every other command is refused with `Unauthenticated` before its payload is deserialised. The
+refusal is identical whether the token is missing, forged, expired or revoked; the real reason
+goes to the service log, where an attacker cannot read it. `MailServer.Ipc.Tests` drives this
+from the registry itself, so a command added in a later milestone is covered the moment it is
+registered.
+
+When `MustChangePassword` is set, `AuthorizationBehavior` refuses every request except the ones
+marked `IAllowedWhenPasswordChangeRequired`. A session that must change its password can change
+it and sign out, and nothing else.
+
+---
+
+## Audit and security events
+
+Two logs, deliberately separate, because they answer different questions and need opposite
+consistency guarantees.
+
+**The audit trail** records what an administrator changed. It joins the request's transaction,
+so an audit record and the change it describes commit or roll back together. There is no state
+in which the audit trail describes a change that did not happen.
+
+**The security event log** records authentication and session activity. It must survive the
+rollback of the thing it describes — a failed sign-in is precisely the case where the operation
+is rejected but the record must persist. Events are therefore buffered during the request and
+flushed from `UnhandledExceptionBehavior`'s `finally`, which runs after commit or rollback.
+
+That buffering is not stylistic. Writing security events on a second connection while the
+request's write transaction was open deadlocked against SQLite's single-writer lock: each event
+stalled for the full busy timeout and was then silently dropped. The suite went from seconds to
+five and a half minutes and four tests failed, which is how it was found.
+
+Neither log ever contains a secret value. `IAuditTrail` records the *fact* of a password change,
+never the password; `SecurityEvent` descriptions are written by the handler, never interpolated
+from request payloads.
 
 ---
 

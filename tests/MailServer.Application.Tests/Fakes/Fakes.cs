@@ -118,7 +118,8 @@ public sealed class FakeAuditTrail : IAuditTrail
 /// <summary>An admin identity whose permissions a test can dial up or down.</summary>
 public sealed class FakeAdminContext(
     AdminPermission permissions = AdminPermission.FullControl,
-    bool isAuthenticated = true) : IAdminContext
+    bool isAuthenticated = true,
+    bool mustChangePassword = false) : IAdminContext
 {
     public string Administrator => "test-administrator";
 
@@ -129,6 +130,12 @@ public sealed class FakeAdminContext(
     public bool IsAuthenticated { get; } = isAuthenticated;
 
     public AdminPermission Permissions { get; } = permissions;
+
+    /// <summary>
+    /// Set by the recovery-key reset path. While true, the authorization behavior must refuse
+    /// everything except changing the password and signing out.
+    /// </summary>
+    public bool MustChangePassword { get; } = mustChangePassword;
 
     public bool HasPermission(AdminPermission permission) =>
         IsAuthenticated && (Permissions & permission) == permission;

@@ -94,7 +94,7 @@ Status values:
 
 ## Implemented in Milestone 1
 
-These are the only entries currently backed by tests.
+These, and the Milestone 2 entries below, are the only entries currently backed by tests.
 
 | Capability | Evidence |
 |---|---|
@@ -106,6 +106,21 @@ These are the only entries currently backed by tests.
 | IPC framing and command allow-list | `IpcFrameTests`, `IpcCommandRegistryTests` — 23 tests including oversized-length rejection before allocation |
 | IPC end to end | `IpcEndToEndTests` — 10 tests over a real named pipe with the real pipeline |
 | Clean Architecture dependency rule | `ArchitectureTests` — fails the build if `MailServer.Domain` references anything but the BCL |
+
+---
+
+## Implemented in Milestone 2
+
+| Capability | Standard | Evidence |
+|---|---|---|
+| Argon2id password hashing | RFC 9106 | `PasswordHashingTests` — 16 tests including PHC round-trip, work-factor upgrade detection, and a timing bound proving a missing account and an empty candidate both spend the full cost |
+| Password policy | NIST SP 800-63B (length and blocklist, no composition rules) | `PasswordHashingTests`, `PasswordPolicyTests` |
+| Escalating lockout | — | `LockoutAndBruteForceTests` — 13 tests including doubling, the cap, the counter reset window, and lockout surviving a restart |
+| Recovery key | Crockford base32, 125 bits | `RecoveryKeyTests` — 12 tests including single use, lockout bypass, and rejection of the ambiguous characters |
+| Authentication end to end | — | `AuthenticationFlowTests` — 25 tests against real SQLite, real migrations, real Argon2 and the real pipeline |
+| Secret storage | — | `SecretStoreTests` — 9 tests including a direct read of the stored column proving the plaintext never reaches the database |
+| IPC session enforcement | — | `IpcEndToEndTests` — every session-requiring command in the registry is refused without a token and with a forged token; the four anonymous commands are proved reachable |
+
 
 ---
 
@@ -126,4 +141,4 @@ These are the only entries currently backed by tests.
 
 ---
 
-*Last updated at the completion of Milestone 1.*
+*Last updated at the completion of Milestone 2.*

@@ -114,3 +114,64 @@ public sealed class MigrationFailedException : ApplicationLayerException
 
     public string Name { get; }
 }
+
+/// <summary>
+/// Authentication failed.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>The message is identical for every cause.</b> Whether the account does not exist, the
+/// password is wrong, or the stored verifier is corrupt, the caller is told the same thing.
+/// Distinguishable messages are an enumeration oracle: "that account exists but the password
+/// is wrong" is precisely the fact an attacker is trying to establish.
+/// </para>
+/// <para>
+/// The real reason is recorded in the security event log, where an operator can see it and an
+/// attacker cannot.
+/// </para>
+/// </remarks>
+public sealed class AuthenticationFailedException : ApplicationLayerException
+{
+    public AuthenticationFailedException(string message)
+        : base("security.authentication.failed", message)
+    {
+    }
+}
+
+/// <summary>
+/// Authentication was refused because the account is locked out.
+/// </summary>
+/// <remarks>
+/// Distinct from <see cref="AuthenticationFailedException"/> on purpose. Lockout state is not
+/// a secret — the setup-status query reports it to an unauthenticated caller already — and a
+/// legitimate administrator who has mistyped needs to be told to wait rather than left
+/// guessing at a password that is currently irrelevant.
+/// </remarks>
+public sealed class AccountLockedOutException : ApplicationLayerException
+{
+    public AccountLockedOutException(TimeSpan remaining)
+        : base("security.account.locked_out",
+               $"Too many failed attempts. Try again in " +
+               $"{Math.Max(1, (int)Math.Ceiling(remaining.TotalMinutes))} minute(s).")
+        => Remaining = remaining;
+
+    /// <summary>How long is left on the lockout.</summary>
+    public TimeSpan Remaining { get; }
+}
+
+/// <summary>
+/// The request was refused because the signed-in administrator owes a password change.
+/// </summary>
+/// <remarks>
+/// Raised after a recovery-key reset for anything other than changing the password or signing
+/// out. Without it, a recovery key would be a standing bypass of the password rather than a
+/// route back in.
+/// </remarks>
+public sealed class PasswordChangeRequiredException : ApplicationLayerException
+{
+    public PasswordChangeRequiredException()
+        : base("security.password_change_required",
+               "The master password must be changed before any other operation is permitted.")
+    {
+    }
+}

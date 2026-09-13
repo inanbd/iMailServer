@@ -24,13 +24,15 @@ namespace MailServer.Application.Behaviors;
 /// unmodelled exception in a mail server is a defect.
 /// </para>
 /// <para>
-/// The <c>finally</c> flushes deferred audit records. By the time it runs, the transaction
-/// behavior has already rolled back, so the audit write gets a clean connection - see
-/// <see cref="IAuditTrail"/>.
+/// The <c>finally</c> flushes deferred audit records and buffered security events. By the time
+/// it runs, the transaction behavior has committed or rolled back, so both writes get a clean
+/// connection - see <see cref="IAuditTrail"/> and <see cref="ISecurityEventRecorder"/> for why
+/// neither may be written while a transaction is open.
 /// </para>
 /// </remarks>
 public sealed class UnhandledExceptionBehavior<TRequest, TResponse>(
     IAuditTrail auditTrail,
+    ISecurityEventRecorder securityEvents,
     ILogger<UnhandledExceptionBehavior<TRequest, TResponse>> logger)
     : IPipelineBehavior<TRequest, TResponse>
     where TRequest : notnull
@@ -94,12 +96,22 @@ public sealed class UnhandledExceptionBehavior<TRequest, TResponse>(
         }
         finally
         {
+            // Both flushes happen HERE, outside the transaction behavior, because this
+            // behavior's finally runs after that one has committed or rolled back. Writing
+            // either of these while a write transaction is still open would block under
+            // SQLite's single-writer model until the busy timeout expired, losing the record
+            // and stalling the request for the length of the timeout.
+            //
+            // CancellationToken.None throughout: a record describing a failure must still be
+            // written when the failure was a cancellation.
             if (auditTrail.HasDeferredRecords)
             {
-                // Uses a fresh connection; any failed transaction has already rolled back.
-                // CancellationToken.None: an audit record describing a failure must still be
-                // written when the failure was a cancellation.
                 await auditTrail.FlushDeferredAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+
+            if (securityEvents.HasPendingEvents)
+            {
+                await securityEvents.FlushAsync(CancellationToken.None).ConfigureAwait(false);
             }
         }
     }

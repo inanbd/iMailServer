@@ -1,0 +1,81 @@
+<UserControl x:Class="MailServer.Admin.Views.Pages.AuditLogView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="clr-namespace:MailServer.Admin.ViewModels"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=vm:AuditLogViewModel}">
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="Audit Log" Style="{StaticResource PageTitle}" />
+            <TextBlock Style="{StaticResource Caption}"
+                       Text="Every privileged administrative action. Append-only: these records cannot be edited or deleted from this console, or anywhere else in the product." />
+        </StackPanel>
+
+        <Border Grid.Row="1" Style="{StaticResource ErrorBanner}" Margin="0,12,0,8"
+                Visibility="{Binding ErrorMessage, Converter={StaticResource StringToVisibility}}">
+            <TextBlock Text="{Binding ErrorMessage}" TextWrapping="Wrap" />
+        </Border>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,8">
+            <TextBlock Text="Action" Style="{StaticResource Caption}" VerticalAlignment="Center" />
+            <TextBox Width="200" Margin="6,0,10,0"
+                     Text="{Binding ActionFilter, UpdateSourceTrigger=PropertyChanged}" />
+
+            <TextBlock Text="Correlation id" Style="{StaticResource Caption}" VerticalAlignment="Center" />
+            <TextBox Width="230" Margin="6,0,10,0" FontFamily="Consolas"
+                     Text="{Binding CorrelationIdFilter, UpdateSourceTrigger=PropertyChanged}" />
+
+            <Button Content="Search" Command="{Binding SearchCommand}" />
+            <Button Content="Refresh" Command="{Binding RefreshCommand}" />
+        </StackPanel>
+
+        <DataGrid Grid.Row="3" ItemsSource="{Binding Records}"
+                  SelectedItem="{Binding SelectedRecord, Mode=TwoWay}">
+            <DataGrid.Columns>
+                <DataGridTemplateColumn Header="" Width="24">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <Ellipse Width="10" Height="10"
+                                     Fill="{Binding Result, Converter={StaticResource AuditResultToBrush}}" />
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+                <DataGridTextColumn Header="When (UTC)"
+                                    Binding="{Binding TimestampUtc, StringFormat=yyyy-MM-dd HH:mm:ss}"
+                                    Width="150" />
+                <DataGridTextColumn Header="Administrator" Binding="{Binding Administrator}" Width="160" />
+                <DataGridTextColumn Header="Action" Binding="{Binding Action}" Width="190" />
+                <DataGridTextColumn Header="Target" Binding="{Binding TargetIdentifier}" Width="200" />
+                <DataGridTextColumn Header="Result" Binding="{Binding Result}" Width="80" />
+                <DataGridTextColumn Header="Detail" Binding="{Binding Detail}" Width="*" />
+                <DataGridTextColumn Header="Correlation" Binding="{Binding CorrelationId}"
+                                    Width="160" FontFamily="Consolas" />
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,10,0,0">
+            <Button Content="Previous" Command="{Binding PreviousPageCommand}" />
+            <Button Content="Next" Command="{Binding NextPageCommand}" />
+            <Button Content="Show related" Command="{Binding ShowRelatedCommand}" MinWidth="130"
+                    ToolTip="Show every entry sharing this record's correlation id" />
+            <TextBlock Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="10,0,0,0">
+                <Run Text="Page " />
+                <Run Text="{Binding Page, Mode=OneWay}" />
+                <Run Text=" · " />
+                <Run Text="{Binding TotalCount, Mode=OneWay, FallbackValue=?}" />
+                <Run Text=" record(s)" />
+            </TextBlock>
+        </StackPanel>
+    </Grid>
+</UserControl>
