@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    WPF administration application. A MANAGEMENT CONSOLE, not the server.
+
+    SECURITY-RELEVANT DEPENDENCY RULE
+    =================================
+    This project deliberately does NOT reference MailServer.Infrastructure or either
+    MailServer.Persistence.* project. Microsoft.Data.Sqlite and Microsoft.Data.SqlClient
+    are therefore absent from its dependency closure, which makes rule 105
+    ("No UI directly editing database") a COMPILE-TIME guarantee rather than a
+    code-review convention: the UI physically cannot open a database connection.
+
+    Every operation travels over the authenticated, ACL-restricted named pipe in
+    MailServer.Ipc. MailServer.Application is referenced for DTO and contract types only.
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>MailServer.Admin</RootNamespace>
+    <AssemblyName>MailServer.Admin</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MailServer.Application\MailServer.Application.csproj" />
+    <ProjectReference Include="..\MailServer.Domain\MailServer.Domain.csproj" />
+    <ProjectReference Include="..\MailServer.Ipc\MailServer.Ipc.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" />
+    <PackageReference Include="Serilog" />
+    <PackageReference Include="Serilog.Extensions.Hosting" />
+    <PackageReference Include="Serilog.Sinks.File" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

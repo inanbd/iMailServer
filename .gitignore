@@ -1,0 +1,42 @@
+## Build output
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Rider / VS / VS Code
+.vs/
+.idea/
+.vscode/
+
+## Test results
+[Tt]est[Rr]esult*/
+*.trx
+*.coverage
+coverage*.json
+coverage*.xml
+*.opencover.xml
+
+## Runtime data - never commit mail, databases, certificates or logs
+Data/
+*.db
+*.db-shm
+*.db-wal
+*.pfx
+*.p12
+*.key
+*.pem
+*.log
+
+## Local developer overrides
+appsettings.Local.json
+appsettings.Development.local.json
+
+## NuGet
+*.nupkg
+packages/

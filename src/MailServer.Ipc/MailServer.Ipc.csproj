@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The versioned wire contract between the Windows Service and the WPF admin app,
+    plus the framing codec and both endpoints of the named-pipe transport.
+
+    It is its own assembly because it is a COMPATIBILITY SURFACE: during an upgrade an
+    already-running admin app may talk to a newly-upgraded service. Isolating the
+    contract makes that surface explicit, versioned and testable.
+
+    It references MailServer.Application for the DTO types carried over the wire, and
+    MediatR so the server side can dispatch. It does NOT reference any persistence
+    project - the admin app's dependency closure must not contain a database driver.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>MailServer.Ipc</RootNamespace>
+    <AssemblyName>MailServer.Ipc</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MailServer.Application\MailServer.Application.csproj" />
+    <ProjectReference Include="..\MailServer.Domain\MailServer.Domain.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MediatR" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+  </ItemGroup>
+
+</Project>

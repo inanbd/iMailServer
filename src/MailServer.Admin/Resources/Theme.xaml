@@ -1,0 +1,110 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!--
+        Windows Server administration tooling, not a consumer dashboard.
+        Dense, information-first, colour used only for state and never for decoration.
+        One four-state vocabulary (Healthy / Warning / Critical / Unknown) is reused
+        everywhere: health checks, certificate status, deliverability, domain status.
+    -->
+
+    <SolidColorBrush x:Key="Surface.Background"       Color="#FFF3F3F3" />
+    <SolidColorBrush x:Key="Surface.Panel"           Color="#FFFFFFFF" />
+    <SolidColorBrush x:Key="Surface.Navigation"      Color="#FF2B2B2B" />
+    <SolidColorBrush x:Key="Surface.NavigationText"  Color="#FFE8E8E8" />
+    <SolidColorBrush x:Key="Surface.NavigationMuted" Color="#FF7A7A7A" />
+    <SolidColorBrush x:Key="Surface.Border"          Color="#FFD0D0D0" />
+    <SolidColorBrush x:Key="Text.Primary"            Color="#FF1A1A1A" />
+    <SolidColorBrush x:Key="Text.Secondary"          Color="#FF5F5F5F" />
+
+    <!-- State colours. Chosen to remain distinguishable with red/green colour blindness:
+         the UI always pairs them with a text label, never colour alone. -->
+    <SolidColorBrush x:Key="State.Healthy"  Color="#FF107C10" />
+    <SolidColorBrush x:Key="State.Warning"  Color="#FFB07500" />
+    <SolidColorBrush x:Key="State.Critical" Color="#FFC42B1C" />
+    <SolidColorBrush x:Key="State.Unknown"  Color="#FF767676" />
+
+    <Style x:Key="PageTitle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="20" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{StaticResource Text.Primary}" />
+        <Setter Property="Margin" Value="0,0,0,4" />
+    </Style>
+
+    <Style x:Key="SectionHeader" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{StaticResource Text.Primary}" />
+        <Setter Property="Margin" Value="0,12,0,6" />
+    </Style>
+
+    <Style x:Key="NavigationGroupHeader" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{StaticResource Surface.NavigationMuted}" />
+        <Setter Property="Margin" Value="14,14,0,4" />
+    </Style>
+
+    <Style x:Key="Caption" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="11" />
+        <Setter Property="Foreground" Value="{StaticResource Text.Secondary}" />
+    </Style>
+
+    <Style x:Key="MetricValue" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="26" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{StaticResource Text.Primary}" />
+    </Style>
+
+    <Style x:Key="Card" TargetType="Border">
+        <Setter Property="Background" Value="{StaticResource Surface.Panel}" />
+        <Setter Property="BorderBrush" Value="{StaticResource Surface.Border}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Padding" Value="14" />
+        <Setter Property="Margin" Value="0,0,10,10" />
+    </Style>
+
+    <Style x:Key="ErrorBanner" TargetType="Border">
+        <Setter Property="Background" Value="#FFFDE7E9" />
+        <Setter Property="BorderBrush" Value="{StaticResource State.Critical}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Padding" Value="10" />
+        <Setter Property="Margin" Value="0,0,0,10" />
+    </Style>
+
+    <Style x:Key="MaintenanceBanner" TargetType="Border">
+        <Setter Property="Background" Value="#FFFFF4CE" />
+        <Setter Property="BorderBrush" Value="{StaticResource State.Warning}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Padding" Value="8" />
+    </Style>
+
+    <!-- Compact grid: an administration console shows many rows, not few large ones. -->
+    <Style TargetType="DataGrid">
+        <Setter Property="AutoGenerateColumns" Value="False" />
+        <Setter Property="IsReadOnly" Value="True" />
+        <Setter Property="SelectionMode" Value="Single" />
+        <Setter Property="GridLinesVisibility" Value="Horizontal" />
+        <Setter Property="HorizontalGridLinesBrush" Value="{StaticResource Surface.Border}" />
+        <Setter Property="HeadersVisibility" Value="Column" />
+        <Setter Property="RowHeight" Value="26" />
+        <Setter Property="Background" Value="{StaticResource Surface.Panel}" />
+        <Setter Property="BorderBrush" Value="{StaticResource Surface.Border}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CanUserAddRows" Value="False" />
+        <Setter Property="CanUserDeleteRows" Value="False" />
+        <Setter Property="AlternatingRowBackground" Value="#FFFAFAFA" />
+    </Style>
+
+    <Style TargetType="Button">
+        <Setter Property="Padding" Value="12,5" />
+        <Setter Property="MinWidth" Value="92" />
+        <Setter Property="Margin" Value="0,0,6,0" />
+    </Style>
+
+    <Style TargetType="TextBox">
+        <Setter Property="Padding" Value="4,3" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+
+</ResourceDictionary>

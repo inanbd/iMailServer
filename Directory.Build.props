@@ -1,0 +1,50 @@
+<Project>
+
+  <!--
+    Solution-wide compiler settings.
+    Every project inherits these; individual projects override only where justified.
+  -->
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <Deterministic>true</Deterministic>
+    <NeutralLanguage>en-US</NeutralLanguage>
+    <Product>AetherMail Server</Product>
+    <Company>AetherMail</Company>
+    <Version>0.1.0</Version>
+    <AssemblyVersion>0.1.0.0</AssemblyVersion>
+    <FileVersion>0.1.0.0</FileVersion>
+  </PropertyGroup>
+
+  <!--
+    Windows-targeted projects (WPF admin app, Windows-specific hosts) can be built and
+    verified from a non-Windows developer/CI machine. This only downloads the Windows
+    reference assemblies; it does not make the resulting binaries run on Linux.
+  -->
+  <PropertyGroup Condition="'$(OS)' != 'Windows_NT'">
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+
+  <!--
+    CA1848 (LoggerMessage delegates) and CA1031 (do not catch general exception types)
+    are suppressed solution-wide with deliberate justification:
+
+      CA1848 - we favour readability of structured logging calls over the last few
+               nanoseconds; the hot paths that genuinely need LoggerMessage use it
+               explicitly.
+      CA1031 - a mail server MUST catch broad exceptions at worker and session
+               boundaries. Letting one poisoned SMTP session terminate the host is
+               unacceptable. Every such catch logs with full detail; none are silent.
+  -->
+  <PropertyGroup>
+    <NoWarn>$(NoWarn);CA1848;CA1031</NoWarn>
+  </PropertyGroup>
+
+</Project>

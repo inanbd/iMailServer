@@ -1,0 +1,58 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    THE REAL SERVER. This process owns every listener, queue, timer and certificate.
+    Closing or uninstalling the WPF administration application has no effect on mail flow.
+
+    Target framework note
+    This targets plain `net10.0` rather than `net10.0-windows` on purpose:
+
+      * Microsoft.Extensions.Hosting.WindowsServices ships a net10.0 asset, and
+        UseWindowsService() detects at runtime whether it was actually launched by the
+        Windows Service Control Manager. On Windows it integrates with the SCM; anywhere
+        else it is a no-op and the host runs as a console application.
+
+      * That keeps the server runnable on a developer or CI machine for integration
+        testing, without weakening anything on Windows. Genuinely Windows-only
+        functionality (DPAPI, ACLs, certificate store, Event Log) sits behind interfaces
+        and is guarded with OperatingSystem.IsWindows().
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>MailServer.Service</RootNamespace>
+    <AssemblyName>MailServer.Service</AssemblyName>
+    <UserSecretsId>aethermail-service</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MailServer.Application\MailServer.Application.csproj" />
+    <ProjectReference Include="..\MailServer.Domain\MailServer.Domain.csproj" />
+    <ProjectReference Include="..\MailServer.Infrastructure\MailServer.Infrastructure.csproj" />
+    <ProjectReference Include="..\MailServer.Ipc\MailServer.Ipc.csproj" />
+    <ProjectReference Include="..\MailServer.Persistence.Sqlite\MailServer.Persistence.Sqlite.csproj" />
+    <ProjectReference Include="..\MailServer.Persistence.SqlServer\MailServer.Persistence.SqlServer.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MediatR" />
+    <PackageReference Include="FluentValidation" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
+    <PackageReference Include="Serilog" />
+    <PackageReference Include="Serilog.Extensions.Hosting" />
+    <PackageReference Include="Serilog.Settings.Configuration" />
+    <PackageReference Include="Serilog.Sinks.Console" />
+    <PackageReference Include="Serilog.Sinks.File" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="appsettings.Development.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

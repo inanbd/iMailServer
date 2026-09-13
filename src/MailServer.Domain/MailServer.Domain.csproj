@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ARCHITECTURAL INVARIANT
+    =======================
+    The Domain layer is the innermost ring of the Clean Architecture. It must never
+    reference a database provider, an ORM, a socket library, a DNS library, WPF,
+    ASP.NET Core, or any Windows service API.
+
+    That invariant is enforced here by the ABSENCE of any <PackageReference> and any
+    <ProjectReference>. Adding one is a one-line diff that a reviewer cannot miss, and
+    MailServer.Domain.Tests/ArchitectureTests.cs fails the build if the compiled
+    assembly's references ever grow beyond the BCL.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>MailServer.Domain</RootNamespace>
+    <AssemblyName>MailServer.Domain</AssemblyName>
+  </PropertyGroup>
+
+</Project>

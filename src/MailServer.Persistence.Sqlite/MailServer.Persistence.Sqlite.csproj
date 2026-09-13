@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Leaf project. Supplies: connection factory (with pragmas), ISqlDialect implementation,
+    embedded migration scripts, and one DI registration extension. Nothing references this
+    project except the composition root, which selects it at runtime from configuration.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>MailServer.Persistence.Sqlite</RootNamespace>
+    <AssemblyName>MailServer.Persistence.Sqlite</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MailServer.Application\MailServer.Application.csproj" />
+    <ProjectReference Include="..\MailServer.Domain\MailServer.Domain.csproj" />
+    <ProjectReference Include="..\MailServer.Infrastructure\MailServer.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+    <PackageReference Include="Dapper" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Migrations ship as embedded resources so that a deployment cannot be missing them
+      and an operator cannot edit an already-applied script on disk (which the checksum
+      check would reject at startup anyway).
+    -->
+    <EmbeddedResource Include="Migrations\*.sql" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Application layer defines use cases and the PORTS (abstractions) that the
+    Infrastructure layer implements. It may reference MediatR and FluentValidation
+    because those describe *how a use case is dispatched and validated*, not how data
+    is stored or transported.
+
+    It must NOT reference: Dapper, Microsoft.Data.*, ASP.NET Core, WPF, socket or DNS
+    libraries. System.Data.Common is permitted because ITransactionManager exposes
+    DbConnection/DbTransaction, which are provider-neutral BCL abstractions.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>MailServer.Application</RootNamespace>
+    <AssemblyName>MailServer.Application</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MailServer.Domain\MailServer.Domain.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MediatR" />
+    <PackageReference Include="FluentValidation" />
+    <PackageReference Include="FluentValidation.DependencyInjectionExtensions" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+  </ItemGroup>
+
+</Project>
