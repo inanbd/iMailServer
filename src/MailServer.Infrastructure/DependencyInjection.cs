@@ -5,6 +5,9 @@ using MailServer.Application.Abstractions.Persistence;
 using MailServer.Application.Abstractions.Platform;
 using MailServer.Application.Abstractions.Queries;
 using MailServer.Application.Abstractions.Repositories;
+using MailServer.Infrastructure.Smtp;
+using MailServer.Domain.Policies;
+using MailServer.Application.Abstractions.Smtp;
 using MailServer.Application.Abstractions.Security;
 using MailServer.Application.Abstractions.Time;
 using MailServer.Infrastructure.Acme;
@@ -169,6 +172,21 @@ public static class DependencyInjection
         // ---- Mailbox administration (Milestone 5) ------------------------------------------
         services.TryAddScoped<IMailboxRepository, MailboxRepository>();
         services.TryAddScoped<IAliasRepository, AliasRepository>();
+
+        // ---- SMTP inbound (Milestone 6) ----------------------------------------------------
+        //
+        // The message store is a singleton: it owns no per-request state, and its constructor
+        // creates the storage directories, which should happen once at start rather than on
+        // every message.
+        services.TryAddSingleton<IMessageStore, FileSystemMessageStore>();
+
+        services.TryAddScoped<IDeliveryRepository, DeliveryRepository>();
+        services.TryAddScoped<ILocalDeliveryService, LocalDeliveryService>();
+        services.TryAddScoped<SmtpDataReceiver>();
+
+        // Pure policies with configuration but no state, so one instance serves every session.
+        services.TryAddSingleton<RelayPolicy>();
+        services.TryAddSingleton<AliasExpansionPolicy>();
 
 
         services.TryAddScoped<IDomainRepository, DomainRepository>();

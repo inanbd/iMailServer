@@ -19,6 +19,7 @@
     <ProjectReference Include="..\..\src\MailServer.Domain\MailServer.Domain.csproj" />
     <ProjectReference Include="..\..\src\MailServer.Application\MailServer.Application.csproj" />
     <ProjectReference Include="..\..\src\MailServer.Infrastructure\MailServer.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\MailServer.Persistence.Sqlite\MailServer.Persistence.Sqlite.csproj" />
   </ItemGroup>
 
   <ItemGroup>
