@@ -37,6 +37,10 @@
                 <pages:DomainsView />
             </DataTemplate>
 
+            <DataTemplate DataType="{x:Type vm:LetsEncryptViewModel}">
+                <pages:LetsEncryptView />
+            </DataTemplate>
+
             <DataTemplate DataType="{x:Type vm:CertificatesViewModel}">
                 <pages:CertificatesView />
             </DataTemplate>

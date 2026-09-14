@@ -1,4 +1,5 @@
 using System.Globalization;
+using MailServer.Application.Abstractions.Acme;
 using MailServer.Application.Abstractions.Certificates;
 using MailServer.Application.Abstractions.Monitoring;
 using MailServer.Application.Abstractions.Platform;
@@ -21,11 +22,15 @@ namespace MailServer.Service.Hosting;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Milestone 3 monitors and warns; it does not renew, because there is nothing yet to renew
-/// with — ACME arrives in Milestone 4 and plugs into the same escalation thresholds. Stating
-/// that plainly is better than a service that appears to handle renewal and silently cannot:
-/// the aggregate refuses <c>AutoRenew</c> for every source this server cannot reissue, so no
-/// certificate here is currently marked for automatic renewal at all.
+/// From Milestone 4 it also renews. A certificate inside the renewal window whose source is
+/// ACME is reissued automatically; every other source is monitored and warned about only,
+/// because this server cannot obtain a replacement for a certificate it did not obtain.
+/// </para>
+/// <para>
+/// <b>Renewal never makes things worse.</b> A failed attempt leaves the existing certificate
+/// and its binding exactly as they were, records the reason, and backs off. There is no path
+/// from here to a self-signed substitute — see
+/// <see cref="CertificateRenewalPolicy.MayDowngradeToSelfSignedOnRenewalFailure"/>.
 /// </para>
 /// <para>
 /// <b>This service never replaces a certificate.</b> It generates one only when the server has
@@ -68,7 +73,145 @@ public sealed class CertificateLifecycleService(
         while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
         {
             await EvaluateAsync(stoppingToken).ConfigureAwait(false);
+            await RenewExpiringCertificatesAsync(stoppingToken).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Reissues ACME certificates that have entered the renewal window.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Thirty days out, against a ninety-day Let's Encrypt lifetime, leaves three full weeks of
+    /// retries before anything is at risk. That headroom is what turns a transient DNS or
+    /// rate-limit failure into a non-event rather than an incident.
+    /// </para>
+    /// <para>
+    /// Certificates are renewed one at a time, and a failure on one does not stop the others.
+    /// A server with several certificates should not lose them all because the first in the
+    /// list had a DNS problem.
+    /// </para>
+    /// </remarks>
+    private async Task RenewExpiringCertificatesAsync(CancellationToken cancellationToken)
+    {
+        await using AsyncServiceScope scope = scopeFactory.CreateAsyncScope();
+
+        ICertificateRepository repository =
+            scope.ServiceProvider.GetRequiredService<ICertificateRepository>();
+
+        IReadOnlyList<Certificate> certificates =
+            await repository.GetAllAsync(cancellationToken).ConfigureAwait(false);
+
+        IReadOnlyList<CertificateBinding> bindings =
+            await repository.GetBindingsAsync(cancellationToken).ConfigureAwait(false);
+
+        DateTimeOffset now = clock.UtcNow;
+
+        foreach (Certificate certificate in certificates)
+        {
+            // Only what this server can actually reissue. The aggregate refuses AutoRenew for
+            // every other source, so this is belt and braces on a rule already enforced.
+            if (!certificate.AutoRenew || certificate.Source != CertificateSource.Acme)
+            {
+                continue;
+            }
+
+            if (Policy.GetAction(certificate.DaysRemaining(now)) == RenewalAction.None)
+            {
+                continue;
+            }
+
+            if (certificate.IsRenewing)
+            {
+                continue;
+            }
+
+            IReadOnlyList<DomainName> identifiers =
+            [
+                .. bindings
+                    .Where(b => b.CertificateId == certificate.Id)
+                    .Select(static b => b.Hostname),
+            ];
+
+            if (identifiers.Count == 0)
+            {
+                // Nothing is served by it, so renewing would spend a rate-limit slot on a
+                // certificate no handshake will ever present.
+                Logger.LogInformation(
+                    "Certificate {Thumbprint} is inside the renewal window but is not bound to " +
+                    "any hostname, so it was not renewed.",
+                    certificate.Thumbprint);
+
+                continue;
+            }
+
+            await RenewOneAsync(scope, repository, certificate, identifiers, now, cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private async Task RenewOneAsync(
+        AsyncServiceScope scope,
+        ICertificateRepository repository,
+        Certificate certificate,
+        IReadOnlyList<DomainName> identifiers,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        certificate.BeginRenewal(now);
+        await repository.UpdateAsync(certificate, cancellationToken).ConfigureAwait(false);
+
+        Logger.LogInformation(
+            "Renewing certificate {Thumbprint}, {Days} day(s) from expiry.",
+            certificate.Thumbprint,
+            certificate.DaysRemaining(now));
+
+        IssuanceResult result = await scope.ServiceProvider
+            .GetRequiredService<IAcmeIssuanceService>()
+            .IssueAsync(
+                identifiers,
+                scope.ServiceProvider.GetRequiredService<IAcmeSettings>().DefaultChallengeType,
+
+                // The new certificate takes over the binding; that IS the renewal.
+                bindOnSuccess: true,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result.Succeeded)
+        {
+            certificate.CompleteRenewal(clock.UtcNow);
+            await repository.UpdateAsync(certificate, cancellationToken).ConfigureAwait(false);
+
+            // Rebuild the snapshot so live listeners serve the new certificate. The old one
+            // stays in the rollback window for connections already in flight.
+            await tlsProvider.ReloadAsync(cancellationToken).ConfigureAwait(false);
+
+            Logger.LogInformation(
+                "Certificate for {Hostname} renewed; new certificate {Thumbprint} is now " +
+                "being served. No restart was required.",
+                identifiers[0],
+                result.Certificate?.Thumbprint);
+
+            return;
+        }
+
+        // The failure path, and the one that matters. The existing certificate is untouched:
+        // still valid, still bound, still being served. Substituting a self-signed certificate
+        // here would turn a warning affecting nobody into a simultaneous TLS failure against
+        // every verifying remote MTA and every mail client.
+        certificate.FailRenewal(
+            result.Failure ?? "Renewal failed without a reported reason.",
+            clock.UtcNow);
+
+        await repository.UpdateAsync(certificate, cancellationToken).ConfigureAwait(false);
+
+        Logger.LogCritical(
+            "Renewal of the certificate for {Hostname} FAILED: {Reason}. The existing " +
+            "certificate is still in use and expires in {Days} day(s). It will NOT be replaced " +
+            "with a self-signed certificate; fix the cause before it expires.",
+            identifiers[0],
+            result.Failure,
+            certificate.DaysRemaining(clock.UtcNow));
     }
 
     /// <summary>

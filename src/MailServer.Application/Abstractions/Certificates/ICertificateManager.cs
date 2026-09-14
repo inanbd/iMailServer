@@ -92,6 +92,27 @@ public interface ICertificateManager
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Stores a certificate this server obtained from a certificate authority.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Distinct from <see cref="ImportPfxAsync"/> even though the storage is identical, because
+    /// the <b>source</b> differs and the source is what decides whether the certificate can be
+    /// renewed automatically. A certificate recorded as an operator's import is one this server
+    /// cannot reissue, so it is never renewed — routing ACME issuance through the import path
+    /// produced exactly that: certificates that were obtained automatically and would then have
+    /// expired without a single renewal attempt.
+    /// </para>
+    /// <para>
+    /// The caller owns <paramref name="certificate"/> and disposes it.
+    /// </para>
+    /// </remarks>
+    Task<Certificate> StoreIssuedAsync(
+        X509Certificate2 certificate,
+        CertificateSource source,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Adopts a certificate that already exists in the Windows certificate store.
     /// </summary>
     /// <remarks>

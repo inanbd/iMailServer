@@ -1,4 +1,7 @@
 using MailServer.Application.Common;
+using MailServer.Application.Acme.Commands;
+using MailServer.Application.Acme.Dtos;
+using MailServer.Application.Acme.Queries;
 using MailServer.Application.Certificates.Commands;
 
 using MailServer.Application.Certificates.Dtos;
@@ -163,6 +166,30 @@ public interface IAdminGateway
     Task SetDefaultBindingAsync(Guid bindingId, CancellationToken cancellationToken = default);
 
     Task DeleteCertificateAsync(Guid certificateId, CancellationToken cancellationToken = default);
+
+    // ---- ACME / Let's Encrypt ---------------------------------------------------------------
+
+    Task<AcmeStatusDto> GetAcmeStatusAsync(CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<AcmeAccountDto>> GetAcmeAccountsAsync(
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<AcmeOrderDto>> GetAcmeOrdersAsync(
+        int limit = 25,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Runs the pre-flight checks without submitting anything to the CA.</summary>
+    /// <remarks>Costs no rate-limit quota, which is the point of offering it separately.</remarks>
+    Task<IReadOnlyList<PreflightFindingDto>> CheckIssuanceReadinessAsync(
+        IReadOnlyList<string> hostnames,
+        AcmeChallengeType? challengeType = null,
+        CancellationToken cancellationToken = default);
+
+    Task<IssuanceResultDto> RequestCertificateAsync(
+        IReadOnlyList<string> hostnames,
+        AcmeChallengeType? challengeType = null,
+        bool bindOnSuccess = true,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>Implements <see cref="IAdminGateway"/> over <see cref="IpcClient"/>.</summary>
@@ -625,4 +652,82 @@ public sealed class AdminGateway(IpcClient client) : IAdminGateway
                 new DeleteCertificateCommand { CertificateId = certificateId },
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false);
+
+    // ---- ACME / Let's Encrypt ---------------------------------------------------------------
+
+    public async Task<AcmeStatusDto> GetAcmeStatusAsync(
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetAcmeStatusQuery, AcmeStatusDto>(
+                "Acme.Status",
+                new GetAcmeStatusQuery(),
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException(
+            "The service returned an empty ACME status payload.");
+
+    public async Task<IReadOnlyList<AcmeAccountDto>> GetAcmeAccountsAsync(
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetAcmeAccountsQuery, IReadOnlyList<AcmeAccountDto>>(
+                "Acme.Accounts",
+                new GetAcmeAccountsQuery(),
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException(
+            "The service returned an empty ACME account payload.");
+
+    public async Task<IReadOnlyList<AcmeOrderDto>> GetAcmeOrdersAsync(
+        int limit = 25,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetAcmeOrdersQuery, IReadOnlyList<AcmeOrderDto>>(
+                "Acme.Orders",
+                new GetAcmeOrdersQuery { Limit = limit },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException(
+            "The service returned an empty ACME order payload.");
+
+    public async Task<IReadOnlyList<PreflightFindingDto>> CheckIssuanceReadinessAsync(
+        IReadOnlyList<string> hostnames,
+        AcmeChallengeType? challengeType = null,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<CheckIssuanceReadinessCommand, IReadOnlyList<PreflightFindingDto>>(
+                "Acme.CheckReadiness",
+                new CheckIssuanceReadinessCommand
+                {
+                    Hostnames = hostnames,
+                    ChallengeType = challengeType,
+                },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException(
+            "The service returned an empty pre-flight payload.");
+
+    /// <remarks>
+    /// The request timeout is the client's default, which can be shorter than an issuance
+    /// takes: the CA's validation is polled for up to five minutes. A caller that times out has
+    /// not cancelled anything — the order continues server-side, and its outcome appears in
+    /// <see cref="GetAcmeOrdersAsync"/>.
+    /// </remarks>
+    public async Task<IssuanceResultDto> RequestCertificateAsync(
+        IReadOnlyList<string> hostnames,
+        AcmeChallengeType? challengeType = null,
+        bool bindOnSuccess = true,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<RequestCertificateCommand, IssuanceResultDto>(
+                "Acme.RequestCertificate",
+                new RequestCertificateCommand
+                {
+                    Hostnames = hostnames,
+                    ChallengeType = challengeType,
+                    BindOnSuccess = bindOnSuccess,
+                },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException(
+            "The service returned an empty issuance payload.");
 }

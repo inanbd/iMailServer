@@ -1,4 +1,5 @@
 using MailServer.Application.Abstractions.Monitoring;
+using MailServer.Application.Abstractions.Acme;
 using MailServer.Application.Abstractions.Certificates;
 using MailServer.Application.Abstractions.Persistence;
 using MailServer.Application.Abstractions.Platform;
@@ -6,8 +7,10 @@ using MailServer.Application.Abstractions.Queries;
 using MailServer.Application.Abstractions.Repositories;
 using MailServer.Application.Abstractions.Security;
 using MailServer.Application.Abstractions.Time;
+using MailServer.Infrastructure.Acme;
 using MailServer.Infrastructure.Certificates;
 using MailServer.Infrastructure.Configuration;
+using MailServer.Infrastructure.Dns;
 using MailServer.Infrastructure.Monitoring;
 using MailServer.Infrastructure.Persistence;
 using MailServer.Infrastructure.Persistence.Queries;
@@ -145,6 +148,24 @@ public static class DependencyInjection
         services.TryAddScoped<CertificateChainValidator>();
         services.TryAddScoped<ICertificateManager, CertificateManager>();
         services.TryAddScoped<ICertificateRepository, CertificateRepository>();
+
+        // ---- ACME (Milestone 4) ------------------------------------------------------------
+        //
+        // The challenge store is a SINGLETON: the issuance that publishes a token and the
+        // Kestrel endpoint that serves it are different call stacks, and a scoped store would
+        // mean the endpoint never sees what issuance published.
+        services.TryAddSingleton<IHttpChallengeStore, HttpChallengeStore>();
+
+        services.TryAddSingleton<IAcmeSettings, AcmeSettings>();
+        services.TryAddSingleton<IAcmeClientFactory, AcmeClientFactory>();
+        services.TryAddSingleton<DnsTxtResolver>();
+
+        services.TryAddScoped<AcmeAccountKeyStore>();
+        services.TryAddScoped<IDnsChallengeProvider, ManualDnsChallengeProvider>();
+        services.TryAddScoped<IAcmePreflightCheck, AcmePreflightCheck>();
+        services.TryAddScoped<IAcmeIssuanceService, AcmeIssuanceService>();
+        services.TryAddScoped<IAcmeRepository, AcmeRepository>();
+
 
         services.TryAddScoped<IDomainRepository, DomainRepository>();
         services.TryAddScoped<IAuditRepository, AuditRepository>();

@@ -21,13 +21,58 @@ internal sealed record LoadedMigration(MigrationScript Metadata, string Sql);
 internal static partial class MigrationScriptLoader
 {
     /// <summary>Marks a migration that should trigger an automatic backup before it runs.</summary>
-    private const string DestructiveDirective = "-- @Destructive";
+    private const string DestructiveDirective = "@Destructive";
 
     /// <summary>
     /// Marks a migration containing statements that cannot run inside a transaction.
     /// Deliberately explicit, so that giving up atomicity is always a visible decision.
     /// </summary>
-    private const string NoTransactionDirective = "-- @NoTransaction";
+    private const string NoTransactionDirective = "@NoTransaction";
+
+    /// <summary>
+    /// True when the script carries a directive as a line of its own.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A whole line, not a substring anywhere in the file.</b> Matching the directive
+    /// anywhere means a comment that merely <i>mentions</i> it turns the migration into what it
+    /// is documenting itself as not being — and the natural thing to write at the top of an
+    /// additive migration is "this is not marked @Destructive", which is precisely the sentence
+    /// that would trip it.
+    /// </para>
+    /// <para>
+    /// That is not hypothetical: it happened. Three earlier migrations escaped only because
+    /// their comments wrapped so that other words sat between the <c>--</c> and the directive,
+    /// and the fourth wrapped differently and refused to apply. A rule that depends on where a
+    /// sentence happens to break is not a rule.
+    /// </para>
+    /// <para>
+    /// A directive line is <c>--</c>, optional whitespace, the directive, and then nothing but
+    /// whitespace or a further comment. Trailing prose is rejected rather than tolerated, so
+    /// the marker is unambiguous at a glance.
+    /// </para>
+    /// </remarks>
+    private static bool HasDirective(string sql, string directive)
+    {
+        foreach (ReadOnlySpan<char> line in sql.AsSpan().EnumerateLines())
+        {
+            ReadOnlySpan<char> trimmed = line.Trim();
+
+            if (!trimmed.StartsWith("--", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            ReadOnlySpan<char> body = trimmed[2..].Trim();
+
+            if (body.Equals(directive, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>Loads every embedded script for the provider, ordered by version.</summary>
     /// <exception cref="InvalidOperationException">Two scripts declare the same version.</exception>
@@ -69,8 +114,8 @@ internal static partial class MigrationScriptLoader
                     version,
                     name,
                     ComputeChecksum(sql),
-                    sql.Contains(DestructiveDirective, StringComparison.OrdinalIgnoreCase),
-                    sql.Contains(NoTransactionDirective, StringComparison.OrdinalIgnoreCase)),
+                    HasDirective(sql, DestructiveDirective),
+                    HasDirective(sql, NoTransactionDirective)),
                 sql));
         }
 

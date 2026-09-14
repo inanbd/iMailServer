@@ -13,3 +13,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("MailServer.Infrastructure.Tests")]
 [assembly: InternalsVisibleTo("MailServer.SecurityTests")]
 [assembly: InternalsVisibleTo("MailServer.Certificates.Tests")]
+[assembly: InternalsVisibleTo("MailServer.Acme.Tests")]

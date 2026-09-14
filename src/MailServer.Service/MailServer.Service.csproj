@@ -35,9 +35,19 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!--
+      Kestrel, for the ACME HTTP-01 challenge endpoint (Milestone 4) and, from Milestone 11,
+      MTA-STS policy hosting. A shared-framework reference rather than a package download: it
+      adds nothing to the restore and nothing listens unless the challenge endpoint is enabled.
+    -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="MediatR" />
     <PackageReference Include="FluentValidation" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <!-- Microsoft.Extensions.Hosting is not referenced explicitly: the
+         Microsoft.AspNetCore.App framework reference above already provides it. -->
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
     <PackageReference Include="Serilog" />
     <PackageReference Include="Serilog.Extensions.Hosting" />

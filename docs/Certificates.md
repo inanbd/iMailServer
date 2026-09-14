@@ -244,18 +244,20 @@ client warning dialog.
 
 ---
 
-## Renewal (Milestone 4)
+## Renewal
 
-**Milestone 3 monitors and warns; it does not renew.** There is nothing yet to renew *with* — a
-certificate authority arrives with ACME in Milestone 4, and it plugs into the escalation
-thresholds above.
+Automatic renewal arrived in Milestone 4 and is documented in
+[LetsEncrypt.md](LetsEncrypt.md#renewal). It uses the escalation thresholds above.
 
-Stating that plainly is better than a service that appears to handle renewal and silently
-cannot. The `Certificate` aggregate refuses `AutoRenew` for every source this server cannot
-reissue — imported PFX, Windows store, self-signed — so no certificate here is currently marked
-for automatic renewal at all. That refusal is a throw, not a default: a switch that can be
-turned on and silently does nothing while the certificate expires is worse than no switch, and a
-test asserts it cannot be enabled.
+Only certificates whose source is **ACME** are renewed. The `Certificate` aggregate refuses
+`AutoRenew` for every source this server cannot reissue — imported PFX, Windows store,
+self-signed — and that refusal is a throw, not a default: a switch that can be turned on and
+silently does nothing while the certificate expires is worse than no switch.
+
+That rule has a sharp edge worth knowing about, because it drew blood. Issuance originally
+stored ACME certificates through the operator-import path, which records `ImportedPfx` — so the
+refusal applied to them too, and nothing ever renewed. See
+[A4.2](Architecture.md#a42--the-source-a-certificate-is-stored-under-decides-whether-it-renews).
 
 ## What the UI shows
 

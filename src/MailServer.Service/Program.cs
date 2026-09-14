@@ -136,6 +136,10 @@ public static class Program
         // cannot complete a handshake on.
         builder.Services.AddHostedService<CertificateLifecycleService>();
 
+        // The ACME HTTP-01 endpoint. It binds port 80 and serves exactly one route; it is a
+        // no-op unless MailServer:Acme:EnableHttpChallengeListener is set.
+        builder.Services.AddHostedService<AcmeChallengeListener>();
+
         return builder.Build();
     }
 

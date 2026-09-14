@@ -253,6 +253,58 @@ public readonly record struct CertificateBindingId(Guid Value) : IEntityId
     public override string ToString() => Value.ToString("D");
 }
 
+/// <summary>Identifies an ACME account registration.</summary>
+public readonly record struct AcmeAccountId(Guid Value) : IEntityId
+{
+    public static AcmeAccountId New() => new(Guid.CreateVersion7());
+
+    public static AcmeAccountId Empty => new(Guid.Empty);
+
+    public bool IsEmpty => Value == Guid.Empty;
+
+    public static AcmeAccountId Parse(string value) => new(Guid.Parse(value));
+
+    public static bool TryParse(string? value, out AcmeAccountId result)
+    {
+        if (Guid.TryParse(value, out Guid guid))
+        {
+            result = new AcmeAccountId(guid);
+            return true;
+        }
+
+        result = Empty;
+        return false;
+    }
+
+    public override string ToString() => Value.ToString("D");
+}
+
+/// <summary>Identifies one certificate issuance attempt.</summary>
+public readonly record struct AcmeOrderId(Guid Value) : IEntityId
+{
+    public static AcmeOrderId New() => new(Guid.CreateVersion7());
+
+    public static AcmeOrderId Empty => new(Guid.Empty);
+
+    public bool IsEmpty => Value == Guid.Empty;
+
+    public static AcmeOrderId Parse(string value) => new(Guid.Parse(value));
+
+    public static bool TryParse(string? value, out AcmeOrderId result)
+    {
+        if (Guid.TryParse(value, out Guid guid))
+        {
+            result = new AcmeOrderId(guid);
+            return true;
+        }
+
+        result = Empty;
+        return false;
+    }
+
+    public override string ToString() => Value.ToString("D");
+}
+
 /// <summary>
 /// Correlates every log line, audit record, delivery attempt and trace entry produced while
 /// handling one logical operation, across process boundaries.

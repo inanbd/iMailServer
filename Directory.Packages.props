@@ -47,6 +47,18 @@
          The BCL has no Argon2, and PBKDF2 is materially weaker against GPU attack.
          MIT licensed. -->
     <PackageVersion Include="Konscious.Security.Cryptography.Argon2" Version="1.3.1" />
+
+    <!-- ACME (RFC 8555) protocol client for Let's Encrypt. MIT licensed.
+         Hand-implementing ACME's JWS signing, nonce handling and key-authorisation
+         digests would be an unnecessary cryptographic risk for the one component
+         that handles the account key.
+
+         Certes 3.0.4 (Jan 2023) is the last release. It pulls Portable.BouncyCastle
+         1.9.0, which is the legacy BouncyCastle package - no advisories and not
+         formally deprecated as of this writing, but unmaintained. Verified to work on
+         .NET 10. Tracked as a risk in docs/Architecture.md; the IAcmeClient port
+         exists partly so replacing it is one file. -->
+    <PackageVersion Include="Certes" Version="3.0.4" />
   </ItemGroup>
 
   <ItemGroup Label="Persistence">

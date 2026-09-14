@@ -1,0 +1,175 @@
+<UserControl x:Class="MailServer.Admin.Views.Pages.LetsEncryptView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="clr-namespace:MailServer.Admin.ViewModels"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=vm:LetsEncryptViewModel}">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="16">
+        <StackPanel>
+
+            <TextBlock Text="Let's Encrypt" Style="{StaticResource PageTitle}" />
+            <TextBlock Style="{StaticResource Caption}"
+                       Text="Free, publicly trusted certificates, renewed automatically 30 days before expiry." />
+
+            <Border Style="{StaticResource ErrorBanner}" Margin="0,12,0,0"
+                    Visibility="{Binding ErrorMessage, Converter={StaticResource StringToVisibility}}">
+                <TextBlock Text="{Binding ErrorMessage}" TextWrapping="Wrap" />
+            </Border>
+
+            <!--
+                Staging issues certificates that are valid in every respect except being
+                publicly trusted. "It issued but browsers still warn" is the most common
+                confusion with ACME, and this is the banner that answers it.
+            -->
+            <Border Background="#FFFFF4CE" BorderBrush="{StaticResource State.Warning}"
+                    BorderThickness="1" Padding="10" Margin="0,12,0,0"
+                    Visibility="{Binding ShowStagingWarning, Converter={StaticResource BoolToVisibility}}">
+                <TextBlock TextWrapping="Wrap"
+                           Text="This server is configured against the Let's Encrypt STAGING directory. Certificates issued from staging are NOT publicly trusted - mail clients and remote servers will warn about them. Staging exists so the flow can be proved without spending production quota; switch to production once an issuance succeeds here." />
+            </Border>
+
+            <!-- What must be configured before anything can be requested -->
+            <Border Background="#FFFDE7E9" BorderBrush="{StaticResource State.Critical}"
+                    BorderThickness="1" Padding="10" Margin="0,8,0,0"
+                    Visibility="{Binding HasBlockingIssues, Converter={StaticResource BoolToVisibility}}">
+                <StackPanel>
+                    <TextBlock Text="Configuration required before a certificate can be requested:"
+                               FontWeight="SemiBold" Margin="0,0,0,4" />
+                    <ItemsControl ItemsSource="{Binding Status.BlockingIssues}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding}" TextWrapping="Wrap" Margin="0,2" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+
+            <!-- Configuration -->
+            <TextBlock Text="Configuration" Style="{StaticResource SectionHeader}" />
+            <WrapPanel>
+                <Border Style="{StaticResource Card}" Width="230">
+                    <StackPanel>
+                        <TextBlock Text="{Binding Status.ConfiguredDirectory, FallbackValue=-}"
+                                   FontSize="16" FontWeight="SemiBold" />
+                        <TextBlock Text="Directory" Style="{StaticResource Caption}" />
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource Card}" Width="230">
+                    <StackPanel>
+                        <TextBlock Text="{Binding Status.ContactEmail, FallbackValue=(not set)}"
+                                   FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="Contact address" Style="{StaticResource Caption}" />
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource Card}" Width="230">
+                    <StackPanel>
+                        <TextBlock Text="{Binding Status.DefaultChallengeType, FallbackValue=-}"
+                                   FontSize="16" FontWeight="SemiBold" />
+                        <TextBlock Text="Challenge" Style="{StaticResource Caption}" />
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource Card}" Width="230">
+                    <StackPanel>
+                        <TextBlock Text="{Binding Status.HasUsableAccount, FallbackValue=False}"
+                                   FontSize="16" FontWeight="SemiBold" />
+                        <TextBlock Text="Account registered" Style="{StaticResource Caption}" />
+                    </StackPanel>
+                </Border>
+            </WrapPanel>
+            <TextBlock Style="{StaticResource Caption}" Margin="0,8,0,0"
+                       Text="These are set in configuration (MailServer:Acme) rather than here, because accepting a certificate authority's terms of service is a decision that belongs in a file an operator deliberately edits." />
+
+            <!-- Request -->
+            <TextBlock Text="Request a certificate" Style="{StaticResource SectionHeader}" />
+            <StackPanel Orientation="Horizontal">
+                <TextBox Text="{Binding RequestHostnames, UpdateSourceTrigger=PropertyChanged}"
+                         Width="360"
+                         ToolTip="One or more hostnames, separated by commas or spaces." />
+                <ComboBox ItemsSource="{Binding ChallengeTypes}"
+                          SelectedItem="{Binding RequestChallengeType}"
+                          Width="110" Margin="8,0,0,0"
+                          ToolTip="Leave unset to use the configured default." />
+                <Button Content="Check readiness" Command="{Binding CheckReadinessCommand}"
+                        Margin="8,0,0,0"
+                        IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+                <Button Content="Request" Command="{Binding RequestCertificateCommand}"
+                        Margin="8,0,0,0"
+                        IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+            </StackPanel>
+            <TextBlock Style="{StaticResource Caption}"
+                       Text="Check readiness first. It costs nothing, whereas a request that fails at the certificate authority consumes one of five failed validations per hostname per hour." />
+
+            <!-- Pre-flight findings -->
+            <ItemsControl ItemsSource="{Binding PreflightFindings}" Margin="0,8,0,0">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Border BorderThickness="0,0,0,1" BorderBrush="#FFE5E5E5" Padding="0,6">
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="{Binding Identifier}" FontWeight="SemiBold"
+                                               Width="220" FontFamily="Consolas" />
+                                    <TextBlock Text="BLOCKING" Foreground="{StaticResource State.Critical}"
+                                               FontWeight="SemiBold"
+                                               Visibility="{Binding IsBlocking, Converter={StaticResource BoolToVisibility}}" />
+                                </StackPanel>
+                                <TextBlock Text="{Binding Summary}" TextWrapping="Wrap"
+                                           Style="{StaticResource Caption}" />
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <!-- Outcome -->
+            <Border Style="{StaticResource Card}" Margin="0,12,0,0"
+                    Visibility="{Binding LastIssuanceMessage, Converter={StaticResource StringToVisibility}}">
+                <TextBlock Text="{Binding LastIssuanceMessage}" TextWrapping="Wrap" />
+            </Border>
+
+            <!-- Manual DNS instructions -->
+            <Border Background="#FFF0F6FF" BorderBrush="#FF7AA7D9" BorderThickness="1"
+                    Padding="10" Margin="0,8,0,0"
+                    Visibility="{Binding HasManualDnsInstructions, Converter={StaticResource BoolToVisibility}}">
+                <StackPanel>
+                    <TextBlock Text="Publish these DNS records, then request again"
+                               FontWeight="SemiBold" Margin="0,0,0,6" />
+                    <ItemsControl ItemsSource="{Binding ManualDnsInstructions}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <TextBox Text="{Binding Mode=OneWay}" IsReadOnly="True"
+                                         BorderThickness="0" Background="Transparent"
+                                         FontFamily="Consolas" TextWrapping="Wrap"
+                                         Margin="0,4" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+
+            <!-- History -->
+            <TextBlock Text="Recent attempts" Style="{StaticResource SectionHeader}" />
+            <TextBlock Style="{StaticResource Caption}"
+                       Text="'Reached CA' matters after a failure: an attempt the certificate authority never saw can be retried immediately once the cause is fixed, whereas one it rejected has spent a rate-limit slot." />
+            <DataGrid ItemsSource="{Binding Orders}" AutoGenerateColumns="False" IsReadOnly="True"
+                      HeadersVisibility="Column" MaxHeight="300" Margin="0,8,0,0">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Created (UTC)" Width="Auto"
+                                        Binding="{Binding CreatedUtc, StringFormat=yyyy-MM-dd HH:mm}" />
+                    <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="Auto" />
+                    <DataGridTextColumn Header="Challenge" Binding="{Binding ChallengeType}" Width="Auto" />
+                    <DataGridCheckBoxColumn Header="Reached CA"
+                                            Binding="{Binding ReachedCertificateAuthority}" Width="Auto" />
+                    <DataGridTextColumn Header="Error" Binding="{Binding LastError}" Width="3*" />
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <Button Content="Refresh" Command="{Binding RefreshCommand}"
+                    HorizontalAlignment="Left" Margin="0,16,0,0" />
+
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

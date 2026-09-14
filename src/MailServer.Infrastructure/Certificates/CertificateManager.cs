@@ -145,6 +145,43 @@ internal sealed class CertificateManager(
         }
     }
 
+    public async Task<Certificate> StoreIssuedAsync(
+        X509Certificate2 certificate,
+        CertificateSource source,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(certificate);
+
+        CertificateKeyLocation location = await pfxStore
+            .StoreAsync(certificate, cancellationToken)
+            .ConfigureAwait(false);
+
+        Certificate registered = Certificate.Register(
+            CertificateThumbprint.Parse(certificate.Thumbprint),
+            certificate.Subject,
+            certificate.Issuer,
+            certificate.SerialNumber,
+            ReadSubjectAlternativeNames(certificate),
+            source,
+            location,
+            certificate.NotBefore,
+            certificate.NotAfter,
+            clock.UtcNow);
+
+        await repository.AddAsync(registered, cancellationToken).ConfigureAwait(false);
+
+        logger.LogInformation(
+            "Stored certificate {Thumbprint} from {Source}, issued by {Issuer}, valid until " +
+            "{NotAfter:u}. Automatic renewal: {AutoRenew}.",
+            registered.Thumbprint,
+            source,
+            registered.Issuer,
+            registered.NotAfterUtc,
+            registered.AutoRenew);
+
+        return registered;
+    }
+
     public async Task<Certificate> AdoptFromWindowsStoreAsync(
         CertificateThumbprint thumbprint,
         CancellationToken cancellationToken)

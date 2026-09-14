@@ -1798,4 +1798,72 @@ reported by the sender rather than by this server.
 
 ---
 
-*Document version 1.2 — baseline for Milestone 1, with the Milestone 2 and 3 addenda.*
+## Addendum — decisions taken during Milestone 4
+
+§15 stands. Four things were decided or corrected while building it.
+
+### A4.1 — Certes is accepted with a stated dependency risk
+
+§22 named Certes and it remains the right call: hand-implementing ACME's JWS signing, nonce
+handling and key-authorisation digests is an unnecessary cryptographic risk in the one component
+that touches the account key.
+
+What was not visible in §22 is that Certes 3.0.4 (January 2023, the last release) depends on
+**Portable.BouncyCastle 1.9.0** — the legacy BouncyCastle package, superseded by
+`BouncyCastle.Cryptography` and unmaintained. It carries no advisories and is not formally
+deprecated, and it was verified working on .NET 10. It is nonetheless an unmaintained transitive
+dependency in a security-sensitive path, and is tracked as a risk.
+
+The `IAcmeClient` port exists partly for this reason: replacing Certes is one file plus its
+factory, not a rewrite of the issuance logic.
+
+### A4.2 — The source a certificate is stored under decides whether it renews
+
+Issuance originally stored its result through the certificate manager's operator-import path,
+on the reasonable-sounding grounds that the storage is identical either way.
+
+It is not identical, because the recorded **source** is what the renewal loop filters on. An
+ACME certificate stored as `ImportedPfx` is one the aggregate correctly refuses to auto-renew —
+this server cannot reissue somebody else's imported certificate — so every certificate obtained
+automatically would have expired without a single renewal attempt, while the renewal loop ran
+every twelve hours and found nothing to do.
+
+This is the third defect of the same shape in four milestones: Milestone 2's lockout counter
+rolled back by its own transaction, Milestone 3's default-binding write ordering, and now this.
+All three were code that looked correct, passed review, and did nothing. All three were caught
+by a test written to assert the *outcome* rather than the mechanism. That is worth stating as a
+practice: **for anything that is supposed to happen automatically, assert that it happened, not
+that the code which would cause it exists.**
+
+### A4.3 — A directive parser must not match prose
+
+The migration runner decided a script was destructive by searching for `-- @Destructive`
+anywhere in the file. The natural comment at the top of an additive migration is "this is not
+marked @Destructive", and whether that tripped the check depended on where the sentence happened
+to wrap.
+
+Migrations 0002 and 0003 escaped by luck. 0004 wrapped differently, was classified destructive,
+refused to apply, and took every database-backed test in the solution with it — 94 failures from
+a comment.
+
+Directives are now matched as a whole comment line. A rule that holds because of where a
+sentence breaks is not a rule.
+
+### A4.4 — Wildcards are refused rather than half-supported
+
+A wildcard certificate can be obtained: DNS-01 is implemented and is the challenge wildcards
+need. It could not then be *presented*, because `TlsCertificateProvider` selects by exact SNI
+hostname, so a certificate bound to `*.example.com` would never be chosen for any name it
+covers.
+
+Issuing one would spend real, rate-limited quota on something the server cannot serve. The
+request is therefore refused, with a message that names that reason rather than a generic
+validation error — an operator told "not a valid hostname" would check the spelling of something
+that is spelled correctly.
+
+Wildcard support is a change to the handshake path, not to ACME, and belongs with whichever
+milestone makes binding lookup wildcard-aware.
+
+---
+
+*Document version 1.3 — baseline for Milestone 1, with the Milestone 2, 3 and 4 addenda.*

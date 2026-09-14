@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using MailServer.Domain.Enums;
 
 namespace MailServer.Infrastructure.Configuration;
 
@@ -43,6 +44,8 @@ public sealed class MailServerOptions
     public MaintenanceOptions Maintenance { get; set; } = new();
 
     public CertificateOptions Certificates { get; set; } = new();
+
+    public AcmeOptions Acme { get; set; } = new();
 }
 
 /// <summary>The server's own identity.</summary>
@@ -379,4 +382,63 @@ public sealed class CertificateOptions
     /// disk. Automatically inert on other platforms, where there is no store to prefer.
     /// </remarks>
     public bool PreferWindowsCertificateStore { get; set; } = true;
+}
+
+/// <summary>ACME / Let's Encrypt settings.</summary>
+public sealed class AcmeOptions
+{
+    /// <summary>
+    /// Which directory to use: <c>LetsEncryptStaging</c>, <c>LetsEncryptProduction</c> or
+    /// <c>Custom</c>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Staging by default, and that is not timidity.</b> An operator fixing DNS while
+    /// retrying against production exhausts the five-duplicate-certificates-per-week limit in
+    /// an afternoon and then waits a week with nothing to show for it. Staging proves the flow
+    /// works, costs no production quota, and the certificates it issues are valid in every
+    /// respect except being publicly trusted.
+    /// </remarks>
+    public AcmeDirectory Directory { get; set; } = AcmeDirectory.LetsEncryptStaging;
+
+    /// <summary>Directory endpoint when <see cref="Directory"/> is <c>Custom</c>.</summary>
+    public string? CustomDirectoryUrl { get; set; }
+
+    /// <summary>Address the CA sends expiry warnings to.</summary>
+    [EmailAddress]
+    public string? ContactEmail { get; set; }
+
+    /// <summary>
+    /// Whether the operator accepts the CA's terms of service.
+    /// </summary>
+    /// <remarks>
+    /// Defaults to false and must be set deliberately. Registration fails with a clear message
+    /// until it is: accepting a legal agreement on an operator's behalf because it was
+    /// convenient is not this software's decision.
+    /// </remarks>
+    public bool AcceptTermsOfService { get; set; }
+
+    /// <summary>Challenge type used unless one is chosen per request.</summary>
+    public AcmeChallengeType ChallengeType { get; set; } = AcmeChallengeType.Http01;
+
+    /// <summary>Whether the service runs the HTTP-01 challenge endpoint itself.</summary>
+    public bool EnableHttpChallengeListener { get; set; } = true;
+
+    /// <summary>Port the HTTP-01 endpoint listens on.</summary>
+    [Range(1, 65_535)]
+    public int HttpChallengePort { get; set; } = 80;
+
+    /// <summary>
+    /// Resolvers queried when checking whether a DNS-01 record has propagated.
+    /// </summary>
+    /// <remarks>
+    /// Should be the zone's authoritative nameservers. The defaults are public recursive
+    /// resolvers, which is a compromise noted in docs/LetsEncrypt.md: they can serve a cached
+    /// negative answer after a record is live, so a check that says "not yet" is worth
+    /// repeating.
+    /// </remarks>
+    public IList<string> ChallengeCheckResolvers { get; set; } = ["1.1.1.1", "8.8.8.8"];
+
+    /// <summary>Key size for issued certificates.</summary>
+    [Range(2048, 4096)]
+    public int CertificateKeySizeBits { get; set; } = 3072;
 }

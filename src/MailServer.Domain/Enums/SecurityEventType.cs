@@ -63,4 +63,25 @@ public enum SecurityEventType
 
     /// <summary>A request named a command that is not in the registry.</summary>
     UnknownCommandRequested = 15,
+
+    /// <summary>
+    /// A TLS certificate was obtained from a certificate authority.
+    /// </summary>
+    /// <remarks>
+    /// A security event rather than merely an audit record. A certificate asserts this server's
+    /// identity to every client and every remote MTA, so an issuance nobody initiated is worth
+    /// noticing — and certificate transparency logs make every issuance public anyway, which
+    /// makes an unexplained one in this log the earlier warning.
+    /// </remarks>
+    CertificateIssued = 16,
+
+    /// <summary>
+    /// An attempt to obtain a certificate failed at the certificate authority.
+    /// </summary>
+    /// <remarks>
+    /// Tracked alongside the successes because repeated failures are how an operator loses
+    /// access to issuance entirely: five failed validations per hostname per hour is a limit
+    /// that bites well before anyone is watching the certificate's expiry date.
+    /// </remarks>
+    CertificateIssuanceFailed = 17,
 }

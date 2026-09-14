@@ -135,6 +135,22 @@ These, and the Milestone 2 entries below, are the only entries currently backed 
 | Certificate storage | PKCS#12 | `CertificateLifecycleTests` — the stored file cannot be opened without the passphrase, and the passphrase is not in the key location |
 | Expiry escalation | — | `CertificateRenewalPolicyTests` — thresholds, the lowest-crossed rule, and the never-downgrade property |
 
+---
+
+## Implemented in Milestone 4
+
+| Capability | Standard | Evidence |
+|---|---|---|
+| ACME v2 client | RFC 8555 | `IssuanceTests` — the full sequence against a fake CA at the `IAcmeClient` seam; **not** verified against Let's Encrypt, see `docs/LetsEncrypt.md` |
+| HTTP-01 challenge | RFC 8555 §8.3 | `IssuanceTests` — publication and cleanup; the Kestrel endpoint verified at runtime to serve 404 for unknown tokens |
+| DNS-01 challenge | RFC 8555 §8.4 | `IssuanceTests` — record published and removed, and the manual path proved to stop before asking the CA to validate |
+| DNS TXT lookup | RFC 1035 | `DnsTxtParsingTests` — 11 tests including truncation at every offset, a self-referential compression pointer, and rdata claiming to run past the buffer |
+| Rate-limit awareness | Let's Encrypt published limits | `RateLimitTests` — 9 tests; `IssuanceTests` proves local refusals do not count towards the limit |
+| Pre-flight refusal | — | `IssuanceTests` — a blocking finding stops the order before the CA sees it |
+| Automatic renewal | — | `IssuanceTests` — the issued certificate satisfies the renewal loop's own filter, and reissuing repoints the existing binding |
+| Migration directive parsing | — | `MigrationDirectiveTests` — a comment mentioning `@Destructive` no longer becomes it |
+
+
 
 
 ---
@@ -156,4 +172,4 @@ These, and the Milestone 2 entries below, are the only entries currently backed 
 
 ---
 
-*Last updated at the completion of Milestone 3.*
+*Last updated at the completion of Milestone 4.*

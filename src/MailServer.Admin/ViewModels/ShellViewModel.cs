@@ -156,6 +156,7 @@ public sealed partial class ShellViewModel : ObservableObject, IDisposable
         new("Services", "Server", typeof(DashboardViewModel), IsAvailable: false),
         new("Network", "Server", typeof(DashboardViewModel), IsAvailable: false),
         new("Certificates", "Server", typeof(CertificatesViewModel)),
+        new("Let's Encrypt", "Server", typeof(LetsEncryptViewModel)),
         new("Storage", "Server", typeof(DashboardViewModel), IsAvailable: false),
         new("Database", "Server", typeof(DashboardViewModel), IsAvailable: false),
 

@@ -6,9 +6,9 @@ This is a complete mail platform — SMTP receipt, authenticated submission, dir
 delivery, IMAP access, DKIM/SPF/DMARC, automatic TLS certificates and deliverability
 diagnostics — not an SMTP sending utility.
 
-> **Status: Milestone 3 of 13 complete.** The foundation, the security layer and the certificate
-> infrastructure are built, compile with warnings as errors, and are covered by 935 passing
-> tests. It does not yet send or receive mail; see
+> **Status: Milestone 4 of 13 complete.** The foundation, the security layer, the certificate
+> infrastructure and ACME/Let's Encrypt are built, compile with warnings as errors, and are
+> covered by 1,054 passing tests. It does not yet send or receive mail; see
 > [Roadmap](#roadmap) for what lands when, and `docs/Standards.md` for exactly which standards
 > are implemented versus planned. Nothing is described as working until it has tests.
 
@@ -34,7 +34,8 @@ diagnostics — not an SMTP sending utility.
 | TLS certificates (self-signed, PFX import, Windows store) | Built and tested |
 | Hot certificate reload without restarting listeners | Built; proven by test, no restart required |
 | Certificate expiry monitoring and health | Built and tested |
-| ACME / Let's Encrypt automatic renewal | **Not yet built** — milestone 4 |
+| ACME / Let's Encrypt issuance and renewal | Built; tested against a fake CA, **not yet against Let's Encrypt** — see [LetsEncrypt.md](docs/LetsEncrypt.md) |
+| Rate-limit and pre-flight protection | Built and tested |
 | SMTP, IMAP, POP3, DKIM, queue, filtering | **Not yet built** — milestones 6–12 |
 
 ---
@@ -189,11 +190,12 @@ src/
 tests/
   MailServer.Domain.Tests/           #  99 tests
   MailServer.Application.Tests/      #  50 tests
-  MailServer.Infrastructure.Tests/   #  49 tests
+  MailServer.Infrastructure.Tests/   #  61 tests
   MailServer.Ipc.Tests/              #  99 tests (end to end over a real pipe, incl. session enforcement)
   MailServer.Persistence.Tests/      #  37 tests (against real SQLite)
-  MailServer.SecurityTests/          # 473 tests (real Argon2, real SQLite, no-bypass source scan)
+  MailServer.SecurityTests/          # 527 tests (real Argon2, real SQLite, no-bypass source scan)
   MailServer.Certificates.Tests/     #  51 tests (real certificate generation and hot reload)
+  MailServer.Acme.Tests/             #  37 tests (issuance against a fake CA, DNS parsing, limits)
 ```
 
 Projects for milestones 4–13 are created **in** those milestones. A solution full of empty
@@ -213,6 +215,7 @@ assemblies looks finished and provides no compile-time value.
 | [SqlServer.md](docs/SqlServer.md) | Isolation, queue patterns, backups |
 | [Security.md](docs/Security.md) | Threat model, authentication, sessions, audit |
 | [Certificates.md](docs/Certificates.md) | Sources, bindings, hot reload, the never-downgrade rule |
+| [LetsEncrypt.md](docs/LetsEncrypt.md) | ACME, challenges, rate limits, and what is not yet proven |
 | [Standards.md](docs/Standards.md) | Every standard, with an honest Implemented/Partial/Planned status |
 | [Installation.md](docs/Installation.md) | Installing and configuring |
 | [Troubleshooting.md](docs/Troubleshooting.md) | Port 25, DNS, certificates, reputation |
@@ -232,8 +235,8 @@ assemblies looks finished and provides no compile-time value.
 | 1 | Core Foundation | **Complete** |
 | 2 | Security & Administration (Argon2id, DPAPI store, audit) | **Complete** |
 | 3 | Certificate Infrastructure | **Complete** |
-| 4 | ACME / Let's Encrypt | Next |
-| 5 | Domain Administration (mailboxes, aliases, quotas) | Planned |
+| 4 | ACME / Let's Encrypt | **Complete** |
+| 5 | Domain Administration (mailboxes, aliases, quotas) | Next |
 | 6 | SMTP Inbound + relay protection | Planned |
 | 7 | SMTP Submission | Planned |
 | 8 | Outbound MTA | Planned |

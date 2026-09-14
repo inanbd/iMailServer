@@ -3,6 +3,9 @@ using MailServer.Application.Abstractions.Messaging;
 using MailServer.Application.Common;
 using MailServer.Application.Domains.Commands;
 using MailServer.Application.Domains.Dtos;
+using MailServer.Application.Acme.Commands;
+using MailServer.Application.Acme.Dtos;
+using MailServer.Application.Acme.Queries;
 using MailServer.Application.Certificates.Commands;
 using MailServer.Application.Certificates.Dtos;
 using MailServer.Application.Certificates.Queries;
@@ -201,6 +204,13 @@ public sealed class IpcCommandRegistry
         new("Certificates.Unbind", typeof(UnbindCertificateCommand), typeof(Unit)),
         new("Certificates.SetDefaultBinding", typeof(SetDefaultBindingCommand), typeof(Unit)),
         new("Certificates.Delete", typeof(DeleteCertificateCommand), typeof(Unit)),
+
+        // ---- ACME / Let's Encrypt -------------------------------------------------------------
+        new("Acme.Status", typeof(GetAcmeStatusQuery), typeof(AcmeStatusDto)),
+        new("Acme.Accounts", typeof(GetAcmeAccountsQuery), typeof(IReadOnlyList<AcmeAccountDto>)),
+        new("Acme.Orders", typeof(GetAcmeOrdersQuery), typeof(IReadOnlyList<AcmeOrderDto>)),
+        new("Acme.CheckReadiness", typeof(CheckIssuanceReadinessCommand), typeof(IReadOnlyList<PreflightFindingDto>)),
+        new("Acme.RequestCertificate", typeof(RequestCertificateCommand), typeof(IssuanceResultDto)),
 
         // ---- Monitoring ---------------------------------------------------------------------
         new("Monitoring.Dashboard", typeof(GetDashboardQuery), typeof(DashboardDto)),
