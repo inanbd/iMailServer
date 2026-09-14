@@ -210,44 +210,41 @@ public sealed class SmtpLineReader
         }
     }
 
+    /// <summary>Octets read from the connection and not yet consumed.</summary>
+    /// <remarks>
+    /// The window a raw reader works from. It is a view into the reader's own buffer rather than
+    /// a copy, so the octets a caller does not consume stay exactly where they were.
+    /// </remarks>
+    public ReadOnlyMemory<byte> BufferedInput => _buffer.AsMemory(_start, _end - _start);
+
     /// <summary>
-    /// Reads raw octets, draining anything already buffered before touching the connection.
+    /// Ensures at least one unconsumed octet is buffered, reading from the connection if needed.
     /// </summary>
     /// <remarks>
-    /// This is how <c>DATA</c> is read. Draining the buffer first is mandatory, not an
-    /// optimisation: with PIPELINING the first octets of the message body arrive in the same
-    /// packet as the <c>DATA</c> command itself, and a reader that went straight to the socket
-    /// would silently lose them.
+    /// <para>
+    /// This is how <c>DATA</c> is read: fill, look at <see cref="BufferedInput"/>, then
+    /// <see cref="Consume"/> exactly what belonged to the message. The leftover — with PIPELINING
+    /// that is the next command, which arrives in the same packet as the end-of-data marker —
+    /// stays buffered for the command loop to read.
+    /// </para>
+    /// <para>
+    /// A caller that copied octets out into its own buffer instead would have to hand back
+    /// whatever it did not use, and a reader with a push-back path is a reader that can be made
+    /// to hold more than its budget. Returning a window avoids the question.
+    /// </para>
     /// </remarks>
-    public async ValueTask<SmtpReadResult> ReadRawAsync(
-        Memory<byte> destination,
-        TimeSpan timeout,
-        CancellationToken cancellationToken)
+    public async ValueTask<SmtpReadResult> FillAsync(TimeSpan timeout, CancellationToken cancellationToken)
     {
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
 
-        if (destination.Length == 0)
-        {
-            throw new ArgumentException("Destination must not be empty.", nameof(destination));
-        }
-
         if (_end > _start)
         {
-            int available = Math.Min(destination.Length, _end - _start);
-
-            _buffer.AsMemory(_start, available).CopyTo(destination);
-            _start += available;
-            _scanned = Math.Max(0, _scanned - available);
-
-            if (_start == _end)
-            {
-                _start = 0;
-                _end = 0;
-                _scanned = 0;
-            }
-
-            return new SmtpReadResult(SmtpReadStatus.Data, available);
+            return new SmtpReadResult(SmtpReadStatus.Data, _end - _start);
         }
+
+        _start = 0;
+        _end = 0;
+        _scanned = 0;
 
         using CancellationTokenSource timeoutSource =
             CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -258,16 +255,38 @@ public sealed class SmtpLineReader
 
         try
         {
-            read = await _stream.ReadAsync(destination, timeoutSource.Token).ConfigureAwait(false);
+            read = await _stream.ReadAsync(_buffer.AsMemory(0), timeoutSource.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             return new SmtpReadResult(SmtpReadStatus.Timeout, 0);
         }
 
-        return read == 0
-            ? new SmtpReadResult(SmtpReadStatus.EndOfStream, 0)
-            : new SmtpReadResult(SmtpReadStatus.Data, read);
+        if (read == 0)
+        {
+            return new SmtpReadResult(SmtpReadStatus.EndOfStream, 0);
+        }
+
+        _end = read;
+
+        return new SmtpReadResult(SmtpReadStatus.Data, read);
+    }
+
+    /// <summary>Marks the first <paramref name="octets"/> buffered octets as used.</summary>
+    public void Consume(int octets)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(octets);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(octets, _end - _start);
+
+        _start += octets;
+        _scanned = Math.Max(0, _scanned - octets);
+
+        if (_start == _end)
+        {
+            _start = 0;
+            _end = 0;
+            _scanned = 0;
+        }
     }
 
     private bool TryTakeLine(out SmtpLineResult line)

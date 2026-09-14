@@ -329,7 +329,7 @@ public sealed class SmtpLineReaderTests
     // ---------------------------------------------------------------------------------------
 
     [Fact]
-    public async Task Raw_reads_drain_buffered_octets_before_touching_the_connection()
+    public async Task Filling_surfaces_buffered_octets_before_touching_the_connection()
     {
         // With PIPELINING the body arrives in the same packet as DATA. Going straight to the
         // socket would lose the first octets of every pipelined message.
@@ -337,17 +337,46 @@ public sealed class SmtpLineReaderTests
 
         (await reader.ReadLineAsync(Generous, default)).Text.ShouldBe("DATA");
 
-        byte[] destination = new byte[64];
-        SmtpReadResult result = await reader.ReadRawAsync(destination, Generous, default);
+        SmtpReadResult result = await reader.FillAsync(Generous, default);
 
         result.Status.ShouldBe(SmtpReadStatus.Data);
-        Encoding.UTF8.GetString(destination, 0, result.OctetCount).ShouldBe("hello\r\n.\r\n");
+        Encoding.UTF8.GetString(reader.BufferedInput.Span).ShouldBe("hello\r\n.\r\n");
     }
 
     [Fact]
-    public async Task Raw_reads_continue_past_the_buffer_into_the_connection()
+    public async Task Octets_the_caller_does_not_consume_stay_buffered()
     {
-        SmtpLineReader reader = Reader("DATA\r\nbody\r\n.\r\n", chunkSize: 8);
+        // The reason the raw read hands back a window rather than copying into the caller's
+        // buffer. A DATA pump consumes up to the end-of-data marker; whatever follows is the
+        // next command and must still be there for the command loop to read.
+        SmtpLineReader reader = Reader("DATA\r\nhi\r\n.\r\nQUIT\r\n");
+
+        await reader.ReadLineAsync(Generous, default);
+        await reader.FillAsync(Generous, default);
+
+        reader.Consume("hi\r\n.\r\n".Length);
+
+        (await reader.ReadLineAsync(Generous, default)).Text.ShouldBe("QUIT");
+    }
+
+    [Fact]
+    public async Task Consuming_more_than_is_buffered_is_refused()
+    {
+        // A caller that over-consumed would silently skip octets of the next command, which is
+        // how a partial command becomes a command nobody sent.
+        SmtpLineReader reader = Reader("DATA\r\nhi\r\n.\r\n");
+
+        await reader.ReadLineAsync(Generous, default);
+
+        SmtpReadResult result = await reader.FillAsync(Generous, default);
+
+        Should.Throw<ArgumentOutOfRangeException>(() => reader.Consume(result.OctetCount + 1));
+    }
+
+    [Fact]
+    public async Task Filling_continues_past_the_buffer_into_the_connection()
+    {
+        SmtpLineReader reader = Reader("DATA\r\nbody\r\n.\r\n", chunkSize: 3);
 
         await reader.ReadLineAsync(Generous, default);
 
@@ -355,27 +384,41 @@ public sealed class SmtpLineReaderTests
 
         while (collected.Length < "body\r\n.\r\n".Length)
         {
-            byte[] destination = new byte[4];
-            SmtpReadResult result = await reader.ReadRawAsync(destination, Generous, default);
+            SmtpReadResult result = await reader.FillAsync(Generous, default);
 
             result.Status.ShouldBe(SmtpReadStatus.Data);
-            collected.Append(Encoding.UTF8.GetString(destination, 0, result.OctetCount));
+            collected.Append(Encoding.UTF8.GetString(reader.BufferedInput.Span));
+            reader.Consume(result.OctetCount);
         }
 
         collected.ToString().ShouldBe("body\r\n.\r\n");
     }
 
     [Fact]
-    public async Task A_raw_read_at_end_of_stream_says_so()
+    public async Task Filling_at_end_of_stream_says_so()
     {
         SmtpLineReader reader = Reader("NOOP\r\n");
 
         await reader.ReadLineAsync(Generous, default);
 
-        SmtpReadResult result = await reader.ReadRawAsync(new byte[16], Generous, default);
+        SmtpReadResult result = await reader.FillAsync(Generous, default);
 
         result.Status.ShouldBe(SmtpReadStatus.EndOfStream);
         result.OctetCount.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task A_fill_never_returns_more_than_the_line_budget()
+    {
+        // The window is the reader's own buffer, so the DATA pump inherits the same bound the
+        // command reader has. Nothing on either path grows with what the peer sends.
+        EndlessStream endless = new((byte)'A');
+        SmtpLineReader reader = new(endless, 4096);
+
+        SmtpReadResult result = await reader.FillAsync(Generous, default);
+
+        result.OctetCount.ShouldBeLessThanOrEqualTo(4098);
+        reader.BufferedInput.Length.ShouldBeLessThanOrEqualTo(4098);
     }
 
     [Fact]
