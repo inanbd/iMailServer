@@ -20,6 +20,8 @@
             <conv:InverseBooleanConverter x:Key="InverseBool" />
             <conv:BoolToVisibilityConverter x:Key="BoolToVisibility" />
             <conv:NullToVisibilityConverter x:Key="NullToVisibility" />
+            <conv:JoinStringsConverter x:Key="JoinStrings" />
+            <conv:NullToBooleanConverter x:Key="NullToBool" />
             <conv:AuthenticationStageToVisibilityConverter x:Key="StageToVisibility" />
             <conv:SecurityEventToBrushConverter x:Key="SecurityEventToBrush" />
             <conv:AuditResultToBrushConverter x:Key="AuditResultToBrush" />
@@ -35,6 +37,10 @@
 
             <DataTemplate DataType="{x:Type vm:DomainsViewModel}">
                 <pages:DomainsView />
+            </DataTemplate>
+
+            <DataTemplate DataType="{x:Type vm:MailboxesViewModel}">
+                <pages:MailboxesView />
             </DataTemplate>
 
             <DataTemplate DataType="{x:Type vm:LetsEncryptViewModel}">

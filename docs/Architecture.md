@@ -1866,4 +1866,64 @@ milestone makes binding lookup wildcard-aware.
 
 ---
 
-*Document version 1.3 — baseline for Milestone 1, with the Milestone 2, 3 and 4 addenda.*
+## Addendum — decisions taken during Milestone 5
+
+§23 stands. Four decisions are worth recording, three of them trades rather than discoveries.
+
+### A5.1 — Challenge-response SMTP AUTH is refused, and this is the reason
+
+CRAM-MD5 and DIGEST-MD5 require the server to hold something it can compute a challenge
+response from — in practice the password, or a reversible transformation of it. A mail server
+storing recoverable mailbox passwords turns one database read into every user's password, and
+those users have reused them elsewhere.
+
+The trade is stated rather than quietly made. AUTH PLAIN and AUTH LOGIN send the password to a
+server that verifies it against an Argon2id hash and discards it, which is strictly better
+given that rule 105 already forbids offering AUTH without TLS. What is given up is
+interoperability with a small number of old clients configured for CRAM-MD5, and the honest
+framing is that those clients are asking for something no server should agree to.
+
+### A5.2 — Suspended and Disabled are different states, and the difference is what leaks
+
+A **disabled** mailbox rejects mail and refuses logins. A **suspended** one keeps accepting
+mail and refuses logins only.
+
+Suspension is the state for someone who has left, an account under investigation, or one whose
+password may be compromised. Rejecting mail in that state announces the suspension to every
+sender — which for a compromised account is precisely the signal not to broadcast, and for a
+departed employee tells every correspondent something the organisation may not have said yet.
+Accepting mail costs storage and loses nothing.
+
+### A5.3 — Alias cycles are refused at creation, not merely survived at delivery
+
+`AliasExpansionPolicy` is bounded in depth and breadth, so a cycle terminates and a fan-out
+cannot amplify. That is the backstop and it runs on the SMTP path for every message.
+
+It is not sufficient on its own, because the way it survives a cycle is by silently dropping
+recipients. The operator who built the cycle is the one person who can fix it, and the moment
+they can is while they are looking at the alias. So `CreateAlias` and `UpdateAlias` expand the
+graph *as it would be* and refuse a change that makes expansion unbounded or empty.
+
+Two limits rather than one, and they catch different things: depth stops a cycle, breadth stops
+amplification. One message to one address becoming several hundred deliveries is a
+resource-exhaustion problem and, where targets are external, an outbound reputation problem — a
+server emitting a burst of near-identical messages looks exactly like a compromised one.
+
+### A5.4 — "Zero means inherit" has one sharp edge, and it is documented rather than removed
+
+A mailbox quota of zero means "inherit the domain default", matching the schema written in
+Milestone 1. The consequence is that a mailbox cannot be *explicitly* unlimited while its
+domain has a quota.
+
+A nullable column would express both, and would also mean every read path distinguishing null
+from zero — in delivery, in the admin UI, in the grid's percentage calculation. The encoding
+stays; the edge is asserted in a test named for it, so an operator who meets it finds it
+documented rather than surprising.
+
+The related decision: a quota **may** be set below current usage. Refusing would leave an
+operator unable to act on a mailbox that is already too large, which is exactly when they most
+need to.
+
+---
+
+*Document version 1.4 — baseline for Milestone 1, with the Milestone 2–5 addenda.*

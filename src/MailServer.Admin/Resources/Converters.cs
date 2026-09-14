@@ -217,3 +217,27 @@ public sealed class NullToVisibilityConverter : IValueConverter
     public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) =>
         throw new NotSupportedException();
 }
+
+/// <summary>Joins a string collection for display in a single grid cell.</summary>
+/// <remarks>
+/// Comma-separated rather than newline-separated: a DataGrid cell is one line, and a newline
+/// would render as a space anyway while making the value harder to copy cleanly.
+/// </remarks>
+public sealed class JoinStringsConverter : IValueConverter
+{
+    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture) =>
+        value is IEnumerable<string> values ? string.Join(", ", values) : string.Empty;
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) =>
+        throw new NotSupportedException();
+}
+
+/// <summary>True when the bound value is not null. For enabling a button on a selection.</summary>
+public sealed class NullToBooleanConverter : IValueConverter
+{
+    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture) =>
+        value is not null;
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) =>
+        throw new NotSupportedException();
+}

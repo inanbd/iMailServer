@@ -10,6 +10,9 @@ using MailServer.Application.Certificates.Commands;
 using MailServer.Application.Certificates.Dtos;
 using MailServer.Application.Certificates.Queries;
 using MailServer.Application.Domains.Queries;
+using MailServer.Application.Mailboxes.Commands;
+using MailServer.Application.Mailboxes.Dtos;
+using MailServer.Application.Mailboxes.Queries;
 using MailServer.Application.Monitoring.Dtos;
 using MailServer.Application.Monitoring.Queries;
 using MailServer.Application.Security.Commands;
@@ -191,6 +194,20 @@ public sealed class IpcCommandRegistry
         new("Domains.Update", typeof(UpdateDomainCommand), typeof(Unit)),
         new("Domains.SetStatus", typeof(SetDomainStatusCommand), typeof(Unit)),
         new("Domains.Delete", typeof(DeleteDomainCommand), typeof(Unit)),
+
+        // ---- Mailboxes and aliases ------------------------------------------------------------
+        new("Mailboxes.List", typeof(GetMailboxesQuery), typeof(IReadOnlyList<MailboxSummaryDto>)),
+        new("Mailboxes.Get", typeof(GetMailboxQuery), typeof(MailboxDetailDto)),
+        new("Mailboxes.Create", typeof(CreateMailboxCommand), typeof(MailboxSummaryDto)),
+        new("Mailboxes.Update", typeof(UpdateMailboxCommand), typeof(Unit)),
+        new("Mailboxes.SetPassword", typeof(SetMailboxPasswordCommand), typeof(Unit)),
+        new("Mailboxes.Delete", typeof(DeleteMailboxCommand), typeof(Unit)),
+        new("Mailboxes.RoleAddresses", typeof(GetMissingRoleAddressesQuery), typeof(IReadOnlyList<MissingRoleAddressDto>)),
+
+        new("Aliases.List", typeof(GetAliasesQuery), typeof(IReadOnlyList<AliasDto>)),
+        new("Aliases.Create", typeof(CreateAliasCommand), typeof(AliasDto)),
+        new("Aliases.Update", typeof(UpdateAliasCommand), typeof(Unit)),
+        new("Aliases.Delete", typeof(DeleteAliasCommand), typeof(Unit)),
 
         // ---- Certificates -------------------------------------------------------------------
         new("Certificates.List", typeof(GetCertificatesQuery), typeof(IReadOnlyList<CertificateDto>)),

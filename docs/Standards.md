@@ -150,6 +150,21 @@ These, and the Milestone 2 entries below, are the only entries currently backed 
 | Automatic renewal | — | `IssuanceTests` — the issued certificate satisfies the renewal loop's own filter, and reissuing repoints the existing binding |
 | Migration directive parsing | — | `MigrationDirectiveTests` — a comment mentioning `@Destructive` no longer becomes it |
 
+---
+
+## Implemented in Milestone 5
+
+| Capability | Standard | Evidence |
+|---|---|---|
+| Mailbox quota inheritance and enforcement | — | `QuotaTests` — 22 tests including the exact-fill boundary, the clamp at zero, and lowering a quota below current usage |
+| Role addresses | RFC 2142, RFC 5321 §4.5.1 | `MailboxAdministrationTests` — a new domain reports `postmaster@` missing, and an alias satisfies it |
+| IMAP SPECIAL-USE folders | RFC 6154 | `MailboxAdministrationTests` — the standard six are provisioned at creation with one inbox |
+| Alias expansion bounds | — | `AliasExpansionPolicyTests` — 12 tests including a two-alias cycle, a self-reference, and an exponentially branching graph |
+| Mailbox credentials | RFC 9106 (Argon2id) | `MailboxAdministrationTests` — the stored column is read directly and asserted to be a PHC verifier, not the password |
+| Address uniqueness across mailboxes and aliases | — | `MailboxAdministrationTests` — refused in both directions |
+| Full mailbox and alias CRUD | — | `MailboxAdministrationTests` — 42 tests through the real pipeline; `IpcEndToEndTests` proves all 11 new commands require a session |
+
+
 
 
 
@@ -172,4 +187,4 @@ These, and the Milestone 2 entries below, are the only entries currently backed 
 
 ---
 
-*Last updated at the completion of Milestone 4.*
+*Last updated at the completion of Milestone 5.*

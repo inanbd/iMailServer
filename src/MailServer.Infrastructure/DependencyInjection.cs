@@ -166,6 +166,10 @@ public static class DependencyInjection
         services.TryAddScoped<IAcmeIssuanceService, AcmeIssuanceService>();
         services.TryAddScoped<IAcmeRepository, AcmeRepository>();
 
+        // ---- Mailbox administration (Milestone 5) ------------------------------------------
+        services.TryAddScoped<IMailboxRepository, MailboxRepository>();
+        services.TryAddScoped<IAliasRepository, AliasRepository>();
+
 
         services.TryAddScoped<IDomainRepository, DomainRepository>();
         services.TryAddScoped<IAuditRepository, AuditRepository>();

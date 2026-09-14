@@ -1,0 +1,200 @@
+<UserControl x:Class="MailServer.Admin.Views.Pages.MailboxesView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="clr-namespace:MailServer.Admin.ViewModels"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=vm:MailboxesViewModel}">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="16">
+        <StackPanel>
+
+            <TextBlock Text="Mailboxes" Style="{StaticResource PageTitle}" />
+            <TextBlock Style="{StaticResource Caption}"
+                       Text="Mailboxes store mail and can be logged into. Aliases forward to other addresses and store nothing. An address is one or the other, never both." />
+
+            <Border Style="{StaticResource ErrorBanner}" Margin="0,12,0,0"
+                    Visibility="{Binding ErrorMessage, Converter={StaticResource StringToVisibility}}">
+                <TextBlock Text="{Binding ErrorMessage}" TextWrapping="Wrap" />
+            </Border>
+
+            <!-- Domain selector -->
+            <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                <TextBlock Text="Domain" VerticalAlignment="Center" Margin="0,0,8,0" />
+                <ComboBox ItemsSource="{Binding Domains}" SelectedItem="{Binding SelectedDomain}"
+                          DisplayMemberPath="Name" Width="260" />
+                <Button Content="Refresh" Command="{Binding RefreshCommand}" Margin="8,0,0,0" />
+            </StackPanel>
+
+            <!--
+                postmaster@ is required by RFC 5321 §4.5.1. Without it the one channel through
+                which a remote administrator reports a delivery problem is gone, so this is a
+                banner rather than a row somebody has to go looking for.
+            -->
+            <Border Background="#FFFFF4CE" BorderBrush="{StaticResource State.Warning}"
+                    BorderThickness="1" Padding="10" Margin="0,12,0,0"
+                    Visibility="{Binding HasMissingRoleAddresses, Converter={StaticResource BoolToVisibility}}">
+                <StackPanel>
+                    <TextBlock Text="This domain does not answer every expected role address"
+                               FontWeight="SemiBold" Margin="0,0,0,4" />
+                    <ItemsControl ItemsSource="{Binding MissingRoleAddresses}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Margin="0,4">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="{Binding LocalPart}" FontFamily="Consolas"
+                                                   FontWeight="SemiBold" Width="120" />
+                                        <TextBlock Text="REQUIRED" FontWeight="SemiBold"
+                                                   Foreground="{StaticResource State.Critical}"
+                                                   Visibility="{Binding IsRequired, Converter={StaticResource BoolToVisibility}}" />
+                                    </StackPanel>
+                                    <TextBlock Text="{Binding Purpose}" TextWrapping="Wrap"
+                                               Style="{StaticResource Caption}" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,6,0,0"
+                               Text="An alias to a real person satisfies these perfectly, and is usually the better arrangement - nobody wants to log into postmaster@ separately." />
+                </StackPanel>
+            </Border>
+
+            <!-- Mailboxes -->
+            <TextBlock Text="Mailboxes" Style="{StaticResource SectionHeader}" />
+            <DataGrid ItemsSource="{Binding Mailboxes}" SelectedItem="{Binding SelectedMailbox}"
+                      AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column"
+                      MinHeight="140" MaxHeight="280">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Address" Binding="{Binding Address}" Width="2*" />
+                    <DataGridTextColumn Header="Name" Binding="{Binding DisplayName}" Width="*" />
+                    <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="Auto" />
+                    <DataGridTextColumn Header="Used %" Width="Auto"
+                                        Binding="{Binding QuotaPercentageUsed, StringFormat={}{0:0.#}}" />
+                    <DataGridCheckBoxColumn Header="Password" Binding="{Binding HasCredential}" Width="Auto" />
+                    <DataGridCheckBoxColumn Header="Locked" Binding="{Binding IsLockedOut}" Width="Auto" />
+                    <DataGridTextColumn Header="Last login (UTC)" Width="Auto"
+                                        Binding="{Binding LastLoginUtc, StringFormat=yyyy-MM-dd HH:mm}" />
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <!-- Selected mailbox -->
+            <Border Style="{StaticResource Card}" Margin="0,12,0,0"
+                    Visibility="{Binding SelectedMailbox, Converter={StaticResource NullToVisibility}}">
+                <StackPanel>
+                    <TextBlock Text="{Binding SelectedMailbox.Address}" FontWeight="SemiBold" />
+
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,8,0,0" Text="Storage" />
+                    <TextBlock>
+                        <Run Text="{Binding SelectedMailbox.StorageUsedBytes, Mode=OneWay}" />
+                        <Run Text=" of " />
+                        <Run Text="{Binding SelectedMailbox.EffectiveQuotaBytes, Mode=OneWay}" />
+                        <Run Text=" bytes" />
+                    </TextBlock>
+                    <TextBlock Text="Over quota - this mailbox is refusing new mail"
+                               Foreground="{StaticResource State.Critical}" FontWeight="SemiBold"
+                               Visibility="{Binding SelectedMailbox.IsOverQuota, Converter={StaticResource BoolToVisibility}}" />
+
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,8,0,0"
+                               Text="Aliases forwarding here" />
+                    <ItemsControl ItemsSource="{Binding MailboxDetail.IncomingAliases}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding}" FontFamily="Consolas" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <!-- Status -->
+                    <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                        <Button Content="Activate" Margin="0,0,6,0"
+                                Command="{Binding SetStatusCommand}" CommandParameter="Active" />
+                        <Button Content="Suspend" Margin="0,0,6,0"
+                                Command="{Binding SetStatusCommand}" CommandParameter="Suspended"
+                                ToolTip="Keeps accepting mail; refuses every login." />
+                        <Button Content="Disable"
+                                Command="{Binding SetStatusCommand}" CommandParameter="Disabled"
+                                ToolTip="Rejects mail and refuses every login." />
+                    </StackPanel>
+
+                    <!--
+                        The password is read from this PasswordBox at the moment the button is
+                        pressed and passed as a method argument. PasswordBox.Password is not a
+                        dependency property precisely so it cannot be bound, and working around
+                        that is the mistake this arrangement avoids.
+                    -->
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,12,0,0"
+                               Text="Set a new password" />
+                    <StackPanel Orientation="Horizontal">
+                        <PasswordBox x:Name="NewPasswordBox" Width="260" />
+                        <Button Content="Set password" Margin="8,0,0,0" Click="OnSetPassword" />
+                    </StackPanel>
+
+                    <!-- Delete -->
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,12,0,0"
+                               Text="Type the full address to confirm deletion. Deleting a mailbox destroys its mail and cannot be undone." />
+                    <StackPanel Orientation="Horizontal">
+                        <TextBox Text="{Binding DeleteConfirmationText, UpdateSourceTrigger=PropertyChanged}"
+                                 Width="260" FontFamily="Consolas" />
+                        <Button Content="Delete mailbox" Margin="8,0,0,0"
+                                Command="{Binding DeleteMailboxCommand}"
+                                IsEnabled="{Binding CanDeleteMailbox}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- New mailbox -->
+            <TextBlock Text="Create a mailbox" Style="{StaticResource SectionHeader}" />
+            <StackPanel Orientation="Horizontal">
+                <TextBox Text="{Binding NewMailboxLocalPart, UpdateSourceTrigger=PropertyChanged}"
+                         Width="160" ToolTip="Local-part, e.g. alice" />
+                <TextBox Text="{Binding NewMailboxDisplayName, UpdateSourceTrigger=PropertyChanged}"
+                         Width="200" Margin="8,0,0,0" ToolTip="Display name (optional)" />
+                <PasswordBox x:Name="NewMailboxPasswordBox" Width="200" Margin="8,0,0,0" />
+                <TextBox Text="{Binding NewMailboxQuotaMegabytes, UpdateSourceTrigger=PropertyChanged}"
+                         Width="90" Margin="8,0,0,0"
+                         ToolTip="Quota in MB. 0 inherits the domain default." />
+                <Button Content="Create" Margin="8,0,0,0" Click="OnCreateMailbox"
+                        IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+            </StackPanel>
+            <TextBlock Style="{StaticResource Caption}"
+                       Text="Leaving the password empty creates a mailbox that accepts mail and cannot be logged into - useful for a drop box, and easy to do by accident, so the grid shows which mailboxes have no password." />
+
+            <!-- Aliases -->
+            <TextBlock Text="Aliases" Style="{StaticResource SectionHeader}" />
+            <DataGrid ItemsSource="{Binding Aliases}" SelectedItem="{Binding SelectedAlias}"
+                      AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column"
+                      MaxHeight="240">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Address" Binding="{Binding Address}" Width="2*" />
+                    <DataGridTextColumn Header="Targets" Width="3*"
+                                        Binding="{Binding Targets, Converter={StaticResource JoinStrings}}" />
+                    <DataGridCheckBoxColumn Header="List" Binding="{Binding IsDistributionList}" Width="Auto" />
+                    <DataGridCheckBoxColumn Header="Enabled" Binding="{Binding IsEnabled}" Width="Auto" />
+                    <DataGridTextColumn Header="Description" Binding="{Binding Description}" Width="2*" />
+                </DataGrid.Columns>
+            </DataGrid>
+            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                <Button Content="Delete alias" Command="{Binding DeleteAliasCommand}"
+                        IsEnabled="{Binding SelectedAlias, Converter={StaticResource NullToBool}}" />
+            </StackPanel>
+
+            <!-- New alias -->
+            <TextBlock Text="Create an alias" Style="{StaticResource SectionHeader}" />
+            <StackPanel Orientation="Horizontal">
+                <TextBox Text="{Binding NewAliasLocalPart, UpdateSourceTrigger=PropertyChanged}"
+                         Width="160" ToolTip="Local-part, e.g. sales" />
+                <TextBox Text="{Binding NewAliasTargets, UpdateSourceTrigger=PropertyChanged}"
+                         Width="320" Margin="8,0,0,0"
+                         ToolTip="Target addresses, separated by commas or spaces. May be external." />
+                <TextBox Text="{Binding NewAliasDescription, UpdateSourceTrigger=PropertyChanged}"
+                         Width="200" Margin="8,0,0,0" ToolTip="Why this alias exists (optional)" />
+                <Button Content="Create" Command="{Binding CreateAliasCommand}" Margin="8,0,0,0"
+                        IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+            </StackPanel>
+            <TextBlock Style="{StaticResource Caption}"
+                       Text="An external target is allowed, and worth knowing about: forwarded mail arrives at the destination from this server, so SPF sees this server rather than the original sender." />
+
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

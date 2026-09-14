@@ -147,8 +147,10 @@ public sealed partial class ShellViewModel : ObservableObject, IDisposable
         new("Dashboard", "Overview", typeof(DashboardViewModel)),
 
         new("Domains", "Mail", typeof(DomainsViewModel)),
-        new("Mailboxes", "Mail", typeof(DomainsViewModel), IsAvailable: false),
-        new("Aliases", "Mail", typeof(DomainsViewModel), IsAvailable: false),
+        // One page, because mailboxes and aliases share an address space: an address is one or
+        // the other, and deciding which to create is a single decision rather than a choice
+        // between two screens.
+        new("Mailboxes & Aliases", "Mail", typeof(MailboxesViewModel)),
         new("Queue", "Mail", typeof(DomainsViewModel), IsAvailable: false),
         new("Quarantine", "Mail", typeof(DomainsViewModel), IsAvailable: false),
         new("Message Trace", "Mail", typeof(DomainsViewModel), IsAvailable: false),

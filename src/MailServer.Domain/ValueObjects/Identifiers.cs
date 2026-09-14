@@ -253,6 +253,54 @@ public readonly record struct CertificateBindingId(Guid Value) : IEntityId
     public override string ToString() => Value.ToString("D");
 }
 
+/// <summary>Identifies a mailbox credential.</summary>
+public readonly record struct MailboxCredentialId(Guid Value) : IEntityId
+{
+    public static MailboxCredentialId New() => new(Guid.CreateVersion7());
+
+    public static MailboxCredentialId Empty => new(Guid.Empty);
+
+    public bool IsEmpty => Value == Guid.Empty;
+
+    public static bool TryParse(string? value, out MailboxCredentialId result)
+    {
+        if (Guid.TryParse(value, out Guid guid))
+        {
+            result = new MailboxCredentialId(guid);
+            return true;
+        }
+
+        result = Empty;
+        return false;
+    }
+
+    public override string ToString() => Value.ToString("D");
+}
+
+/// <summary>Identifies an IMAP folder within a mailbox.</summary>
+public readonly record struct MailboxFolderId(Guid Value) : IEntityId
+{
+    public static MailboxFolderId New() => new(Guid.CreateVersion7());
+
+    public static MailboxFolderId Empty => new(Guid.Empty);
+
+    public bool IsEmpty => Value == Guid.Empty;
+
+    public static bool TryParse(string? value, out MailboxFolderId result)
+    {
+        if (Guid.TryParse(value, out Guid guid))
+        {
+            result = new MailboxFolderId(guid);
+            return true;
+        }
+
+        result = Empty;
+        return false;
+    }
+
+    public override string ToString() => Value.ToString("D");
+}
+
 /// <summary>Identifies an ACME account registration.</summary>
 public readonly record struct AcmeAccountId(Guid Value) : IEntityId
 {

@@ -106,6 +106,7 @@ public partial class App : System.Windows.Application
         // console showing counts from the last time a page was open is worse than a reload.
         builder.Services.AddTransient<DashboardViewModel>();
         builder.Services.AddTransient<DomainsViewModel>();
+        builder.Services.AddTransient<MailboxesViewModel>();
         builder.Services.AddTransient<LetsEncryptViewModel>();
         builder.Services.AddTransient<CertificatesViewModel>();
         builder.Services.AddTransient<SecurityViewModel>();

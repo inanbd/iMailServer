@@ -7,6 +7,9 @@ using MailServer.Application.Certificates.Commands;
 using MailServer.Application.Certificates.Dtos;
 using MailServer.Application.Certificates.Queries;
 using MailServer.Application.Domains.Commands;
+using MailServer.Application.Mailboxes.Commands;
+using MailServer.Application.Mailboxes.Dtos;
+using MailServer.Application.Mailboxes.Queries;
 using MailServer.Application.Security.Commands;
 using MailServer.Application.Security.Dtos;
 using MailServer.Application.Security.Queries;
@@ -190,6 +193,62 @@ public interface IAdminGateway
         AcmeChallengeType? challengeType = null,
         bool bindOnSuccess = true,
         CancellationToken cancellationToken = default);
+
+    // ---- Mailboxes and aliases --------------------------------------------------------------
+
+    Task<IReadOnlyList<MailboxSummaryDto>> GetMailboxesAsync(
+        Guid domainId,
+        CancellationToken cancellationToken = default);
+
+    Task<MailboxDetailDto> GetMailboxAsync(
+        Guid mailboxId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Creates a mailbox.</summary>
+    /// <remarks>
+    /// The password is a method argument, never a property on a view model and never bound to
+    /// a control — for the same reason the master password is not. A bound property outlives
+    /// the operation, and everything that can reach it is one more place it can leak.
+    /// </remarks>
+    Task<MailboxSummaryDto> CreateMailboxAsync(
+        Guid domainId,
+        string localPart,
+        string? displayName,
+        string? password,
+        long quotaBytes = 0,
+        MailboxAccess access = MailboxAccess.Imap | MailboxAccess.Submission,
+        CancellationToken cancellationToken = default);
+
+    Task UpdateMailboxAsync(
+        UpdateMailboxCommand command,
+        CancellationToken cancellationToken = default);
+
+    Task SetMailboxPasswordAsync(
+        Guid mailboxId,
+        string password,
+        bool mustChange = true,
+        CancellationToken cancellationToken = default);
+
+    Task DeleteMailboxAsync(Guid mailboxId, CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<MissingRoleAddressDto>> GetMissingRoleAddressesAsync(
+        Guid domainId,
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<AliasDto>> GetAliasesAsync(
+        Guid domainId,
+        CancellationToken cancellationToken = default);
+
+    Task<AliasDto> CreateAliasAsync(
+        Guid domainId,
+        string localPart,
+        IReadOnlyList<string> targets,
+        string? description = null,
+        CancellationToken cancellationToken = default);
+
+    Task UpdateAliasAsync(UpdateAliasCommand command, CancellationToken cancellationToken = default);
+
+    Task DeleteAliasAsync(Guid aliasId, CancellationToken cancellationToken = default);
 }
 
 /// <summary>Implements <see cref="IAdminGateway"/> over <see cref="IpcClient"/>.</summary>
@@ -730,4 +789,159 @@ public sealed class AdminGateway(IpcClient client) : IAdminGateway
             .ConfigureAwait(false)
         ?? throw new InvalidOperationException(
             "The service returned an empty issuance payload.");
+
+    // ---- Mailboxes and aliases --------------------------------------------------------------
+
+    public async Task<IReadOnlyList<MailboxSummaryDto>> GetMailboxesAsync(
+        Guid domainId,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetMailboxesQuery, IReadOnlyList<MailboxSummaryDto>>(
+                "Mailboxes.List",
+                new GetMailboxesQuery { DomainId = domainId },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException("The service returned an empty mailbox payload.");
+
+    public async Task<MailboxDetailDto> GetMailboxAsync(
+        Guid mailboxId,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetMailboxQuery, MailboxDetailDto>(
+                "Mailboxes.Get",
+                new GetMailboxQuery { MailboxId = mailboxId },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException("The service returned an empty mailbox payload.");
+
+    public async Task<MailboxSummaryDto> CreateMailboxAsync(
+        Guid domainId,
+        string localPart,
+        string? displayName,
+        string? password,
+        long quotaBytes = 0,
+        MailboxAccess access = MailboxAccess.Imap | MailboxAccess.Submission,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<CreateMailboxCommand, MailboxSummaryDto>(
+                "Mailboxes.Create",
+                new CreateMailboxCommand
+                {
+                    DomainId = domainId,
+                    LocalPart = localPart,
+                    DisplayName = displayName,
+                    Password = password,
+                    QuotaBytes = quotaBytes,
+                    Access = access,
+                },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException("The service returned an empty mailbox payload.");
+
+    public async Task UpdateMailboxAsync(
+        UpdateMailboxCommand command,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+
+        await client
+            .SendAsync<UpdateMailboxCommand, Unit>(
+                "Mailboxes.Update",
+                command,
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task SetMailboxPasswordAsync(
+        Guid mailboxId,
+        string password,
+        bool mustChange = true,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<SetMailboxPasswordCommand, Unit>(
+                "Mailboxes.SetPassword",
+                new SetMailboxPasswordCommand
+                {
+                    MailboxId = mailboxId,
+                    Password = password,
+                    MustChange = mustChange,
+                },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+    public async Task DeleteMailboxAsync(
+        Guid mailboxId,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<DeleteMailboxCommand, Unit>(
+                "Mailboxes.Delete",
+                new DeleteMailboxCommand { MailboxId = mailboxId },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+    public async Task<IReadOnlyList<MissingRoleAddressDto>> GetMissingRoleAddressesAsync(
+        Guid domainId,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetMissingRoleAddressesQuery, IReadOnlyList<MissingRoleAddressDto>>(
+                "Mailboxes.RoleAddresses",
+                new GetMissingRoleAddressesQuery { DomainId = domainId },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException("The service returned an empty role-address payload.");
+
+    public async Task<IReadOnlyList<AliasDto>> GetAliasesAsync(
+        Guid domainId,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetAliasesQuery, IReadOnlyList<AliasDto>>(
+                "Aliases.List",
+                new GetAliasesQuery { DomainId = domainId },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException("The service returned an empty alias payload.");
+
+    public async Task<AliasDto> CreateAliasAsync(
+        Guid domainId,
+        string localPart,
+        IReadOnlyList<string> targets,
+        string? description = null,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<CreateAliasCommand, AliasDto>(
+                "Aliases.Create",
+                new CreateAliasCommand
+                {
+                    DomainId = domainId,
+                    LocalPart = localPart,
+                    Targets = targets,
+                    Description = description,
+                },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException("The service returned an empty alias payload.");
+
+    public async Task UpdateAliasAsync(
+        UpdateAliasCommand command,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+
+        await client
+            .SendAsync<UpdateAliasCommand, Unit>(
+                "Aliases.Update",
+                command,
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task DeleteAliasAsync(
+        Guid aliasId,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<DeleteAliasCommand, Unit>(
+                "Aliases.Delete",
+                new DeleteAliasCommand { AliasId = aliasId },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
 }
