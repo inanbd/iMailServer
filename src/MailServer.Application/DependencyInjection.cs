@@ -14,7 +14,7 @@ public static class DependencyInjection
     public static Assembly ApplicationAssembly => typeof(DependencyInjection).Assembly;
 
     /// <summary>
-    /// Adds MediatR, the eight pipeline behaviors and all FluentValidation validators.
+    /// Adds MediatR, the nine pipeline behaviors and all FluentValidation validators.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -36,6 +36,9 @@ public static class DependencyInjection
     ///   caller cannot use validation messages as an existence oracle.</description></item>
     ///   <item><description><b>Validation</b> - before the transaction, so a malformed
     ///   request never takes a writer slot.</description></item>
+    ///   <item><description><b>TlsReload</b> - wraps the transaction, so the certificate
+    ///   snapshot is rebuilt only after the rows it reads have committed. Inside the
+    ///   transaction it would rebuild from the state before the change and report success.</description></item>
     ///   <item><description><b>Transaction</b> - one transaction per use case.</description></item>
     ///   <item><description><b>Audit</b> - innermost, inside the transaction, so the audit
     ///   record and the change it describes commit together.</description></item>
@@ -60,6 +63,7 @@ public static class DependencyInjection
             configuration.AddOpenBehavior(typeof(LoggingBehavior<,>));
             configuration.AddOpenBehavior(typeof(AuthorizationBehavior<,>));
             configuration.AddOpenBehavior(typeof(ValidationBehavior<,>));
+            configuration.AddOpenBehavior(typeof(TlsReloadBehavior<,>));
             configuration.AddOpenBehavior(typeof(TransactionBehavior<,>));
             configuration.AddOpenBehavior(typeof(AuditBehavior<,>));
         });
@@ -84,6 +88,7 @@ public static class DependencyInjection
         typeof(LoggingBehavior<,>),
         typeof(AuthorizationBehavior<,>),
         typeof(ValidationBehavior<,>),
+        typeof(TlsReloadBehavior<,>),
         typeof(TransactionBehavior<,>),
         typeof(AuditBehavior<,>),
     ];

@@ -3,6 +3,9 @@ using MailServer.Application.Abstractions.Messaging;
 using MailServer.Application.Common;
 using MailServer.Application.Domains.Commands;
 using MailServer.Application.Domains.Dtos;
+using MailServer.Application.Certificates.Commands;
+using MailServer.Application.Certificates.Dtos;
+using MailServer.Application.Certificates.Queries;
 using MailServer.Application.Domains.Queries;
 using MailServer.Application.Monitoring.Dtos;
 using MailServer.Application.Monitoring.Queries;
@@ -185,6 +188,19 @@ public sealed class IpcCommandRegistry
         new("Domains.Update", typeof(UpdateDomainCommand), typeof(Unit)),
         new("Domains.SetStatus", typeof(SetDomainStatusCommand), typeof(Unit)),
         new("Domains.Delete", typeof(DeleteDomainCommand), typeof(Unit)),
+
+        // ---- Certificates -------------------------------------------------------------------
+        new("Certificates.List", typeof(GetCertificatesQuery), typeof(IReadOnlyList<CertificateDto>)),
+        new("Certificates.Get", typeof(GetCertificateQuery), typeof(CertificateDto)),
+        new("Certificates.Health", typeof(GetCertificateHealthQuery), typeof(CertificateHealthDto)),
+        new("Certificates.AvailableInStore", typeof(GetAvailableStoreCertificatesQuery), typeof(IReadOnlyList<AvailableStoreCertificateDto>)),
+        new("Certificates.GenerateSelfSigned", typeof(GenerateSelfSignedCertificateCommand), typeof(CertificateDto)),
+        new("Certificates.Import", typeof(ImportCertificateCommand), typeof(CertificateDto)),
+        new("Certificates.AdoptFromStore", typeof(AdoptStoreCertificateCommand), typeof(CertificateDto)),
+        new("Certificates.Bind", typeof(BindCertificateCommand), typeof(Unit)),
+        new("Certificates.Unbind", typeof(UnbindCertificateCommand), typeof(Unit)),
+        new("Certificates.SetDefaultBinding", typeof(SetDefaultBindingCommand), typeof(Unit)),
+        new("Certificates.Delete", typeof(DeleteCertificateCommand), typeof(Unit)),
 
         // ---- Monitoring ---------------------------------------------------------------------
         new("Monitoring.Dashboard", typeof(GetDashboardQuery), typeof(DashboardDto)),

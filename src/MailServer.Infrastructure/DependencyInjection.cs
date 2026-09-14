@@ -1,10 +1,12 @@
 using MailServer.Application.Abstractions.Monitoring;
+using MailServer.Application.Abstractions.Certificates;
 using MailServer.Application.Abstractions.Persistence;
 using MailServer.Application.Abstractions.Platform;
 using MailServer.Application.Abstractions.Queries;
 using MailServer.Application.Abstractions.Repositories;
 using MailServer.Application.Abstractions.Security;
 using MailServer.Application.Abstractions.Time;
+using MailServer.Infrastructure.Certificates;
 using MailServer.Infrastructure.Configuration;
 using MailServer.Infrastructure.Monitoring;
 using MailServer.Infrastructure.Persistence;
@@ -126,6 +128,23 @@ public static class DependencyInjection
         services.TryAddScoped<ITransactionManager, TransactionManager>();
 
         services.TryAddScoped<IDatabaseMigrator, MigrationRunner>();
+
+        // ---- Certificates (Milestone 3) --------------------------------------------------
+        //
+        // The TLS provider is a SINGLETON holding the certificate snapshot every handshake
+        // reads. Scoping it per request would mean each request built its own snapshot, which
+        // defeats the point: the whole design rests on there being exactly one reference for a
+        // reload to swap.
+        services.TryAddSingleton<ITlsCertificateProvider, TlsCertificateProvider>();
+
+        // Scoped, so two concurrent requests cannot have one's reload satisfy the other's.
+        services.TryAddScoped<ITlsReloadCoordinator, TlsReloadCoordinator>();
+
+        services.TryAddScoped<SelfSignedCertificateGenerator>();
+        services.TryAddScoped<ProtectedPfxCertificateStore>();
+        services.TryAddScoped<CertificateChainValidator>();
+        services.TryAddScoped<ICertificateManager, CertificateManager>();
+        services.TryAddScoped<ICertificateRepository, CertificateRepository>();
 
         services.TryAddScoped<IDomainRepository, DomainRepository>();
         services.TryAddScoped<IAuditRepository, AuditRepository>();

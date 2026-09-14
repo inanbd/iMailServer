@@ -1,4 +1,8 @@
 using MailServer.Application.Common;
+using MailServer.Application.Certificates.Commands;
+
+using MailServer.Application.Certificates.Dtos;
+using MailServer.Application.Certificates.Queries;
 using MailServer.Application.Domains.Commands;
 using MailServer.Application.Security.Commands;
 using MailServer.Application.Security.Dtos;
@@ -7,6 +11,7 @@ using MailServer.Application.Domains.Dtos;
 using MailServer.Application.Domains.Queries;
 using MailServer.Application.Monitoring.Dtos;
 using MailServer.Application.Monitoring.Queries;
+using MailServer.Domain.Enums;
 using MediatR;
 
 namespace MailServer.Ipc.Client;
@@ -106,6 +111,58 @@ public interface IAdminGateway
         Guid domainId,
         bool permanently,
         CancellationToken cancellationToken = default);
+
+    // ---- Certificates ---------------------------------------------------------------------
+    //
+    // None of these returns key material. The DTOs carry metadata and a thumbprint; private
+    // keys, PFX passphrases and file paths stay in the service, which is what makes the
+    // administration application safe to log from and screenshot.
+
+    Task<IReadOnlyList<CertificateDto>> GetCertificatesAsync(
+        CancellationToken cancellationToken = default);
+
+    Task<CertificateDto> GetCertificateAsync(
+        Guid certificateId,
+        CancellationToken cancellationToken = default);
+
+    Task<CertificateHealthDto> GetCertificateHealthAsync(
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<AvailableStoreCertificateDto>> GetAvailableStoreCertificatesAsync(
+        CancellationToken cancellationToken = default);
+
+    Task<CertificateDto> GenerateSelfSignedCertificateAsync(
+        IReadOnlyList<string> hostnames,
+        int keySizeBits = 3072,
+        int validityYears = 1,
+        bool makeDefault = false,
+        CancellationToken cancellationToken = default);
+
+    Task<CertificateDto> ImportCertificateAsync(
+        byte[] pfxBytes,
+        string? passphrase,
+        string? bindToHostname,
+        bool makeDefault = false,
+        CancellationToken cancellationToken = default);
+
+    Task<CertificateDto> AdoptStoreCertificateAsync(
+        string thumbprint,
+        string? bindToHostname,
+        bool makeDefault = false,
+        CancellationToken cancellationToken = default);
+
+    Task BindCertificateAsync(
+        Guid certificateId,
+        string hostname,
+        CertificatePurpose purpose = CertificatePurpose.All,
+        bool makeDefault = false,
+        CancellationToken cancellationToken = default);
+
+    Task UnbindCertificateAsync(Guid bindingId, CancellationToken cancellationToken = default);
+
+    Task SetDefaultBindingAsync(Guid bindingId, CancellationToken cancellationToken = default);
+
+    Task DeleteCertificateAsync(Guid certificateId, CancellationToken cancellationToken = default);
 }
 
 /// <summary>Implements <see cref="IAdminGateway"/> over <see cref="IpcClient"/>.</summary>
@@ -396,6 +453,176 @@ public sealed class AdminGateway(IpcClient client) : IAdminGateway
             .SendAsync<DeleteDomainCommand, Unit>(
                 "Domains.Delete",
                 new DeleteDomainCommand { DomainId = domainId, PermanentlyDelete = permanently },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+    // ---- Certificates ---------------------------------------------------------------------
+
+    public async Task<IReadOnlyList<CertificateDto>> GetCertificatesAsync(
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetCertificatesQuery, IReadOnlyList<CertificateDto>>(
+                "Certificates.List",
+                new GetCertificatesQuery(),
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException(
+            "The service returned an empty certificate list payload.");
+
+    public async Task<CertificateDto> GetCertificateAsync(
+        Guid certificateId,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetCertificateQuery, CertificateDto>(
+                "Certificates.Get",
+                new GetCertificateQuery { CertificateId = certificateId },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException(
+            "The service returned an empty certificate payload.");
+
+    public async Task<CertificateHealthDto> GetCertificateHealthAsync(
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetCertificateHealthQuery, CertificateHealthDto>(
+                "Certificates.Health",
+                new GetCertificateHealthQuery(),
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException(
+            "The service returned an empty certificate health payload.");
+
+    public async Task<IReadOnlyList<AvailableStoreCertificateDto>> GetAvailableStoreCertificatesAsync(
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetAvailableStoreCertificatesQuery, IReadOnlyList<AvailableStoreCertificateDto>>(
+                "Certificates.AvailableInStore",
+                new GetAvailableStoreCertificatesQuery(),
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException(
+            "The service returned an empty store certificate payload.");
+
+    /// <summary>
+    /// Generates a self-signed certificate.
+    /// </summary>
+    /// <remarks>
+    /// The returned DTO carries <c>IsSelfSigned</c>; every surface that displays the result
+    /// must show <c>CertificateRenewalPolicy.SelfSignedWarning</c> verbatim.
+    /// </remarks>
+    public async Task<CertificateDto> GenerateSelfSignedCertificateAsync(
+        IReadOnlyList<string> hostnames,
+        int keySizeBits = 3072,
+        int validityYears = 1,
+        bool makeDefault = false,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GenerateSelfSignedCertificateCommand, CertificateDto>(
+                "Certificates.GenerateSelfSigned",
+                new GenerateSelfSignedCertificateCommand
+                {
+                    Hostnames = hostnames,
+                    KeySizeBits = keySizeBits,
+                    ValidityYears = validityYears,
+                    MakeDefault = makeDefault,
+                },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException(
+            "The service returned an empty certificate payload.");
+
+    /// <summary>Imports a PKCS#12 certificate.</summary>
+    /// <remarks>
+    /// The passphrase is a method argument and is never held on a view model or bound to a
+    /// control, for the same reason master passwords are not: a bound property outlives the
+    /// operation, and everything that can reach it is one more place it can leak.
+    /// </remarks>
+    public async Task<CertificateDto> ImportCertificateAsync(
+        byte[] pfxBytes,
+        string? passphrase,
+        string? bindToHostname,
+        bool makeDefault = false,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<ImportCertificateCommand, CertificateDto>(
+                "Certificates.Import",
+                new ImportCertificateCommand
+                {
+                    PfxBytes = pfxBytes,
+                    Passphrase = passphrase,
+                    BindToHostname = bindToHostname,
+                    MakeDefault = makeDefault,
+                },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException(
+            "The service returned an empty certificate payload.");
+
+    public async Task<CertificateDto> AdoptStoreCertificateAsync(
+        string thumbprint,
+        string? bindToHostname,
+        bool makeDefault = false,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<AdoptStoreCertificateCommand, CertificateDto>(
+                "Certificates.AdoptFromStore",
+                new AdoptStoreCertificateCommand
+                {
+                    Thumbprint = thumbprint,
+                    BindToHostname = bindToHostname,
+                    MakeDefault = makeDefault,
+                },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException(
+            "The service returned an empty certificate payload.");
+
+    public async Task BindCertificateAsync(
+        Guid certificateId,
+        string hostname,
+        CertificatePurpose purpose = CertificatePurpose.All,
+        bool makeDefault = false,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<BindCertificateCommand, Unit>(
+                "Certificates.Bind",
+                new BindCertificateCommand
+                {
+                    CertificateId = certificateId,
+                    Hostname = hostname,
+                    Purpose = purpose,
+                    MakeDefault = makeDefault,
+                },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+    public async Task UnbindCertificateAsync(
+        Guid bindingId,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<UnbindCertificateCommand, Unit>(
+                "Certificates.Unbind",
+                new UnbindCertificateCommand { BindingId = bindingId },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+    public async Task SetDefaultBindingAsync(
+        Guid bindingId,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<SetDefaultBindingCommand, Unit>(
+                "Certificates.SetDefaultBinding",
+                new SetDefaultBindingCommand { BindingId = bindingId },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+    public async Task DeleteCertificateAsync(
+        Guid certificateId,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<DeleteCertificateCommand, Unit>(
+                "Certificates.Delete",
+                new DeleteCertificateCommand { CertificateId = certificateId },
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false);
 }

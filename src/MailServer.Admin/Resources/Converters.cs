@@ -200,3 +200,20 @@ public sealed class AuditResultToBrushConverter : IValueConverter
     public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) =>
         throw new NotSupportedException();
 }
+
+/// <summary>
+/// Shows an element when the bound value is not null, and collapses it when it is.
+/// </summary>
+/// <remarks>
+/// Collapsed rather than Hidden, so a detail panel with no selection takes no vertical space
+/// and the controls below it move up, instead of leaving a blank region that looks like a
+/// rendering fault.
+/// </remarks>
+public sealed class NullToVisibilityConverter : IValueConverter
+{
+    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture) =>
+        value is null ? Visibility.Collapsed : Visibility.Visible;
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) =>
+        throw new NotSupportedException();
+}

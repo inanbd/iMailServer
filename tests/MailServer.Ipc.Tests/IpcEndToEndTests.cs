@@ -1,5 +1,6 @@
 using System.IO.Pipes;
 using MailServer.Application;
+using MailServer.Application.Abstractions.Certificates;
 using MailServer.Application.Abstractions.Monitoring;
 using MailServer.Application.Abstractions.Persistence;
 using MailServer.Application.Abstractions.Platform;
@@ -88,6 +89,8 @@ public sealed class IpcEndToEndTests : IAsyncLifetime
 
         // No transaction manager is registered because nothing in these tests is marked
         // transactional at the persistence level; TransactionBehavior resolves it lazily.
+        services.AddScoped<ITlsReloadCoordinator, RecordingTlsReloadCoordinator>();
+
         services.AddScoped<ITransactionManager, PassThroughTransactionManager>();
 
         _services = services.BuildServiceProvider();

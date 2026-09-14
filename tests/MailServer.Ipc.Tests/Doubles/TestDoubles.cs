@@ -1,5 +1,6 @@
 using System.Data.Common;
 using System.Reflection;
+using MailServer.Application.Abstractions.Certificates;
 using MailServer.Application.Abstractions.Monitoring;
 using MailServer.Application.Abstractions.Persistence;
 using MailServer.Application.Abstractions.Platform;
@@ -465,4 +466,28 @@ internal sealed class EmptyAdminAccountRepository : IAdminAccountRepository
 
     public Task UpdateAsync(AdminAccount account, CancellationToken cancellationToken) =>
         Task.CompletedTask;
+}
+
+/// <summary>
+/// A TLS reload coordinator that records the intent instead of rebuilding a snapshot.
+/// </summary>
+/// <remarks>
+/// The IPC tests do not configure certificates, but the reload behavior sits in the pipeline
+/// for every request, so the container must be able to resolve this. Recording rather than
+/// no-opping means a test can still assert that a command asked for a reload.
+/// </remarks>
+internal sealed class RecordingTlsReloadCoordinator : ITlsReloadCoordinator
+{
+    public int FlushCount { get; private set; }
+
+    public bool ReloadRequested { get; private set; }
+
+    public void RequestReload() => ReloadRequested = true;
+
+    public Task FlushAsync(CancellationToken cancellationToken)
+    {
+        ReloadRequested = false;
+        FlushCount++;
+        return Task.CompletedTask;
+    }
 }

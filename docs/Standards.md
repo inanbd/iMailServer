@@ -121,6 +121,21 @@ These, and the Milestone 2 entries below, are the only entries currently backed 
 | Secret storage | — | `SecretStoreTests` — 9 tests including a direct read of the stored column proving the plaintext never reaches the database |
 | IPC session enforcement | — | `IpcEndToEndTests` — every session-requiring command in the registry is refused without a token and with a forged token; the four anonymous commands are proved reachable |
 
+---
+
+## Implemented in Milestone 3
+
+| Capability | Standard | Evidence |
+|---|---|---|
+| Self-signed certificate generation | RFC 5280 (extensions), RFC 6125 (naming) | `SelfSignedGenerationTests` — 27 tests reading SANs, EKU, basic constraints, key usage and SKI back out of the generated certificate |
+| subjectAltName matching | RFC 6125 §6.4.3 | `CertificateSubjectNameTests` — wildcard replaces exactly one label; partial-label wildcards and whole-TLD wildcards refused |
+| Certificate hot reload | — | `CertificateLifecycleTests` — a renewed certificate takes effect without a restart, and a certificate read before a reload stays usable after it |
+| SNI selection and fallback | RFC 6066 | `CertificateLifecycleTests` — per-hostname selection, case-insensitive matching, and the default served when no SNI is offered |
+| Chain validation with no bypass | — | `NoCertificateValidationBypassTests` — scans every production source file; verified to fail on a deliberately introduced bypass |
+| Certificate storage | PKCS#12 | `CertificateLifecycleTests` — the stored file cannot be opened without the passphrase, and the passphrase is not in the key location |
+| Expiry escalation | — | `CertificateRenewalPolicyTests` — thresholds, the lowest-crossed rule, and the never-downgrade property |
+
+
 
 ---
 
@@ -141,4 +156,4 @@ These, and the Milestone 2 entries below, are the only entries currently backed 
 
 ---
 
-*Last updated at the completion of Milestone 2.*
+*Last updated at the completion of Milestone 3.*

@@ -33,6 +33,7 @@ public sealed class PipelineOrderTests
             typeof(LoggingBehavior<,>),
             typeof(AuthorizationBehavior<,>),
             typeof(ValidationBehavior<,>),
+            typeof(TlsReloadBehavior<,>),
             typeof(TransactionBehavior<,>),
             typeof(AuditBehavior<,>),
         ]);
@@ -119,5 +120,23 @@ public sealed class PipelineOrderTests
         // A validator that exists but is not registered is worse than none: the rule appears
         // to be enforced in the source and silently is not.
         validatorCount.ShouldBeGreaterThan(0);
+    }
+
+    /// <summary>
+    /// The TLS reload must wrap the transaction, not sit inside it.
+    /// </summary>
+    /// <remarks>
+    /// Inside the transaction, the provider's fresh connection cannot see the binding rows the
+    /// handler just wrote, so it would rebuild the certificate snapshot from the state BEFORE
+    /// the change — and then log success. A hot swap that silently does not swap is worse than
+    /// one that fails loudly, because nothing about it looks wrong.
+    /// </remarks>
+    [Fact]
+    public void The_tls_reload_runs_after_the_transaction_commits()
+    {
+        IReadOnlyList<Type> order = DependencyInjection.PipelineBehaviorsInOrder;
+
+        order.ToList().IndexOf(typeof(TlsReloadBehavior<,>))
+            .ShouldBeLessThan(order.ToList().IndexOf(typeof(TransactionBehavior<,>)));
     }
 }

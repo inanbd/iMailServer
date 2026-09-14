@@ -130,6 +130,12 @@ public static class Program
         builder.Services.AddHostedService<ServiceHealthMonitor>();
         builder.Services.AddHostedService<SecurityMaintenanceService>();
 
+        // After the bootstrap gate, because it reads and writes the certificate tables and
+        // therefore needs the schema migrated. Before any listener, because a listener that
+        // starts while the TLS provider holds no certificate would accept connections it
+        // cannot complete a handshake on.
+        builder.Services.AddHostedService<CertificateLifecycleService>();
+
         return builder.Build();
     }
 

@@ -1735,4 +1735,67 @@ would be the thing actually attacked.
 
 ---
 
-*Document version 1.1 — baseline for Milestone 1, with the Milestone 2 addendum.*
+## Addendum — decisions taken during Milestone 3
+
+§14 stands. Three decisions were made or refined while building the certificate subsystem.
+
+### A3.1 — A subjectAltName entry is not a hostname
+
+§14 assumed certificate coverage could be expressed with `DomainName`. It cannot:
+`*.example.com` is a legal, common SAN and is not a domain name at all — no mail is addressed to
+it and no DNS lookup resolves it.
+
+Forcing it through `DomainName` would mean either rejecting real certificates or loosening the
+type that mail domains, MX hostnames and EHLO names all depend on, so that `*.example.com`
+became an acceptable mail domain. `CertificateSubjectName` is therefore a separate value object,
+and the relationship runs in the useful direction: a subject name *matches* a hostname.
+Hostnames stay strictly validated; patterns live in the new type.
+
+Matching follows RFC 6125 §6.4.3 strictly, and the strictness is deliberately asymmetric.
+Erring permissive is the harmful direction: it makes the server report a hostname as covered
+while every connecting client rejects it, so the fault surfaces as user reports rather than as
+anything visible here.
+
+### A3.2 — Hot reload must wrap the transaction, not sit inside it
+
+§14 specified the atomic snapshot swap and was right about it. What it did not anticipate is
+*when* the swap can be performed.
+
+A handler that changes a binding runs inside the request's transaction, so the rows it wrote are
+not visible on the fresh connection the provider uses to rebuild its snapshot. Reloading there
+rebuilds from the state *before* the change and then logs success — a hot swap that silently
+does not swap, which is a worse failure than one that fails loudly, because nothing about it
+looks wrong.
+
+This produced the ninth pipeline behavior. `TlsReloadBehavior` is registered immediately outside
+`TransactionBehavior`, so its post-`next()` code runs after commit. Handlers signal intent via
+`ITlsReloadCoordinator`; the behavior performs the reload once, and only on success.
+
+The shape is the same as the Milestone 2 security-event buffering (A2.2), and for the same
+underlying reason: **work that must happen around a transaction rather than inside it is
+signalled during the request and performed by a pipeline behavior once the transaction's fate is
+known.** That is now a pattern in this codebase rather than a one-off.
+
+A related consequence of the snapshot design: the superseded snapshot's certificates cannot be
+disposed at the moment of the swap. A handshake that read the old reference microseconds earlier
+is still using them, and disposing an `X509Certificate2` out from under an in-flight handshake
+throws inside the TLS stack. They are held for a five-minute rollback window.
+
+### A3.3 — Invariants that span rows belong in the database
+
+"At most one default binding" is enforced by a unique filtered index, not by application code.
+
+That choice has a consequence worth recording, because it caused a real defect: the old default
+must be cleared **before** the new row claims the flag, or the constraint rejects the write. The
+natural writing order — insert the new default, then clear the others — fails, and it fails only
+when a *second* certificate is made the default, never the first. It passed every manual check
+and was caught by a test.
+
+The alternative, enforcing it in code, would have had no such failure and a worse property: a
+window in which two bindings are default, or none. None is the dangerous one — a handshake
+without SNI would have no certificate to present, and the mail that fails is inbound mail
+reported by the sender rather than by this server.
+
+---
+
+*Document version 1.2 — baseline for Milestone 1, with the Milestone 2 and 3 addenda.*

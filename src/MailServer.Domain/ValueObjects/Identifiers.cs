@@ -131,18 +131,6 @@ public readonly record struct DkimKeyId(Guid Value) : IEntityId
     public override string ToString() => Value.ToString("D");
 }
 
-/// <summary>Identifies a certificate binding.</summary>
-public readonly record struct CertificateId(Guid Value) : IEntityId
-{
-    public static CertificateId New() => new(Guid.CreateVersion7());
-
-    public static CertificateId Empty => new(Guid.Empty);
-
-    public bool IsEmpty => Value == Guid.Empty;
-
-    public override string ToString() => Value.ToString("D");
-}
-
 /// <summary>Identifies the administrator account aggregate.</summary>
 public readonly record struct AdminAccountId(Guid Value) : IEntityId
 {
@@ -207,6 +195,60 @@ public readonly record struct AuditId(Guid Value) : IEntityId
     public static AuditId Empty => new(Guid.Empty);
 
     public bool IsEmpty => Value == Guid.Empty;
+
+    public override string ToString() => Value.ToString("D");
+}
+
+/// <summary>Identifies a stored certificate.</summary>
+public readonly record struct CertificateId(Guid Value) : IEntityId, IComparable<CertificateId>
+{
+    public static CertificateId New() => new(Guid.CreateVersion7());
+
+    public static CertificateId Empty => new(Guid.Empty);
+
+    public bool IsEmpty => Value == Guid.Empty;
+
+    public static CertificateId Parse(string value) => new(Guid.Parse(value));
+
+    public static bool TryParse(string? value, out CertificateId result)
+    {
+        if (Guid.TryParse(value, out Guid guid))
+        {
+            result = new CertificateId(guid);
+            return true;
+        }
+
+        result = Empty;
+        return false;
+    }
+
+    public int CompareTo(CertificateId other) => Value.CompareTo(other.Value);
+
+    public override string ToString() => Value.ToString("D");
+}
+
+/// <summary>Identifies a hostname-to-certificate binding.</summary>
+public readonly record struct CertificateBindingId(Guid Value) : IEntityId
+{
+    public static CertificateBindingId New() => new(Guid.CreateVersion7());
+
+    public static CertificateBindingId Empty => new(Guid.Empty);
+
+    public bool IsEmpty => Value == Guid.Empty;
+
+    public static CertificateBindingId Parse(string value) => new(Guid.Parse(value));
+
+    public static bool TryParse(string? value, out CertificateBindingId result)
+    {
+        if (Guid.TryParse(value, out Guid guid))
+        {
+            result = new CertificateBindingId(guid);
+            return true;
+        }
+
+        result = Empty;
+        return false;
+    }
 
     public override string ToString() => Value.ToString("D");
 }

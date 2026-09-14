@@ -1,0 +1,236 @@
+<UserControl x:Class="MailServer.Admin.Views.Pages.CertificatesView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="clr-namespace:MailServer.Admin.ViewModels"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=vm:CertificatesViewModel}">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="16">
+        <StackPanel>
+
+            <TextBlock Text="Certificates" Style="{StaticResource PageTitle}" />
+            <TextBlock Style="{StaticResource Caption}"
+                       Text="TLS certificates, the hostnames they cover, and when they expire." />
+
+            <Border Style="{StaticResource ErrorBanner}" Margin="0,12,0,0"
+                    Visibility="{Binding ErrorMessage, Converter={StaticResource StringToVisibility}}">
+                <TextBlock Text="{Binding ErrorMessage}" TextWrapping="Wrap" />
+            </Border>
+
+            <!--
+                The self-signed warning, shown verbatim and bound to the domain policy constant
+                rather than typed here. One copy of the wording in the product means the UI,
+                the log and the documentation cannot drift apart.
+            -->
+            <Border Background="#FFFFF4CE" BorderBrush="{StaticResource State.Warning}"
+                    BorderThickness="1" Padding="10" Margin="0,12,0,0"
+                    Visibility="{Binding ShowSelfSignedWarning, Converter={StaticResource BoolToVisibility}}">
+                <TextBlock Text="{Binding SelfSignedWarning, Mode=OneTime}"
+                           TextWrapping="Wrap" FontWeight="SemiBold" />
+            </Border>
+
+            <!--
+                Given its own banner because its consequence is invisible from here: a
+                handshake with no SNI hostname has nothing to be answered with, and the mail
+                that fails is inbound mail reported by the sender, not by this server.
+            -->
+            <Border Background="#FFFDE7E9" BorderBrush="{StaticResource State.Critical}"
+                    BorderThickness="1" Padding="10" Margin="0,8,0,0"
+                    Visibility="{Binding ShowNoDefaultWarning, Converter={StaticResource BoolToVisibility}}">
+                <TextBlock TextWrapping="Wrap"
+                           Text="No certificate binding is marked as the default. A TLS handshake that offers no SNI hostname - which older mail servers still send - has no certificate to be answered with, and that mail will not be delivered. Mark one binding as the default below." />
+            </Border>
+
+            <!-- Posture -->
+            <TextBlock Text="Overview" Style="{StaticResource SectionHeader}" />
+            <WrapPanel>
+                <Border Style="{StaticResource Card}" Width="200">
+                    <StackPanel>
+                        <TextBlock Text="{Binding Health.TotalCertificates, FallbackValue=0}"
+                                   FontSize="20" FontWeight="SemiBold" />
+                        <TextBlock Text="Installed" Style="{StaticResource Caption}" />
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource Card}" Width="200">
+                    <StackPanel>
+                        <TextBlock Text="{Binding Health.SoonestExpiryDays, FallbackValue=-}"
+                                   FontSize="20" FontWeight="SemiBold" />
+                        <TextBlock Text="Days to soonest expiry" Style="{StaticResource Caption}" />
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource Card}" Width="200">
+                    <StackPanel>
+                        <TextBlock Text="{Binding Health.SelfSignedCount, FallbackValue=0}"
+                                   FontSize="20" FontWeight="SemiBold" />
+                        <TextBlock Text="Self-signed" Style="{StaticResource Caption}" />
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource Card}" Width="200">
+                    <StackPanel>
+                        <TextBlock Text="{Binding Health.ExpiredCount, FallbackValue=0}"
+                                   FontSize="20" FontWeight="SemiBold" />
+                        <TextBlock Text="Expired" Style="{StaticResource Caption}" />
+                    </StackPanel>
+                </Border>
+            </WrapPanel>
+
+            <!-- Installed certificates -->
+            <TextBlock Text="Installed certificates" Style="{StaticResource SectionHeader}" />
+            <DataGrid ItemsSource="{Binding Certificates}"
+                      SelectedItem="{Binding SelectedCertificate}"
+                      AutoGenerateColumns="False" IsReadOnly="True"
+                      HeadersVisibility="Column" MinHeight="140" MaxHeight="300">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Subject" Binding="{Binding Subject}" Width="2*" />
+                    <DataGridTextColumn Header="Issuer" Binding="{Binding Issuer}" Width="2*" />
+                    <DataGridTextColumn Header="Source" Binding="{Binding Source}" Width="Auto" />
+                    <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="Auto" />
+                    <DataGridTextColumn Header="Days left" Binding="{Binding DaysRemaining}" Width="Auto" />
+                    <DataGridTextColumn Header="Expires (UTC)"
+                                        Binding="{Binding NotAfterUtc, StringFormat=yyyy-MM-dd}"
+                                        Width="Auto" />
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <!-- Detail for the selected certificate -->
+            <Border Style="{StaticResource Card}" Margin="0,12,0,0"
+                    Visibility="{Binding SelectedCertificate, Converter={StaticResource NullToVisibility}}">
+                <StackPanel>
+                    <TextBlock Text="Selected certificate" FontWeight="SemiBold" />
+
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,8,0,0" Text="Thumbprint" />
+                    <TextBox Text="{Binding SelectedCertificate.Thumbprint, Mode=OneWay}"
+                             IsReadOnly="True" BorderThickness="0" Background="Transparent"
+                             FontFamily="Consolas" />
+
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,8,0,0" Text="Serial number" />
+                    <TextBox Text="{Binding SelectedCertificate.SerialNumber, Mode=OneWay}"
+                             IsReadOnly="True" BorderThickness="0" Background="Transparent"
+                             FontFamily="Consolas" />
+
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,8,0,0"
+                               Text="Covers these hostnames (subjectAltName)" />
+                    <ItemsControl ItemsSource="{Binding SelectedCertificate.SubjectAlternativeNames}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding}" FontFamily="Consolas" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,8,0,0" Text="Valid" />
+                    <TextBlock>
+                        <Run Text="{Binding SelectedCertificate.NotBeforeUtc, StringFormat=yyyy-MM-dd HH:mm, Mode=OneWay}" />
+                        <Run Text=" to " />
+                        <Run Text="{Binding SelectedCertificate.NotAfterUtc, StringFormat=yyyy-MM-dd HH:mm, Mode=OneWay}" />
+                        <Run Text=" UTC" />
+                    </TextBlock>
+
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,8,0,0"
+                               Text="Last renewal error"
+                               Visibility="{Binding SelectedCertificate.LastRenewalError, Converter={StaticResource StringToVisibility}}" />
+                    <TextBlock Text="{Binding SelectedCertificate.LastRenewalError}" TextWrapping="Wrap"
+                               Foreground="{StaticResource State.Critical}"
+                               Visibility="{Binding SelectedCertificate.LastRenewalError, Converter={StaticResource StringToVisibility}}" />
+
+                    <!-- Bindings for this certificate -->
+                    <TextBlock Text="Bound hostnames" FontWeight="SemiBold" Margin="0,12,0,4" />
+                    <ItemsControl ItemsSource="{Binding SelectedCertificate.Bindings}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Orientation="Horizontal" Margin="0,2">
+                                    <TextBlock Text="{Binding Hostname}" Width="220" FontFamily="Consolas" />
+                                    <TextBlock Text="{Binding Purpose}" Width="200" />
+                                    <TextBlock Text="default" FontWeight="SemiBold" Width="60"
+                                               Visibility="{Binding IsDefault, Converter={StaticResource BoolToVisibility}}" />
+                                    <Button Content="Make default" Margin="4,0,0,0"
+                                            Command="{Binding DataContext.SetDefaultBindingCommand,
+                                                      RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                            CommandParameter="{Binding Id}" />
+                                    <Button Content="Unbind" Margin="4,0,0,0"
+                                            Command="{Binding DataContext.UnbindCommand,
+                                                      RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                            CommandParameter="{Binding Id}" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+
+            <!-- Bind a hostname -->
+            <TextBlock Text="Bind a hostname" Style="{StaticResource SectionHeader}" />
+            <StackPanel Orientation="Horizontal">
+                <TextBox Text="{Binding BindHostname, UpdateSourceTrigger=PropertyChanged}"
+                         Width="260" ToolTip="The hostname clients will connect to, e.g. mail.example.com" />
+                <CheckBox Content="Make default" IsChecked="{Binding BindAsDefault}"
+                          VerticalAlignment="Center" Margin="8,0,0,0" />
+                <Button Content="Bind" Command="{Binding BindCommand}" Margin="8,0,0,0"
+                        IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+            </StackPanel>
+            <TextBlock Style="{StaticResource Caption}"
+                       Text="The hostname must appear in the certificate's subjectAltName list above, or the server will refuse the binding - a certificate that does not cover the name it is presented for produces a warning in every connecting client." />
+
+            <!-- Generate a self-signed certificate -->
+            <TextBlock Text="Generate a self-signed certificate" Style="{StaticResource SectionHeader}" />
+            <TextBlock Style="{StaticResource Caption}"
+                       Text="For development, isolated networks, or to bootstrap a new installation. Not for an Internet-facing production server." />
+            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                <TextBox Text="{Binding NewCertificateHostnames, UpdateSourceTrigger=PropertyChanged}"
+                         Width="320"
+                         ToolTip="One or more hostnames, separated by commas or spaces." />
+                <ComboBox ItemsSource="{Binding KeySizes}" SelectedItem="{Binding NewCertificateKeySize}"
+                          Width="90" Margin="8,0,0,0" ToolTip="RSA key size" />
+                <ComboBox ItemsSource="{Binding ValidityYears}"
+                          SelectedItem="{Binding NewCertificateValidityYears}"
+                          Width="70" Margin="8,0,0,0" ToolTip="Validity in years" />
+                <Button Content="Generate" Command="{Binding GenerateSelfSignedCommand}"
+                        Margin="8,0,0,0"
+                        IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+            </StackPanel>
+
+            <!-- Windows certificate store -->
+            <TextBlock Text="Windows certificate store" Style="{StaticResource SectionHeader}" />
+            <TextBlock Style="{StaticResource Caption}"
+                       Text="Certificates in LocalMachine\My. Adopting one records a reference to it; the private key stays in the store and is never exported, and deleting the reference here never deletes the certificate." />
+            <DataGrid ItemsSource="{Binding StoreCertificates}" AutoGenerateColumns="False"
+                      IsReadOnly="True" HeadersVisibility="Column" MaxHeight="220" Margin="0,8,0,0">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Subject" Binding="{Binding Subject}" Width="2*" />
+                    <DataGridTextColumn Header="Issuer" Binding="{Binding Issuer}" Width="2*" />
+                    <DataGridTextColumn Header="Expires" Width="Auto"
+                                        Binding="{Binding NotAfterUtc, StringFormat=yyyy-MM-dd}" />
+                    <DataGridCheckBoxColumn Header="Has key" Binding="{Binding HasPrivateKey}" Width="Auto" />
+                    <DataGridCheckBoxColumn Header="Adopted" Binding="{Binding AlreadyAdopted}" Width="Auto" />
+                    <DataGridTemplateColumn Header="" Width="Auto">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <Button Content="Adopt"
+                                        Command="{Binding DataContext.AdoptFromStoreCommand,
+                                                  RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                        CommandParameter="{Binding Thumbprint}" />
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <!-- Delete -->
+            <TextBlock Text="Delete a certificate" Style="{StaticResource SectionHeader}" />
+            <TextBlock Style="{StaticResource Caption}"
+                       Text="Type the selected certificate's thumbprint to confirm. The thumbprint rather than a name, because two certificates for the same hostname during a changeover are otherwise indistinguishable." />
+            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                <TextBox Text="{Binding DeleteConfirmationText, UpdateSourceTrigger=PropertyChanged}"
+                         Width="360" FontFamily="Consolas" />
+                <Button Content="Delete" Command="{Binding DeleteCommand}" Margin="8,0,0,0"
+                        IsEnabled="{Binding CanDelete}" />
+            </StackPanel>
+
+            <Button Content="Refresh" Command="{Binding RefreshCommand}"
+                    HorizontalAlignment="Left" Margin="0,16,0,0" />
+
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

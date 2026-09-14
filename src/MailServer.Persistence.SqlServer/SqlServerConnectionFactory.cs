@@ -13,11 +13,19 @@ namespace MailServer.Persistence.SqlServer;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Encryption is on and certificate validation is not bypassed.</b> Brief rule 105
-/// forbids certificate validation bypass, and that includes the database link: an
+/// <b>Encryption is forced on, and nothing here disables certificate validation.</b> Rule
+/// 105 forbids certificate validation bypass, and that includes the database link: an
 /// unencrypted or unvalidated connection carries every mailbox row and every audit record in
-/// the clear. <c>TrustServerCertificate</c> is forced off unless the operator explicitly
-/// opts in, and doing so logs a warning that names the risk.
+/// the clear. <c>Encrypt</c> is set to true unconditionally, overriding the operator's
+/// connection string if it said otherwise.
+/// </para>
+/// <para>
+/// <c>TrustServerCertificate</c> is never set by this code. It is only <i>read</i>, so that
+/// an operator who put it in their own connection string gets a warning naming the exact
+/// exposure it creates. Silently clearing it would be the wrong answer to a different
+/// problem: the connection string is the operator's, a server with a genuinely
+/// untrusted-but-correct certificate would simply stop connecting, and they would have no
+/// idea why.
 /// </para>
 /// <para>
 /// <b>The connection string is never logged.</b> <see cref="DescribeTarget"/> returns only

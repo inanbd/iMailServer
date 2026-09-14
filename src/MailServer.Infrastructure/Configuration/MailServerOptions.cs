@@ -41,6 +41,8 @@ public sealed class MailServerOptions
     public LimitsOptions Limits { get; set; } = new();
 
     public MaintenanceOptions Maintenance { get; set; } = new();
+
+    public CertificateOptions Certificates { get; set; } = new();
 }
 
 /// <summary>The server's own identity.</summary>
@@ -331,4 +333,50 @@ public sealed class MaintenanceOptions
     /// resumed by a reboot.
     /// </summary>
     public string Mode { get; set; } = "Normal";
+}
+
+/// <summary>TLS certificate settings.</summary>
+public sealed class CertificateOptions
+{
+    /// <summary>
+    /// Whether to generate a self-signed certificate at first start when none is configured.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the <b>only</b> circumstance in which this server creates a self-signed
+    /// certificate on its own. It exists so that a freshly installed server can complete a TLS
+    /// handshake at all — without it, the administration application's first connection and
+    /// every early diagnostic would fail against a server with no certificate.
+    /// </para>
+    /// <para>
+    /// It never replaces an existing certificate, and it is never used as a fallback when a
+    /// renewal fails. See <c>CertificateRenewalPolicy</c>.
+    /// </para>
+    /// </remarks>
+    public bool GenerateSelfSignedOnFirstStart { get; set; } = true;
+
+    /// <summary>RSA key size for generated certificates.</summary>
+    [Range(2048, 4096)]
+    public int SelfSignedKeySizeBits { get; set; } = 3072;
+
+    /// <summary>Validity in years for generated certificates.</summary>
+    [Range(1, 5)]
+    public int SelfSignedValidityYears { get; set; } = 1;
+
+    /// <summary>Days before expiry at which renewal is first attempted.</summary>
+    [Range(1, 90)]
+    public int RenewalWindowDays { get; set; } = 30;
+
+    /// <summary>How often the lifecycle service checks certificate expiry.</summary>
+    [Range(1, 168)]
+    public int LifecycleCheckIntervalHours { get; set; } = 12;
+
+    /// <summary>
+    /// Prefer the Windows certificate store over protected PFX files where both are available.
+    /// </summary>
+    /// <remarks>
+    /// True on Windows in production, because a key held in the store never becomes a file on
+    /// disk. Automatically inert on other platforms, where there is no store to prefer.
+    /// </remarks>
+    public bool PreferWindowsCertificateStore { get; set; } = true;
 }

@@ -1,6 +1,8 @@
 # TLS
 
-> **Status: Planned — Milestones 3, 6, 7, 10 and 11.**
+> **Status: certificate handling and validation are built (Milestone 3). The listeners that
+> use them arrive in Milestones 6, 7 and 10; outbound TLS policy in Milestone 8; MTA-STS and
+> TLS-RPT in Milestone 11.**
 
 ## Where TLS applies
 
@@ -46,8 +48,26 @@ fall back.
 
 ## Certificate validation
 
-There is no `RemoteCertificateValidationCallback` returning `true` anywhere in the product, and
-no `TrustServerCertificate` shortcut on the database link. A security test asserts this.
+There is no `RemoteCertificateValidationCallback` returning `true` anywhere in the product, no
+`TrustServerCertificate = true`, and no `RevocationMode.NoCheck`.
+
+`NoCertificateValidationBypassTests` scans every production source file for each of those
+constructs and fails the build on any of them. The scan itself was verified by introducing a
+bypass deliberately and confirming it failed — a security test that cannot fail is worse than
+no test, because it reports safety it never checked.
+
+One subtlety the scan encodes: `TrustServerCertificate` is *read* in `SqlServerConnectionFactory`
+so that an operator who put it in their own connection string gets a warning naming the exposure
+it creates. Reading it to warn is correct; setting it is the bypass, so the scan matches the
+assignment rather than the mention. Silently clearing an operator's setting would be the wrong
+answer to a different problem — their server would simply stop connecting, with no indication
+why.
+
+Inbound chain validation uses `X509Chain` with `RevocationMode.Online`,
+`RevocationFlag.ExcludeRoot` and `VerificationFlags.NoFlag`. An *unreachable* revocation
+responder is treated as trusted-with-a-warning: it is a network fault, not evidence against the
+certificate, and treating it as untrusted would turn a CA's OCSP outage into every certificate
+here suddenly becoming invalid.
 
 Where outbound SMTP encounters an untrusted certificate, the result is recorded in the delivery
 attempt — with the peer's subject and issuer — so a genuine problem is diagnosable rather than
