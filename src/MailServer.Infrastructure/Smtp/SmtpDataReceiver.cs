@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Text;
 using MailServer.Application.Abstractions.Smtp;
 using MailServer.Domain.Smtp;
+using MailServer.Domain.ValueObjects;
 using Microsoft.Extensions.Logging;
 
 namespace MailServer.Infrastructure.Smtp;
@@ -77,25 +78,37 @@ public sealed class SmtpDataReceiver(IMessageStore store, ILogger<SmtpDataReceiv
     /// </remarks>
     public const long MaxOverrunBytes = 1024 * 1024;
 
+    /// <summary>Largest trace header this server will prepend.</summary>
+    /// <remarks>
+    /// Every field in the header is sanitised and length-bounded, so the real figure is far
+    /// below this. The cap exists so the storage ceiling can be computed before the header
+    /// is built, and so a future header that grew without anyone noticing fails loudly.
+    /// </remarks>
+    public const long MaxPreambleBytes = 8 * 1024;
+
     /// <summary>Receives one message.</summary>
     /// <param name="reader">The connection reader, positioned just after the 354 reply.</param>
-    /// <param name="preamble">
-    /// Octets to store ahead of the body — the <c>Received:</c> header. Counted against storage,
-    /// not against the peer's size budget: the peer did not send it and must not be charged for
-    /// it, or a message exactly at the limit would be refused because of a header this server
-    /// added.
+    /// <param name="buildPreamble">
+    /// Builds the octets stored ahead of the body — the <c>Received:</c> header — given the
+    /// identifier the message will be stored under. A factory rather than a string because the
+    /// header names that identifier, and it does not exist until the write begins.
+    /// <para>
+    /// The preamble is counted against storage but not against the peer's size budget: the peer
+    /// did not send it and must not be charged for it, or a message exactly at the limit would
+    /// be refused because of a header this server added to it.
+    /// </para>
     /// </param>
     /// <param name="maxSizeBytes">The effective size limit for this message.</param>
     /// <param name="chunkTimeout">Longest wait for the next octets. Bounds slowloris inside DATA.</param>
     public async ValueTask<SmtpDataResult> ReceiveAsync(
         SmtpLineReader reader,
-        string preamble,
+        Func<StoredMessageId, string> buildPreamble,
         long maxSizeBytes,
         TimeSpan chunkTimeout,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(reader);
-        ArgumentNullException.ThrowIfNull(preamble);
+        ArgumentNullException.ThrowIfNull(buildPreamble);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxSizeBytes);
 
         // Sized from the reader's own window, which is bounded by the line limit. The receiver
@@ -106,8 +119,10 @@ public sealed class SmtpDataReceiver(IMessageStore store, ILogger<SmtpDataReceiv
         SmtpDataDecoder decoder = new();
 
         // The writer's own ceiling allows for the header this server prepends, so that storage
-        // never refuses a message the peer kept within its budget.
-        long storageCeiling = maxSizeBytes + Encoding.UTF8.GetByteCount(preamble) + MaxOverrunBytes;
+        // never refuses a message the peer kept within its budget. Sized from the cap the header
+        // builder is itself bounded by rather than from the header, because the writer has to
+        // exist before the header that names it can be built.
+        long storageCeiling = maxSizeBytes + MaxPreambleBytes + MaxOverrunBytes;
 
         await using IMessageWriter writer = await store
             .BeginWriteAsync(storageCeiling, cancellationToken)
@@ -117,9 +132,18 @@ public sealed class SmtpDataReceiver(IMessageStore store, ILogger<SmtpDataReceiv
 
         try
         {
-            await writer
-                .WriteAsync(Encoding.UTF8.GetBytes(preamble), cancellationToken)
-                .ConfigureAwait(false);
+            byte[] preamble = Encoding.UTF8.GetBytes(buildPreamble(writer.Id));
+
+            if (preamble.Length > MaxPreambleBytes)
+            {
+                // The trace header is built from bounded, sanitised fields, so this is a caller
+                // bug rather than something a peer can provoke. Refusing is still better than
+                // quietly eating into the peer's size budget.
+                throw new InvalidOperationException(
+                    $"The trace header is {preamble.Length} octets, above the {MaxPreambleBytes}-octet cap.");
+            }
+
+            await writer.WriteAsync(preamble, cancellationToken).ConfigureAwait(false);
 
             while (true)
             {

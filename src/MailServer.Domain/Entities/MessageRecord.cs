@@ -144,20 +144,47 @@ public sealed class MessageRecord
     public void MarkContentRemoved(DateTimeOffset when) => ContentRemovedUtc = when;
 }
 
-/// <summary>One envelope recipient, as accepted.</summary>
-/// <param name="Id">Identity of this recipient row.</param>
-/// <param name="MessageId">The message it belongs to.</param>
-/// <param name="Address">
-/// The address the sender wrote, before alias expansion. A bounce has to name this, not the
-/// mailbox it resolved to: the sender cannot act on an internal name, and printing one leaks it.
-/// </param>
-/// <param name="Decision">Local delivery or onward relay. Never <see cref="RelayDecision.Deny"/>.</param>
-public sealed record MessageRecipient(
-    Guid Id,
-    StoredMessageId MessageId,
-    EmailAddress Address,
-    RelayDecision Decision)
+/// <summary>
+/// One envelope recipient, as accepted.
+/// </summary>
+/// <remarks>
+/// Get-only properties rather than a positional record. A positional record's <c>init</c>
+/// accessors are public setters as far as reflection — and as far as an aggregate's invariants —
+/// are concerned, and <see cref="Create"/> exists precisely so a denied recipient cannot be
+/// constructed. An object that can be rebuilt with <c>with { Decision = Deny }</c> undoes that.
+/// </remarks>
+public sealed record MessageRecipient
 {
+    private MessageRecipient(
+        Guid id,
+        StoredMessageId messageId,
+        EmailAddress address,
+        RelayDecision decision)
+    {
+        Id = id;
+        MessageId = messageId;
+        Address = address;
+        Decision = decision;
+    }
+
+    /// <summary>Identity of this recipient row.</summary>
+    public Guid Id { get; }
+
+    /// <summary>The message it belongs to.</summary>
+    public StoredMessageId MessageId { get; }
+
+    /// <summary>
+    /// The address the sender wrote, before alias expansion.
+    /// </summary>
+    /// <remarks>
+    /// A bounce has to name this, not the mailbox it resolved to: the sender cannot act on an
+    /// internal name, and printing one leaks it.
+    /// </remarks>
+    public EmailAddress Address { get; }
+
+    /// <summary>Local delivery or onward relay. Never <see cref="RelayDecision.Deny"/>.</summary>
+    public RelayDecision Decision { get; }
+
     /// <summary>Records an accepted recipient.</summary>
     /// <exception cref="ArgumentException">The decision was a refusal.</exception>
     public static MessageRecipient Create(
@@ -179,31 +206,77 @@ public sealed record MessageRecipient(
 
         return new MessageRecipient(Guid.NewGuid(), messageId, address, decision);
     }
+
+    /// <summary>Rehydrates from storage.</summary>
+    public static MessageRecipient Rehydrate(
+        Guid id,
+        StoredMessageId messageId,
+        EmailAddress address,
+        RelayDecision decision) =>
+        new(id, messageId, address, decision);
 }
 
-/// <summary>One message placed in one folder.</summary>
-/// <param name="Id">Identity of this delivery.</param>
-/// <param name="MessageId">The message delivered. The content is shared, not copied.</param>
-/// <param name="MailboxId">The owning mailbox.</param>
-/// <param name="FolderId">The folder it landed in.</param>
-/// <param name="Uid">
-/// The IMAP UID within the folder. Assigned once and never reassigned: a client that cached
-/// UID 42 must still find the same message there, or its cache silently serves the wrong mail.
-/// </param>
-/// <param name="RecipientId">The envelope recipient this came from, for tracing an expansion.</param>
-/// <param name="InternalDate">
-/// IMAP INTERNALDATE — when this server took delivery. Distinct from the message's own
-/// <c>Date:</c> header, which the sender wrote and may have got wrong by years.
-/// </param>
-public sealed record Delivery(
-    Guid Id,
-    StoredMessageId MessageId,
-    MailboxId MailboxId,
-    MailboxFolderId FolderId,
-    long Uid,
-    Guid? RecipientId,
-    DateTimeOffset InternalDate)
+/// <summary>
+/// One message placed in one folder.
+/// </summary>
+/// <remarks>
+/// Get-only, for the same reason as <see cref="MessageRecipient"/>: <see cref="Create"/> refuses
+/// UID 0, and a <c>with</c> expression that could set one back would make that refusal
+/// decorative.
+/// </remarks>
+public sealed record Delivery
 {
+    private Delivery(
+        Guid id,
+        StoredMessageId messageId,
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        long uid,
+        Guid? recipientId,
+        DateTimeOffset internalDate)
+    {
+        Id = id;
+        MessageId = messageId;
+        MailboxId = mailboxId;
+        FolderId = folderId;
+        Uid = uid;
+        RecipientId = recipientId;
+        InternalDate = internalDate;
+    }
+
+    /// <summary>Identity of this delivery.</summary>
+    public Guid Id { get; }
+
+    /// <summary>The message delivered. The content is shared, not copied.</summary>
+    public StoredMessageId MessageId { get; }
+
+    /// <summary>The owning mailbox.</summary>
+    public MailboxId MailboxId { get; }
+
+    /// <summary>The folder it landed in.</summary>
+    public MailboxFolderId FolderId { get; }
+
+    /// <summary>
+    /// The IMAP UID within the folder.
+    /// </summary>
+    /// <remarks>
+    /// Assigned once and never reassigned: a client that cached UID 42 must still find the same
+    /// message there, or its cache silently serves the wrong mail.
+    /// </remarks>
+    public long Uid { get; }
+
+    /// <summary>The envelope recipient this came from, for tracing an expansion.</summary>
+    public Guid? RecipientId { get; }
+
+    /// <summary>
+    /// IMAP INTERNALDATE — when this server took delivery.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from the message's own <c>Date:</c> header, which the sender wrote and may have
+    /// got wrong by years.
+    /// </remarks>
+    public DateTimeOffset InternalDate { get; }
+
     /// <summary>Records a delivery.</summary>
     public static Delivery Create(
         StoredMessageId messageId,
@@ -213,10 +286,21 @@ public sealed record Delivery(
         Guid? recipientId,
         DateTimeOffset internalDate)
     {
-        // UIDs start at 1; zero is not a valid UID in IMAP and a folder that issued one would
+        // UIDs start at 1; zero is not a valid IMAP UID and a folder that issued one would
         // confuse every client that spoke to it.
         ArgumentOutOfRangeException.ThrowIfLessThan(uid, 1);
 
         return new Delivery(Guid.NewGuid(), messageId, mailboxId, folderId, uid, recipientId, internalDate);
     }
+
+    /// <summary>Rehydrates from storage.</summary>
+    public static Delivery Rehydrate(
+        Guid id,
+        StoredMessageId messageId,
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        long uid,
+        Guid? recipientId,
+        DateTimeOffset internalDate) =>
+        new(id, messageId, mailboxId, folderId, uid, recipientId, internalDate);
 }

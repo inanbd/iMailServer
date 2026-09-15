@@ -46,6 +46,92 @@ public sealed class MailServerOptions
     public CertificateOptions Certificates { get; set; } = new();
 
     public AcmeOptions Acme { get; set; } = new();
+
+    public SmtpOptions Smtp { get; set; } = new();
+}
+
+/// <summary>The SMTP listeners.</summary>
+/// <remarks>
+/// Three separate listeners rather than one with switches. Conflating MTA receipt with client
+/// submission is the root cause of most open relays in the wild: a single listener with an
+/// "allow relay" flag is one misconfiguration away from relaying for the Internet, and the flag
+/// is always set by somebody solving a different problem.
+/// </remarks>
+public sealed class SmtpOptions
+{
+    /// <summary>Port 25. Mail from the Internet for local domains.</summary>
+    public SmtpListenerOptions InboundMta { get; set; } = new() { Port = 25, Enabled = true };
+
+    /// <summary>Port 587. Authenticated submission, STARTTLS before AUTH.</summary>
+    /// <remarks>
+    /// Disabled by default until SASL lands in Milestone 7. A submission listener with no way to
+    /// authenticate refuses every sender, which is the correct failure but not a useful service;
+    /// enabling it by default would advertise a port that cannot do its job.
+    /// </remarks>
+    public SmtpListenerOptions Submission { get; set; } = new() { Port = 587, Enabled = false };
+
+    /// <summary>Port 465. Authenticated submission, TLS from the first octet.</summary>
+    public SmtpListenerOptions ImplicitTlsSubmission { get; set; } = new() { Port = 465, Enabled = false };
+
+    /// <summary>
+    /// Whether SASL authentication is implemented and enabled.
+    /// </summary>
+    /// <remarks>
+    /// False until Milestone 7. It gates the AUTH capability, and a capability advertised before
+    /// it works sends clients into a failure they cannot diagnose.
+    /// </remarks>
+    public bool EnableAuthentication { get; set; }
+
+    /// <summary>Whether SMTPUTF8 is implemented and enabled.</summary>
+    public bool EnableSmtpUtf8 { get; set; }
+
+    /// <summary>Whether BDAT/CHUNKING is implemented and enabled.</summary>
+    public bool EnableChunking { get; set; }
+
+    /// <summary>
+    /// Addresses permitted to relay without authenticating.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The narrow, deliberately awkward escape hatch for an internal application that cannot
+    /// authenticate — a printer, a monitoring box, a legacy line-of-business system.
+    /// </para>
+    /// <para>
+    /// <b>Empty by default, and it must stay that way unless somebody types an address.</b> It is
+    /// a list of individual addresses, not a subnet: "the local network" is exactly how an open
+    /// relay is configured by accident, because the local network is bigger than whoever wrote
+    /// the rule believed. Each entry is a host an operator decided to trust, one at a time.
+    /// </para>
+    /// </remarks>
+    public IList<string> AuthorizedRelayAddresses { get; set; } = [];
+
+    /// <summary>
+    /// How long a graceful shutdown waits for in-flight sessions.
+    /// </summary>
+    /// <remarks>
+    /// Abandoning a session mid-DATA risks a duplicate at the sending server: it saw no reply,
+    /// so it retries, and this server may already have delivered the copy it received.
+    /// </remarks>
+    [Range(1, 300)]
+    public int ShutdownGraceSeconds { get; set; } = 30;
+}
+
+/// <summary>One listener.</summary>
+public sealed class SmtpListenerOptions
+{
+    public bool Enabled { get; set; }
+
+    [Range(1, 65_535)]
+    public int Port { get; set; }
+
+    /// <summary>
+    /// Addresses to bind. Empty means every interface.
+    /// </summary>
+    /// <remarks>
+    /// Listed explicitly rather than assumed, so an operator who wants the submission port on an
+    /// internal interface only can say so instead of relying on a firewall to undo a default.
+    /// </remarks>
+    public IList<string> BindAddresses { get; set; } = [];
 }
 
 /// <summary>The server's own identity.</summary>

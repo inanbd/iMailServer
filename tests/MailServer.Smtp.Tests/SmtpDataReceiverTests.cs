@@ -52,7 +52,7 @@ public sealed class SmtpDataReceiverTests : IDisposable
         SmtpLineReader reader = Reader("Subject: hello\r\n\r\nBody text.\r\n.\r\n");
 
         SmtpDataResult result = await Receiver()
-            .ReceiveAsync(reader, "Received: from test\r\n", 1_000_000, Generous, default);
+            .ReceiveAsync(reader, _ => "Received: from test\r\n", 1_000_000, Generous, default);
 
         result.Outcome.ShouldBe(SmtpDataOutcome.Accepted);
         result.Message.ShouldNotBeNull();
@@ -67,7 +67,7 @@ public sealed class SmtpDataReceiverTests : IDisposable
         SmtpLineReader reader = Reader("head\r\n..\r\ntail\r\n.\r\n");
 
         SmtpDataResult result = await Receiver()
-            .ReceiveAsync(reader, string.Empty, 1_000_000, Generous, default);
+            .ReceiveAsync(reader, _ => string.Empty, 1_000_000, Generous, default);
 
         result.Outcome.ShouldBe(SmtpDataOutcome.Accepted);
         (await ReadStoredAsync(result.Message!)).ShouldBe("head\r\n.\r\ntail\r\n");
@@ -85,7 +85,7 @@ public sealed class SmtpDataReceiverTests : IDisposable
         SmtpLineReader reader = Reader(Wire, chunkSize);
 
         SmtpDataResult result = await Receiver()
-            .ReceiveAsync(reader, string.Empty, 1_000_000, Generous, default);
+            .ReceiveAsync(reader, _ => string.Empty, 1_000_000, Generous, default);
 
         result.Outcome.ShouldBe(SmtpDataOutcome.Accepted);
         (await ReadStoredAsync(result.Message!)).ShouldBe("A: 1\r\nB: 2\r\n\r\nline\r\nline two\r\n.dotted\r\n");
@@ -101,7 +101,7 @@ public sealed class SmtpDataReceiverTests : IDisposable
         SmtpLineReader reader = Reader(body + ".\r\n", chunkSize: 1500);
 
         SmtpDataResult result = await Receiver()
-            .ReceiveAsync(reader, string.Empty, 10_000_000, Generous, default);
+            .ReceiveAsync(reader, _ => string.Empty, 10_000_000, Generous, default);
 
         result.Outcome.ShouldBe(SmtpDataOutcome.Accepted);
         (await ReadStoredAsync(result.Message!)).ShouldBe(body);
@@ -115,7 +115,7 @@ public sealed class SmtpDataReceiverTests : IDisposable
         SmtpLineReader reader = Reader("body\r\n.\r\nQUIT\r\n");
 
         SmtpDataResult result = await Receiver()
-            .ReceiveAsync(reader, string.Empty, 1_000_000, Generous, default);
+            .ReceiveAsync(reader, _ => string.Empty, 1_000_000, Generous, default);
 
         result.Outcome.ShouldBe(SmtpDataOutcome.Accepted);
 
@@ -136,7 +136,7 @@ public sealed class SmtpDataReceiverTests : IDisposable
         SmtpLineReader reader = Reader($"{body}\r\n.\r\nQUIT\r\n");
 
         SmtpDataResult result = await Receiver()
-            .ReceiveAsync(reader, string.Empty, maxSizeBytes: 500, Generous, default);
+            .ReceiveAsync(reader, _ => string.Empty, maxSizeBytes: 500, Generous, default);
 
         result.Outcome.ShouldBe(SmtpDataOutcome.TooLarge);
         result.Reply!.Code.ShouldBe(552);
@@ -151,7 +151,7 @@ public sealed class SmtpDataReceiverTests : IDisposable
     {
         SmtpLineReader reader = Reader(new string('x', 2000) + "\r\n.\r\n");
 
-        await Receiver().ReceiveAsync(reader, "Received: from test\r\n", 500, Generous, default);
+        await Receiver().ReceiveAsync(reader, _ => "Received: from test\r\n", 500, Generous, default);
 
         Directory.EnumerateFiles(_root, "*.eml", SearchOption.AllDirectories).ShouldBeEmpty();
         Directory.EnumerateFiles(_root, "*.tmp", SearchOption.AllDirectories).ShouldBeEmpty();
@@ -167,7 +167,7 @@ public sealed class SmtpDataReceiverTests : IDisposable
         SmtpLineReader reader = Reader(stuffed + ".\r\n");
 
         SmtpDataResult result = await Receiver()
-            .ReceiveAsync(reader, string.Empty, maxSizeBytes: 700, Generous, default);
+            .ReceiveAsync(reader, _ => string.Empty, maxSizeBytes: 700, Generous, default);
 
         result.Outcome.ShouldBe(SmtpDataOutcome.TooLarge);
         result.RawByteCount.ShouldBeGreaterThan(700);
@@ -185,7 +185,7 @@ public sealed class SmtpDataReceiverTests : IDisposable
         long raw = Encoding.UTF8.GetByteCount($"{Body}\r\n.\r\n");
 
         SmtpDataResult result = await Receiver()
-            .ReceiveAsync(reader, string.Empty, maxSizeBytes: raw, Generous, default);
+            .ReceiveAsync(reader, _ => string.Empty, maxSizeBytes: raw, Generous, default);
 
         result.Outcome.ShouldBe(SmtpDataOutcome.Accepted);
     }
@@ -204,7 +204,7 @@ public sealed class SmtpDataReceiverTests : IDisposable
         long raw = Encoding.UTF8.GetByteCount($"{Body}\r\n.\r\n");
 
         SmtpDataResult result = await Receiver()
-            .ReceiveAsync(reader, preamble, maxSizeBytes: raw, Generous, default);
+            .ReceiveAsync(reader, _ => preamble, maxSizeBytes: raw, Generous, default);
 
         result.Outcome.ShouldBe(SmtpDataOutcome.Accepted);
         result.Message!.SizeBytes.ShouldBeGreaterThan(raw);
@@ -222,7 +222,7 @@ public sealed class SmtpDataReceiverTests : IDisposable
         SmtpLineReader reader = new(endless, 4096);
 
         SmtpDataResult result = await Receiver()
-            .ReceiveAsync(reader, string.Empty, maxSizeBytes: 1000, Generous, default);
+            .ReceiveAsync(reader, _ => string.Empty, maxSizeBytes: 1000, Generous, default);
 
         result.Outcome.ShouldBe(SmtpDataOutcome.TooLargeAndUnrecoverable);
         result.ShouldCloseConnection.ShouldBeTrue();
@@ -241,7 +241,7 @@ public sealed class SmtpDataReceiverTests : IDisposable
         SmtpLineReader reader = Reader("Subject: interrupted\r\n\r\nhalf a bo");
 
         SmtpDataResult result = await Receiver()
-            .ReceiveAsync(reader, string.Empty, 1_000_000, Generous, default);
+            .ReceiveAsync(reader, _ => string.Empty, 1_000_000, Generous, default);
 
         result.Outcome.ShouldBe(SmtpDataOutcome.ConnectionClosed);
         result.Message.ShouldBeNull();
@@ -256,7 +256,7 @@ public sealed class SmtpDataReceiverTests : IDisposable
         SmtpLineReader reader = new(new SilentStream(), 4096);
 
         SmtpDataResult result = await Receiver()
-            .ReceiveAsync(reader, string.Empty, 1_000_000, TimeSpan.FromMilliseconds(150), default);
+            .ReceiveAsync(reader, _ => string.Empty, 1_000_000, TimeSpan.FromMilliseconds(150), default);
 
         result.Outcome.ShouldBe(SmtpDataOutcome.Timeout);
         result.Reply!.Code.ShouldBe(421);
@@ -272,7 +272,7 @@ public sealed class SmtpDataReceiverTests : IDisposable
             "legitimate\n.\nMAIL FROM:<attacker@evil.example>\r\nRCPT TO:<victim@example.com>\r\n.\r\nQUIT\r\n");
 
         SmtpDataResult result = await Receiver()
-            .ReceiveAsync(reader, string.Empty, 1_000_000, Generous, default);
+            .ReceiveAsync(reader, _ => string.Empty, 1_000_000, Generous, default);
 
         result.Outcome.ShouldBe(SmtpDataOutcome.Accepted);
 

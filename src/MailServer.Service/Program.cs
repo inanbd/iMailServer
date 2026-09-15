@@ -140,6 +140,12 @@ public static class Program
         // no-op unless MailServer:Acme:EnableHttpChallengeListener is set.
         builder.Services.AddHostedService<AcmeChallengeListener>();
 
+        // Last, and deliberately so. Hosted services start in registration order, so by the time
+        // a socket is accepting mail the schema is migrated, the message store's directories
+        // exist and the TLS provider holds a certificate. A listener that started before any of
+        // those would accept connections it could not complete.
+        builder.Services.AddHostedService<SmtpListenerService>();
+
         return builder.Build();
     }
 

@@ -22,7 +22,17 @@ public sealed record AcceptedRecipient(EmailAddress Address, RelayDecision Decis
 /// </remarks>
 public sealed class SmtpSessionContext
 {
-    private readonly List<AcceptedRecipient> _recipients = [];
+    /// <summary>
+    /// The envelope's recipients.
+    /// </summary>
+    /// <remarks>
+    /// <b>Replaced on reset, never cleared in place.</b> <see cref="Recipients"/> hands out a view
+    /// of this list, and delivery holds on to that view after the session has moved on. Clearing
+    /// the list would empty a snapshot somebody else is still reading — a message delivered to
+    /// nobody, with no error anywhere to say so. Assigning a new list leaves every snapshot
+    /// already taken exactly as it was.
+    /// </remarks>
+    private List<AcceptedRecipient> _recipients = [];
 
     /// <summary>Starts a session on a listener, from a remote address.</summary>
     /// <param name="role">Fixed by the listener. Never derived from anything the peer says.</param>
@@ -210,7 +220,7 @@ public sealed class SmtpSessionContext
         DeclaredMessageSize = declaredSize;
         State = SmtpSessionState.MailFromAccepted;
 
-        _recipients.Clear();
+        _recipients = [];
     }
 
     /// <summary>Adds an accepted recipient.</summary>
@@ -283,6 +293,6 @@ public sealed class SmtpSessionContext
         HasTransaction = false;
         ReversePath = null;
         DeclaredMessageSize = null;
-        _recipients.Clear();
+        _recipients = [];
     }
 }

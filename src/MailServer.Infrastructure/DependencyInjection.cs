@@ -183,6 +183,8 @@ public static class DependencyInjection
         services.TryAddScoped<IDeliveryRepository, DeliveryRepository>();
         services.TryAddScoped<ILocalDeliveryService, LocalDeliveryService>();
         services.TryAddScoped<SmtpDataReceiver>();
+        services.TryAddScoped<SmtpConnectionHandler>();
+        services.TryAddScoped<ISmtpDirectory, SmtpDirectory>();
 
         // Pure policies with configuration but no state, so one instance serves every session.
         services.TryAddSingleton<RelayPolicy>();
