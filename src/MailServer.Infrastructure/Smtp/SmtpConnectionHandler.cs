@@ -51,6 +51,9 @@ public sealed class SmtpConnectionHandler(
     ILocalDeliveryService delivery,
     SmtpDataReceiver receiver,
     RelayPolicy relayPolicy,
+    IMailboxAuthenticator authenticator,
+    SubmissionPolicy submissionPolicy,
+    ISubmissionRateLimiter rateLimiter,
     ILogger<SmtpConnectionHandler> logger)
 {
     /// <summary>Handles one connection to completion.</summary>
@@ -98,7 +101,10 @@ public sealed class SmtpConnectionHandler(
                 options.Processor,
                 directory,
                 relayPolicy,
-                logger);
+                logger,
+                authenticator,
+                submissionPolicy,
+                rateLimiter);
 
             SmtpLineReader reader = new(stream, options.MaxLineOctets);
 
@@ -210,6 +216,19 @@ public sealed class SmtpConnectionHandler(
                 case SmtpSessionAction.ReceiveMessageData:
                     if (!await ReceiveMessageAsync(stream, reader, processor, options, shutdownToken)
                         .ConfigureAwait(false))
+                    {
+                        return;
+                    }
+
+                    continue;
+
+                case SmtpSessionAction.ReadAuthenticationResponse:
+                    if (!await RunAuthenticationExchangeAsync(
+                            stream,
+                            reader,
+                            processor,
+                            options,
+                            sessionToken).ConfigureAwait(false))
                     {
                         return;
                     }
@@ -329,6 +348,82 @@ public sealed class SmtpConnectionHandler(
 
             return null;
         }
+    }
+
+    /// <summary>
+    /// Runs the rest of a SASL exchange. Returns false when the session must end.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every line read here is a <b>credential</b>, not a command. It goes straight to the
+    /// mechanism and is never handed to <c>SmtpCommand.Parse</c> — a session mid-AUTH has no
+    /// command grammar, and parsing the line would turn a password into a verb and put it in
+    /// whatever the parser logs.
+    /// </para>
+    /// <para>
+    /// The loop is bounded by the mechanism itself: PLAIN takes at most one further line and
+    /// LOGIN at most two, and any line beyond what the mechanism expects fails the exchange. The
+    /// explicit cap below is the belt to that braces — a mechanism added later that challenged
+    /// indefinitely would otherwise be an unbounded read.
+    /// </para>
+    /// </remarks>
+    private static async Task<bool> RunAuthenticationExchangeAsync(
+        Stream stream,
+        SmtpLineReader reader,
+        SmtpCommandProcessor processor,
+        SmtpConnectionOptions options,
+        CancellationToken cancellationToken)
+    {
+        const int MaxExchangeSteps = 8;
+
+        for (int step = 0; step < MaxExchangeSteps; step++)
+        {
+            SmtpLineResult line = await reader
+                .ReadLineAsync(options.CommandTimeout, cancellationToken)
+                .ConfigureAwait(false);
+
+            switch (line.Status)
+            {
+                case SmtpLineStatus.EndOfStream:
+                    return false;
+
+                case SmtpLineStatus.Timeout:
+                    await WriteAsync(stream, SmtpReplies.Timeout(), cancellationToken).ConfigureAwait(false);
+                    return false;
+
+                case SmtpLineStatus.LineTooLong:
+                    await WriteAsync(
+                        stream,
+                        SmtpReplies.LineTooLong(reader.MaxLineOctets),
+                        cancellationToken).ConfigureAwait(false);
+
+                    return false;
+            }
+
+            SmtpCommandResult result = await processor
+                .ContinueAuthenticationAsync(line.Text, cancellationToken)
+                .ConfigureAwait(false);
+
+            await WriteAsync(stream, result.Reply, cancellationToken).ConfigureAwait(false);
+
+            switch (result.Action)
+            {
+                case SmtpSessionAction.ReadAuthenticationResponse:
+                    continue;
+
+                case SmtpSessionAction.CloseAfterReply:
+                    return false;
+
+                default:
+                    return true;
+            }
+        }
+
+        // A mechanism that never finished. Refused rather than continued, because the only way
+        // to reach here is a mechanism that is broken or a peer exploiting one.
+        await WriteAsync(stream, SmtpReplies.AuthenticationFailed(), cancellationToken).ConfigureAwait(false);
+
+        return false;
     }
 
     /// <summary>Receives a message and delivers it. Returns false when the session must end.</summary>

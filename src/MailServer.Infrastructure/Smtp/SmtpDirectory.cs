@@ -217,6 +217,56 @@ public sealed class SmtpDirectory(
     }
 
     /// <inheritdoc />
+    public async ValueTask<bool> MayActAsAsync(
+        EmailAddress authenticatedMailbox,
+        EmailAddress claimedSender,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(authenticatedMailbox);
+        ArgumentNullException.ThrowIfNull(claimedSender);
+
+        if (claimedSender.NormalizedValue.Equals(
+                authenticatedMailbox.NormalizedValue,
+                StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        // An alias the mailbox is behind. Someone whose mail arrives at both alice@ and sales@
+        // expects to be able to reply from either, and refusing would make the alias useless for
+        // anything but receiving.
+        Alias? alias = await aliases
+            .GetByAddressAsync(claimedSender, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (alias is not { IsEnabled: true })
+        {
+            return false;
+        }
+
+        IReadOnlyList<Alias> enabled = await aliases
+            .GetAllEnabledAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        Dictionary<string, IReadOnlyList<EmailAddress>> map = new(StringComparer.OrdinalIgnoreCase);
+
+        foreach (Alias candidate in enabled)
+        {
+            map[candidate.Address.NormalizedValue] = candidate.Targets;
+        }
+
+        // Expanded rather than compared against the immediate targets: a mailbox behind
+        // everyone@ -> staff@ -> alice@ is as entitled to send as everyone@ as one named
+        // directly, and the expansion is already bounded against cycles and fan-out.
+        AliasExpansion expansion = expansionPolicy.Expand(
+            claimedSender,
+            address => map.GetValueOrDefault(address.NormalizedValue));
+
+        return expansion.Recipients.Any(target =>
+            target.NormalizedValue.Equals(authenticatedMailbox.NormalizedValue, StringComparison.Ordinal));
+    }
+
+    /// <inheritdoc />
     /// <remarks>
     /// No per-mailbox send restrictions exist yet, so an authenticated mailbox may send anywhere.
     /// The hook is here rather than absent because adding it later would mean changing the relay

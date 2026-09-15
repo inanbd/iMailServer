@@ -66,6 +66,19 @@ public interface ISmtpDirectory
         IpAddressValue address,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Whether an authenticated mailbox owns a given address and may send as it.
+    /// </summary>
+    /// <remarks>
+    /// True for the mailbox's own address and for any alias that resolves to it — the ordinary
+    /// case of a person whose mail arrives at both <c>alice@</c> and <c>sales@</c> and who
+    /// expects to be able to reply from either.
+    /// </remarks>
+    ValueTask<bool> MayActAsAsync(
+        EmailAddress authenticatedMailbox,
+        EmailAddress claimedSender,
+        CancellationToken cancellationToken);
+
     /// <summary>Whether an authenticated mailbox is permitted to send to a given recipient.</summary>
     /// <remarks>
     /// The hook for per-mailbox restrictions — an account that may only send internally, say.

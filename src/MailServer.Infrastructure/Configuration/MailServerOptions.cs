@@ -64,23 +64,38 @@ public sealed class SmtpOptions
 
     /// <summary>Port 587. Authenticated submission, STARTTLS before AUTH.</summary>
     /// <remarks>
-    /// Disabled by default until SASL lands in Milestone 7. A submission listener with no way to
-    /// authenticate refuses every sender, which is the correct failure but not a useful service;
-    /// enabling it by default would advertise a port that cannot do its job.
+    /// The port RFC 6409 designates for submission, and the one a mail client should be
+    /// configured to use. It requires AUTH, and AUTH requires TLS, so a client that reaches it
+    /// without either is refused rather than accommodated.
     /// </remarks>
-    public SmtpListenerOptions Submission { get; set; } = new() { Port = 587, Enabled = false };
-
-    /// <summary>Port 465. Authenticated submission, TLS from the first octet.</summary>
-    public SmtpListenerOptions ImplicitTlsSubmission { get; set; } = new() { Port = 465, Enabled = false };
+    public SmtpListenerOptions Submission { get; set; } = new() { Port = 587, Enabled = true };
 
     /// <summary>
-    /// Whether SASL authentication is implemented and enabled.
+    /// Port 465. Authenticated submission, TLS from the first octet.
     /// </summary>
     /// <remarks>
-    /// False until Milestone 7. It gates the AUTH capability, and a capability advertised before
-    /// it works sends clients into a failure they cannot diagnose.
+    /// RFC 8314 recommends implicit TLS over STARTTLS for submission, because there is no
+    /// plaintext phase for a network attacker to strip. Enabled alongside 587 rather than
+    /// instead of it: a great many existing clients are configured for one or the other, and
+    /// turning off the one a customer already uses is a migration, not a default.
     /// </remarks>
-    public bool EnableAuthentication { get; set; }
+    public SmtpListenerOptions ImplicitTlsSubmission { get; set; } = new() { Port = 465, Enabled = true };
+
+    /// <summary>
+    /// Whether SASL authentication is offered.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Gates the AUTH capability. It remains a switch rather than becoming unconditional so that
+    /// an operator running this server purely as an inbound MTA can turn the whole submission
+    /// surface off — the smallest attack surface is the one that is not there.
+    /// </para>
+    /// <para>
+    /// Turning it off does <b>not</b> make the submission listeners accept unauthenticated mail:
+    /// they refuse every sender instead. See <c>SmtpCommandProcessor.RequiresAuthentication</c>.
+    /// </para>
+    /// </remarks>
+    public bool EnableAuthentication { get; set; } = true;
 
     /// <summary>Whether SMTPUTF8 is implemented and enabled.</summary>
     public bool EnableSmtpUtf8 { get; set; }
@@ -411,6 +426,25 @@ public sealed class LimitsOptions
 
     [Range(1, 20)]
     public int MaxAuthAttemptsPerSession { get; set; } = 3;
+
+    /// <summary>
+    /// Messages one authenticated mailbox may submit per hour.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The bound on what a stolen password is worth. An attacker with valid credentials passes
+    /// every downstream check — SPF, DKIM, DMARC all say the mail is genuine, because it is —
+    /// so the only thing standing between a compromised account and a domain's reputation is how
+    /// much it can send before anyone notices.
+    /// </para>
+    /// <para>
+    /// The default is generous for a person and restrictive for a script. An organisation with a
+    /// legitimate bulk sender should give that sender its own mailbox and raise this for it,
+    /// rather than raising it for everyone.
+    /// </para>
+    /// </remarks>
+    [Range(1, 100_000)]
+    public int MaxMessagesPerMailboxPerHour { get; set; } = 200;
 }
 
 /// <summary>Startup maintenance mode.</summary>

@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using MailServer.Application.Abstractions.Certificates;
+using MailServer.Application.Abstractions.Security;
 using MailServer.Application.Abstractions.Smtp;
 using MailServer.Domain.Enums;
 using MailServer.Domain.Policies;
@@ -58,6 +59,77 @@ internal sealed class TestCertificateProvider : ITlsCertificateProvider, IDispos
     public void Dispose() => _certificate.Dispose();
 }
 
+/// <summary>An authenticator that refuses everything, for the listeners that offer no AUTH.</summary>
+internal sealed class RefusingAuthenticator(ISecurityEventRecorder recorder) : IMailboxAuthenticator
+{
+    public async Task<MailboxAuthenticationResult> AuthenticateAsync(
+        SaslCredential credential,
+        IpAddressValue remoteAddress,
+        CancellationToken cancellationToken)
+    {
+        // Records like the real one, so the suite can prove the recording reaches storage rather
+        // than merely happening.
+        await recorder.RecordAsync(
+            SecurityEventType.MailboxAuthenticationFailed,
+            credential.AuthenticationIdentity,
+            remoteAddress.Value,
+            "Authentication failed.",
+            cancellationToken).ConfigureAwait(false);
+
+        return new MailboxAuthenticationResult(
+            MailboxAuthenticationOutcome.Failed,
+            null,
+            "Authentication is not configured for this listener.");
+    }
+}
+
+/// <summary>
+/// A recorder that buffers like the real one and counts how often it is flushed.
+/// </summary>
+/// <remarks>
+/// The real recorder buffers because writing an event inside a delivery transaction deadlocks
+/// SQLite. Buffering is only safe if something flushes; on the SMTP path nothing did, so every
+/// authentication failure and lockout was recorded, logged as recorded, and discarded.
+/// </remarks>
+internal sealed class CountingSecurityEventRecorder : ISecurityEventRecorder
+{
+    private readonly List<(SecurityEventType Type, string? Subject, string Description)> _buffered = [];
+
+    public List<(SecurityEventType Type, string? Subject, string Description)> Written { get; } = [];
+
+    public int Flushes { get; private set; }
+
+    public bool HasPendingEvents => _buffered.Count > 0;
+
+    public Task RecordAsync(
+        SecurityEventType eventType,
+        string? subject,
+        string? origin,
+        string description,
+        CancellationToken cancellationToken)
+    {
+        _buffered.Add((eventType, subject, description));
+
+        return Task.CompletedTask;
+    }
+
+    public Task FlushAsync(CancellationToken cancellationToken)
+    {
+        Flushes++;
+        Written.AddRange(_buffered);
+        _buffered.Clear();
+
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>No rate limit, for the listener where no mailbox submits anything.</summary>
+internal sealed class UnlimitedRateLimiter : ISubmissionRateLimiter
+{
+    public Task<SubmissionRateDecision> CheckAsync(EmailAddress mailbox, CancellationToken cancellationToken) =>
+        Task.FromResult(new SubmissionRateDecision(true, 0, int.MaxValue, TimeSpan.FromHours(1)));
+}
+
 /// <summary>Records what a delivery attempt was asked to do, without touching a database.</summary>
 internal sealed class RecordingDeliveryService : ILocalDeliveryService
 {
@@ -90,6 +162,7 @@ public sealed class SmtpWireTests : IAsyncLifetime
     private readonly FakeSmtpDirectory _directory = new();
     private readonly RecordingDeliveryService _delivery = new();
     private readonly TestCertificateProvider _certificates = new();
+    private readonly CountingSecurityEventRecorder _recorder = new();
 
     private SmtpListener _listener = null!;
     private ServiceProvider _services = null!;
@@ -113,6 +186,19 @@ public sealed class SmtpWireTests : IAsyncLifetime
         services.AddSingleton<ILocalDeliveryService>(_delivery);
         services.AddSingleton<IMessageStore>(store);
         services.AddSingleton<RelayPolicy>();
+
+        // Milestone 6's wire tests never authenticate - port 25 offers no AUTH - so the
+        // authenticator that refuses everything is the honest stand-in here. Submission is
+        // covered by its own suite against a real authenticator.
+        services.AddSingleton<IMailboxAuthenticator, RefusingAuthenticator>();
+        services.AddSingleton<SubmissionPolicy>();
+        services.AddSingleton<ISubmissionRateLimiter, UnlimitedRateLimiter>();
+
+        // A recorder that counts flushes, so the suite can prove the listener performs one. The
+        // production recorder buffers and is flushed by nothing on the SMTP path unless the
+        // listener does it - a bug this project shipped and then found by running the server.
+        services.AddSingleton(_recorder);
+        services.AddSingleton<ISecurityEventRecorder>(sp => sp.GetRequiredService<CountingSecurityEventRecorder>());
         services.AddScoped<SmtpDataReceiver>();
         services.AddScoped<SmtpConnectionHandler>();
 
@@ -540,6 +626,22 @@ public sealed class SmtpWireTests : IAsyncLifetime
 
         stored.ShouldContain("MAIL FROM:<attacker@evil.example>");
         stored.ShouldContain("RCPT TO:<victim@elsewhere.example>");
+    }
+
+    [Fact]
+    public async Task A_session_that_records_nothing_does_not_touch_the_security_log()
+    {
+        // Port 25 offers no AUTH, so an ordinary inbound session records nothing and must not
+        // pay for a write. The flush that matters is asserted in SmtpSubmissionWireTests, where
+        // a session actually has evidence to leave.
+        await using (Peer peer = await ConnectAsync())
+        {
+            await peer.ReadReplyAsync();
+            await peer.SendAsync("EHLO relay.example.net");
+            await peer.SendAsync("QUIT");
+        }
+
+        _recorder.Written.ShouldBeEmpty();
     }
 
     [Fact]

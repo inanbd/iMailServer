@@ -76,18 +76,11 @@ public sealed class Argon2PasswordHasher : IPasswordHasher
     public string Describe() =>
         $"argon2id (m={_memoryKib} KiB, t={_iterations}, p={_parallelism})";
 
-    public PasswordHash Hash(string password)
+    public PasswordHash Hash(string password) => Hash(password.AsSpan());
+
+    /// <remarks>The single hashing body; the string overload delegates here.</remarks>
+    public PasswordHash Hash(ReadOnlySpan<char> password)
     {
-        ArgumentNullException.ThrowIfNull(password);
-
-        if (password.Length == 0)
-        {
-            // The password policy already refuses this. Failing here too, with a clear
-            // message, means a future caller that bypasses the policy gets an explicable
-            // error rather than an obscure one from inside the Argon2 library.
-            throw new ArgumentException("A password cannot be empty.", nameof(password));
-        }
-
         byte[] salt = RandomNumberGenerator.GetBytes(SaltBytes);
         byte[] digest = Derive(password, salt, _memoryKib, _iterations, _parallelism);
 
@@ -101,7 +94,15 @@ public sealed class Argon2PasswordHasher : IPasswordHasher
             digest);
     }
 
-    public PasswordVerificationResult Verify(string candidate, PasswordHash stored)
+    public PasswordVerificationResult Verify(string candidate, PasswordHash stored) =>
+        Verify(candidate.AsSpan(), stored);
+
+    /// <remarks>
+    /// The single verification body. The string overload delegates here rather than the reverse,
+    /// so the SMTP path - which holds its password in a clearable array - never has to
+    /// materialise a string that nothing can clear.
+    /// </remarks>
+    public PasswordVerificationResult Verify(ReadOnlySpan<char> candidate, PasswordHash stored)
     {
         ArgumentNullException.ThrowIfNull(stored);
 
@@ -110,7 +111,7 @@ public sealed class Argon2PasswordHasher : IPasswordHasher
         // input, and an exception has a different shape AND a different duration from an
         // ordinary failure - either of which is an oracle. So the work is done against a
         // fixed placeholder and the answer is false regardless.
-        if (string.IsNullOrEmpty(candidate))
+        if (candidate.IsEmpty)
         {
             Derive(
                 EmptyCandidatePlaceholder,
@@ -152,20 +153,28 @@ public sealed class Argon2PasswordHasher : IPasswordHasher
     /// client can measure, revealing whether the server has been set up and, in a
     /// multi-account future, which accounts exist.
     /// </remarks>
-    public bool VerifyAgainstDummy(string candidate)
+    public bool VerifyAgainstDummy(string candidate) => VerifyAgainstDummy(candidate.AsSpan());
+
+    /// <inheritdoc cref="VerifyAgainstDummy(string)" />
+    public bool VerifyAgainstDummy(ReadOnlySpan<char> candidate)
     {
-        Verify(candidate ?? string.Empty, _dummyHash);
+        Verify(candidate, _dummyHash);
         return false;
     }
 
     private static byte[] Derive(
-        string password,
+        ReadOnlySpan<char> password,
         byte[] salt,
         int memoryKib,
         int iterations,
         int parallelism)
     {
-        byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
+        // Encoded straight from the caller's buffer. Going via a string would put an
+        // uncleareable copy of the password on the managed heap for the life of a collection
+        // cycle, which is what the span overload exists to avoid.
+        byte[] passwordBytes = new byte[Encoding.UTF8.GetByteCount(password)];
+
+        Encoding.UTF8.GetBytes(password, passwordBytes);
 
         try
         {

@@ -84,4 +84,34 @@ public enum SecurityEventType
     /// that bites well before anyone is watching the certificate's expiry date.
     /// </remarks>
     CertificateIssuanceFailed = 17,
+
+    /// <summary>A mailbox authenticated successfully on a submission listener.</summary>
+    /// <remarks>
+    /// Recorded as well as the failures. A successful sign-in from an address the owner has
+    /// never used is the signal that a password has been stolen, and it is invisible if only
+    /// failures are kept.
+    /// </remarks>
+    MailboxAuthenticationSucceeded = 18,
+
+    /// <summary>A mailbox authentication attempt was refused.</summary>
+    /// <remarks>
+    /// The description says <b>that</b> it failed, never <b>why</b> in a way that distinguishes
+    /// an unknown mailbox from a wrong password — that distinction is exactly the enumeration
+    /// oracle the reply codes are careful not to offer, and writing it to the event log would
+    /// hand it to anyone who can read the log.
+    /// </remarks>
+    MailboxAuthenticationFailed = 19,
+
+    /// <summary>A mailbox was locked out after repeated failures on a submission listener.</summary>
+    MailboxLockedOut = 20,
+
+    /// <summary>An authenticated sender tried to use a reverse path it is not entitled to.</summary>
+    /// <remarks>
+    /// The signal that a compromised account is being used to forge a colleague's address, which
+    /// is what a stolen password is usually worth to an attacker.
+    /// </remarks>
+    SenderForgeryRefused = 21,
+
+    /// <summary>A mailbox exceeded its submission rate limit.</summary>
+    MailboxRateLimited = 22,
 }

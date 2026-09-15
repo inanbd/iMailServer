@@ -33,6 +33,15 @@ internal sealed class SingleDomainDirectory : ISmtpDirectory
         CancellationToken cancellationToken) =>
         ValueTask.FromResult(AuthorizedRelayAddresses.Contains(address.Value));
 
+    /// <summary>A mailbox may send only as itself here; the submission suite covers aliases.</summary>
+    public ValueTask<bool> MayActAsAsync(
+        EmailAddress authenticatedMailbox,
+        EmailAddress claimedSender,
+        CancellationToken cancellationToken) =>
+        ValueTask.FromResult(claimedSender.NormalizedValue.Equals(
+            authenticatedMailbox.NormalizedValue,
+            StringComparison.Ordinal));
+
     public ValueTask<bool> MayRelayAsAsync(
         EmailAddress authenticatedMailbox,
         EmailAddress recipient,
@@ -118,13 +127,24 @@ public sealed class OpenRelayTests
     private static async Task<SmtpReply> SendAsync(SmtpCommandProcessor processor, string line) =>
         (await processor.ExecuteAsync(SmtpCommand.Parse(line), default)).Reply;
 
-    /// <summary>Attempts to relay to a foreign domain and returns the reply to RCPT TO.</summary>
+    /// <summary>
+    /// Attempts to relay to a foreign domain and returns the reply to RCPT TO.
+    /// </summary>
+    /// <remarks>
+    /// An authenticated session sends as the mailbox it authenticated as, because
+    /// <c>SubmissionPolicy</c> refuses anything else and these tests are about the RECIPIENT
+    /// decision. Sender forgery has its own suite; conflating the two here would make a relay
+    /// test pass for the wrong reason.
+    /// </remarks>
     private static async Task<SmtpReply> AttemptRelayAsync(
         SmtpCommandProcessor processor,
         string recipient = ForeignRecipient)
     {
         await SendAsync(processor, "EHLO spammer.example.net");
-        await SendAsync(processor, "MAIL FROM:<spammer@example.net>");
+
+        string sender = processor.Session.AuthenticatedMailbox?.Value ?? "spammer@example.net";
+
+        await SendAsync(processor, $"MAIL FROM:<{sender}>");
 
         return await SendAsync(processor, $"RCPT TO:<{recipient}>");
     }
@@ -486,14 +506,57 @@ public sealed class OpenRelayTests
     }
 
     [Fact]
-    public void Submission_listeners_are_disabled_until_authentication_exists()
+    public void Submission_listeners_are_on_the_ports_the_rfcs_designate()
     {
-        // A submission listener with no way to authenticate refuses every sender - correct, but
-        // the reason it is off is that a port advertised and unusable is worse than one absent.
+        // 587 is RFC 6409's submission port and 465 is RFC 8314's implicit-TLS one. Both are
+        // enabled now that SASL exists; before it they were off, because a port advertised and
+        // unusable is worse than one absent.
         MailServer.Infrastructure.Configuration.SmtpOptions options = new();
 
-        options.EnableAuthentication.ShouldBeFalse();
-        options.Submission.Enabled.ShouldBeFalse();
-        options.ImplicitTlsSubmission.Enabled.ShouldBeFalse();
+        options.EnableAuthentication.ShouldBeTrue();
+        options.Submission.Port.ShouldBe(587);
+        options.ImplicitTlsSubmission.Port.ShouldBe(465);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Turning_authentication_off_does_not_make_submission_accept_unauthenticated_mail(
+        bool authenticationAvailable)
+    {
+        // The safe failure. An operator running this server purely as an inbound MTA may turn
+        // the whole submission surface off, and the listener must then refuse every sender -
+        // NOT quietly accept mail because the means to authenticate is absent.
+        foreach (SmtpListenerRole role in (SmtpListenerRole[])
+        [
+            SmtpListenerRole.Submission,
+            SmtpListenerRole.ImplicitTlsSubmission,
+        ])
+        {
+            SmtpSessionContext session = new(
+                role,
+                IpAddressValue.Parse("203.0.113.7"),
+                new DateTimeOffset(2026, 3, 1, 9, 0, 0, TimeSpan.Zero),
+                isTlsActive: true);
+
+            SmtpCommandProcessor processor = new(
+                session,
+                new SmtpProcessorOptions(
+                    "mail.example.com",
+                    "AetherMail",
+                    100,
+                    1_000_000,
+                    authenticationAvailable),
+                _directory,
+                new RelayPolicy(),
+                NullLogger.Instance);
+
+            await SendAsync(processor, "EHLO client.example.net");
+
+            SmtpReply reply = await SendAsync(processor, $"MAIL FROM:<{LocalRecipient}>");
+
+            reply.Code.ShouldBe(530, $"role {role}, authentication available {authenticationAvailable}");
+            session.HasTransaction.ShouldBeFalse();
+        }
     }
 }

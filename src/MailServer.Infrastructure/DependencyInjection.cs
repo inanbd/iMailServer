@@ -185,6 +185,9 @@ public static class DependencyInjection
         services.TryAddScoped<SmtpDataReceiver>();
         services.TryAddScoped<SmtpConnectionHandler>();
         services.TryAddScoped<ISmtpDirectory, SmtpDirectory>();
+        services.TryAddScoped<IMailboxAuthenticator, MailboxAuthenticator>();
+        services.TryAddScoped<ISubmissionRateLimiter, SubmissionRateLimiter>();
+        services.TryAddSingleton<SubmissionPolicy>();
         services.TryAddScoped<ISmtpQueries, Persistence.Queries.SmtpQueries>();
         services.TryAddSingleton<ISmtpConfigurationView, SmtpConfigurationView>();
 

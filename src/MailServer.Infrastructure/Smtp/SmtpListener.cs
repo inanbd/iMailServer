@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using MailServer.Application.Abstractions.Security;
 using MailServer.Domain.Enums;
 using MailServer.Domain.Smtp;
 using MailServer.Domain.ValueObjects;
@@ -202,12 +203,30 @@ public sealed class SmtpListener(
                 SmtpConnectionHandler handler =
                     scope.ServiceProvider.GetRequiredService<SmtpConnectionHandler>();
 
-                await handler.HandleAsync(
-                    stream,
-                    remoteAddress,
-                    options,
-                    DateTimeOffset.UtcNow,
-                    cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await handler.HandleAsync(
+                        stream,
+                        remoteAddress,
+                        options,
+                        DateTimeOffset.UtcNow,
+                        cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    // Security events are BUFFERED during the session and written here.
+                    //
+                    // They have to be buffered: writing one while a delivery transaction is open
+                    // deadlocks SQLite (see addendum A2.2). They have to be flushed HERE because
+                    // nothing else will - the pipeline behaviour that flushes them runs only for
+                    // MediatR requests and the IPC dispatcher only for admin commands, and an
+                    // SMTP session goes through neither. Without this the entire audit trail for
+                    // mailbox authentication - every failure, every lockout, every forged sender
+                    // - is recorded, logged as recorded, and silently discarded.
+                    //
+                    // In the finally, so a session that ended badly still leaves its evidence.
+                    await FlushSecurityEventsAsync(scope.ServiceProvider).ConfigureAwait(false);
+                }
             }
         }
         catch (Exception ex)
@@ -215,6 +234,32 @@ public sealed class SmtpListener(
             // The handler already catches everything it can name. This is the backstop that
             // keeps one session from taking the listener with it.
             logger.LogError(ex, "SMTP session from {RemoteAddress} ended unexpectedly.", remoteAddress.Value);
+        }
+    }
+
+    /// <summary>Writes the session's buffered security events. Never throws.</summary>
+    /// <remarks>
+    /// A failure to record evidence must not also fail the thing it was evidence of, and by this
+    /// point the session is over anyway. It is logged at error level because a security log that
+    /// has stopped being written is worth waking somebody for.
+    /// </remarks>
+    private async Task FlushSecurityEventsAsync(IServiceProvider scopedServices)
+    {
+        try
+        {
+            ISecurityEventRecorder recorder =
+                scopedServices.GetRequiredService<ISecurityEventRecorder>();
+
+            if (!recorder.HasPendingEvents)
+            {
+                return;
+            }
+
+            await recorder.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to write the security events buffered during an SMTP session.");
         }
     }
 

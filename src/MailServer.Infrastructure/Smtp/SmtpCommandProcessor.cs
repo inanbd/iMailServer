@@ -21,6 +21,17 @@ public enum SmtpSessionAction
 
     /// <summary>Send the reply, then close.</summary>
     CloseAfterReply = 3,
+
+    /// <summary>
+    /// Send the 334 challenge, then read one more line and feed it back through
+    /// <see cref="SmtpCommandProcessor.ContinueAuthenticationAsync"/>.
+    /// </summary>
+    /// <remarks>
+    /// SASL is the only part of SMTP where the server asks and waits mid-command. The line that
+    /// comes back is a credential, not a command, and it must never reach the command parser —
+    /// which is why it has its own action rather than being read by the ordinary loop.
+    /// </remarks>
+    ReadAuthenticationResponse = 4,
 }
 
 /// <summary>A reply to send and what to do next.</summary>
@@ -34,6 +45,10 @@ public sealed record SmtpCommandResult(SmtpReply Reply, SmtpSessionAction Action
 /// <param name="IsAuthenticationAvailable">Whether SASL is implemented and enabled.</param>
 /// <param name="IsSmtpUtf8Available">Whether SMTPUTF8 is implemented and enabled.</param>
 /// <param name="IsChunkingAvailable">Whether BDAT is implemented and enabled.</param>
+/// <param name="MaxAuthenticationAttempts">
+/// Failed AUTH attempts allowed on one connection before it is closed. From
+/// <c>MailServer:Limits:MaxAuthAttemptsPerSession</c>.
+/// </param>
 public sealed record SmtpProcessorOptions(
     string Hostname,
     string ProductName,
@@ -41,7 +56,8 @@ public sealed record SmtpProcessorOptions(
     long MaxMessageSizeBytes,
     bool IsAuthenticationAvailable = false,
     bool IsSmtpUtf8Available = false,
-    bool IsChunkingAvailable = false);
+    bool IsChunkingAvailable = false,
+    int MaxAuthenticationAttempts = 3);
 
 /// <summary>
 /// Turns one parsed command into one reply, against one session.
@@ -68,13 +84,26 @@ public sealed class SmtpCommandProcessor
     private readonly ISmtpDirectory _directory;
     private readonly RelayPolicy _relayPolicy;
     private readonly ILogger _logger;
+    private readonly IMailboxAuthenticator _authenticator;
+    private readonly SubmissionPolicy _submissionPolicy;
+    private readonly ISubmissionRateLimiter? _rateLimiter;
+
+    /// <summary>The mechanism mid-exchange, or null when no AUTH is in flight.</summary>
+    /// <remarks>
+    /// One at a time. A session that could run two exchanges at once would have two answers to
+    /// "who is this", and the wrong one would decide whether relaying is permitted.
+    /// </remarks>
+    private ISaslMechanism? _mechanism;
 
     public SmtpCommandProcessor(
         SmtpSessionContext session,
         SmtpProcessorOptions options,
         ISmtpDirectory directory,
         RelayPolicy relayPolicy,
-        ILogger logger)
+        ILogger logger,
+        IMailboxAuthenticator? authenticator = null,
+        SubmissionPolicy? submissionPolicy = null,
+        ISubmissionRateLimiter? rateLimiter = null)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(options);
@@ -87,6 +116,17 @@ public sealed class SmtpCommandProcessor
         _directory = directory;
         _relayPolicy = relayPolicy;
         _logger = logger;
+
+        // Optional so a test can build a processor for the many paths that never authenticate.
+        // A session that reaches AUTH without one is refused, not crashed - see Authenticate.
+        _authenticator = authenticator ?? UnavailableAuthenticator.Instance;
+
+        // The policy is a pure function with no configuration, so a default instance is the
+        // same instance. The rate limiter needs a database and is genuinely optional: a null
+        // one means unlimited, which is correct for the MTA listener - inbound mail is not
+        // submitted by anyone and has no mailbox to charge.
+        _submissionPolicy = submissionPolicy ?? new SubmissionPolicy();
+        _rateLimiter = rateLimiter;
     }
 
     /// <summary>The session this processor drives.</summary>
@@ -120,8 +160,8 @@ public sealed class SmtpCommandProcessor
             SmtpVerb.Ehlo => Greet(command.Argument, extended: true),
             SmtpVerb.Helo => Greet(command.Argument, extended: false),
             SmtpVerb.StartTls => StartTls(),
-            SmtpVerb.Auth => Authenticate(),
-            SmtpVerb.MailFrom => MailFrom(command.Argument),
+            SmtpVerb.Auth => await AuthenticateAsync(command.Argument, cancellationToken).ConfigureAwait(false),
+            SmtpVerb.MailFrom => await MailFromAsync(command.Argument, cancellationToken).ConfigureAwait(false),
             SmtpVerb.RcptTo => await RcptToAsync(command.Argument, cancellationToken).ConfigureAwait(false),
             SmtpVerb.Data => Data(),
             SmtpVerb.Rset => Reset(),
@@ -189,11 +229,22 @@ public sealed class SmtpCommandProcessor
         return new SmtpCommandResult(SmtpReplies.ReadyForTls(), SmtpSessionAction.StartTlsHandshake);
     }
 
-    private SmtpCommandResult Authenticate()
+    /// <summary>
+    /// Begins an AUTH exchange.
+    /// </summary>
+    /// <remarks>
+    /// The argument is <c>MECHANISM [initial-response]</c>. The initial response is base64 and is
+    /// a credential, so it is never echoed, never logged, and never appears in a reply.
+    /// </remarks>
+    private async ValueTask<SmtpCommandResult> AuthenticateAsync(
+        string argument,
+        CancellationToken cancellationToken)
     {
-        if (!_options.IsAuthenticationAvailable)
+        if (_session.IsAuthenticated)
         {
-            return new SmtpCommandResult(SmtpReplies.CommandNotImplemented("AUTH"));
+            // RFC 4954 §4: a session authenticates once. A second attempt would raise the
+            // question of what happens to state collected under the first identity.
+            return new SmtpCommandResult(SmtpReplies.BadSequence("This session has already authenticated."));
         }
 
         if (_session.Role is SmtpListenerRole.InboundMta)
@@ -207,18 +258,202 @@ public sealed class SmtpCommandProcessor
         if (!_session.IsTlsActive)
         {
             // Rule 105: no plaintext SMTP AUTH over Internet. The capability was not advertised,
-            // and it is refused here too.
+            // and it is refused here too - a defence that relied on advertisement alone would
+            // fail the moment a client guessed.
             return new SmtpCommandResult(SmtpReplies.TlsRequired());
         }
 
-        // SASL lands in Milestone 7. Until then the capability is not advertised, so a client
-        // only reaches this line by guessing, and it is told the truth.
-        return new SmtpCommandResult(SmtpReplies.CommandNotImplemented("AUTH"));
+        if (!_options.IsAuthenticationAvailable)
+        {
+            return new SmtpCommandResult(SmtpReplies.CommandNotImplemented("AUTH"));
+        }
+
+        if (HasExhaustedAttempts)
+        {
+            return new SmtpCommandResult(
+                SmtpReplies.TooManyAuthenticationAttempts(),
+                SmtpSessionAction.CloseAfterReply);
+        }
+
+        // Split on the FIRST space only: everything after it is base64, which may contain no
+        // space but must not be re-split if it somehow does.
+        int space = argument.IndexOf(' ', StringComparison.Ordinal);
+
+        string mechanismName = space < 0 ? argument : argument[..space];
+        string? initialResponse = space < 0 ? null : argument[(space + 1)..].Trim();
+
+        if (mechanismName.Length == 0)
+        {
+            return new SmtpCommandResult(SmtpReplies.SyntaxError("AUTH requires a mechanism."));
+        }
+
+        ISaslMechanism? mechanism = SaslMechanisms.Create(mechanismName);
+
+        if (mechanism is null)
+        {
+            // 504 5.5.4 is the RFC 4954 §4 answer for a mechanism the server does not support.
+            // The mechanism name is echoed because it is not a credential - the initial response
+            // on the same line is, and is not.
+            return new SmtpCommandResult(SmtpReplies.UnsupportedAuthenticationMechanism(mechanismName));
+        }
+
+        _mechanism = mechanism;
+
+        return await AdvanceAsync(
+            mechanism.Start(initialResponse),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Feeds the client's answer to a 334 back into the in-flight exchange.
+    /// </summary>
+    /// <remarks>
+    /// The line is a credential. It reaches this method directly from the connection loop and is
+    /// never parsed as a command — a session mid-AUTH has no command grammar, and treating the
+    /// line as one would turn a password into a verb.
+    /// </remarks>
+    public async ValueTask<SmtpCommandResult> ContinueAuthenticationAsync(
+        string response,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(response);
+
+        if (_mechanism is null)
+        {
+            return new SmtpCommandResult(SmtpReplies.BadSequence("No authentication exchange is in progress."));
+        }
+
+        return await AdvanceAsync(_mechanism.Advance(response), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Turns one SASL step into a reply, verifying the credential when there is one.</summary>
+    private async ValueTask<SmtpCommandResult> AdvanceAsync(SaslStep step, CancellationToken cancellationToken)
+    {
+        switch (step.Outcome)
+        {
+            case SaslOutcome.Challenge:
+                return new SmtpCommandResult(
+                    SmtpReplies.AuthenticationChallenge(step.Challenge ?? string.Empty),
+                    SmtpSessionAction.ReadAuthenticationResponse);
+
+            case SaslOutcome.Cancelled:
+                // RFC 4954 §4. A client that changed its mind has not failed a password, so this
+                // does NOT count against the attempt budget - counting it would walk a hesitant
+                // client into a lockout it never earned.
+                EndExchange();
+
+                return new SmtpCommandResult(SmtpReplies.AuthenticationCancelled());
+
+            case SaslOutcome.Failed:
+                EndExchange();
+
+                // A malformed exchange counts. Otherwise a client could probe indefinitely by
+                // sending garbage, and the attempt budget would bound nothing.
+                return CountFailure(SmtpReplies.AuthenticationFailed(), step.Diagnostic);
+
+            case SaslOutcome.Completed:
+                return await VerifyAsync(step.Credential!, cancellationToken).ConfigureAwait(false);
+
+            default:
+                EndExchange();
+
+                return CountFailure(SmtpReplies.AuthenticationFailed(), "Unrecognised SASL outcome.");
+        }
+    }
+
+    private async ValueTask<SmtpCommandResult> VerifyAsync(
+        SaslCredential credential,
+        CancellationToken cancellationToken)
+    {
+        EndExchange();
+
+        // Disposed on every path, including the exception one. The password lives in a clearable
+        // buffer precisely so that this can overwrite it the moment it is no longer needed.
+        using (credential)
+        {
+            MailboxAuthenticationResult result = await _authenticator
+                .AuthenticateAsync(credential, _session.RemoteAddress, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (result.IsSuccess && result.Mailbox is not null)
+            {
+                _session.Authenticate(result.Mailbox);
+
+                _logger.LogInformation(
+                    "{Mailbox} authenticated from {RemoteAddress}.",
+                    result.Mailbox.Value,
+                    _session.RemoteAddress.Value);
+
+                return new SmtpCommandResult(SmtpReplies.AuthenticationSucceeded());
+            }
+
+            // A locked-out mailbox receives exactly the reply a wrong password receives.
+            // "This account is locked" confirms the account exists, which is the enumeration
+            // answer the whole path is careful not to give.
+            return CountFailure(SmtpReplies.AuthenticationFailed(), result.Diagnostic);
+        }
+    }
+
+    /// <summary>Counts a failed attempt and closes the session once the budget is spent.</summary>
+    /// <remarks>
+    /// Bounds online guessing at the connection level, underneath the per-mailbox lockout. The
+    /// two are different defences: lockout protects one account across every connection, and
+    /// this stops one connection being used to walk a dictionary across many accounts.
+    /// </remarks>
+    private SmtpCommandResult CountFailure(SmtpReply reply, string? diagnostic)
+    {
+        int attempts = _session.RecordFailedAuthentication();
+
+        _logger.LogInformation(
+            "Submission authentication attempt {Attempt} of {Max} failed from {RemoteAddress}: {Reason}",
+            attempts,
+            _options.MaxAuthenticationAttempts,
+            _session.RemoteAddress.Value,
+            diagnostic ?? "no detail");
+
+        if (attempts < _options.MaxAuthenticationAttempts)
+        {
+            return new SmtpCommandResult(reply);
+        }
+
+        return new SmtpCommandResult(
+            SmtpReplies.TooManyAuthenticationAttempts(),
+            SmtpSessionAction.CloseAfterReply);
+    }
+
+    private bool HasExhaustedAttempts =>
+        _session.FailedAuthenticationAttempts >= _options.MaxAuthenticationAttempts;
+
+    private void EndExchange()
+    {
+        _mechanism?.Dispose();
+        _mechanism = null;
+    }
+
+    /// <summary>Stands in when no authenticator was supplied, and refuses everything.</summary>
+    /// <remarks>
+    /// Fails closed. A missing dependency must not become a session that authenticates, and a
+    /// null reference here would be an unhandled exception on the credential path.
+    /// </remarks>
+    private sealed class UnavailableAuthenticator : IMailboxAuthenticator
+    {
+        public static UnavailableAuthenticator Instance { get; } = new();
+
+        public Task<MailboxAuthenticationResult> AuthenticateAsync(
+            SaslCredential credential,
+            IpAddressValue remoteAddress,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(new MailboxAuthenticationResult(
+                MailboxAuthenticationOutcome.Failed,
+                null,
+                "No authenticator is configured on this server."));
     }
 
     // ---- Envelope ------------------------------------------------------------------------------
 
-    private SmtpCommandResult MailFrom(string argument)
+    private async ValueTask<SmtpCommandResult> MailFromAsync(
+        string argument,
+        CancellationToken cancellationToken)
     {
         if (RequiresAuthentication())
         {
@@ -241,9 +476,80 @@ public sealed class SmtpCommandProcessor
             return new SmtpCommandResult(SmtpReplies.MessageTooLarge(_options.MaxMessageSizeBytes));
         }
 
+        if (_session.IsAuthenticated && _session.AuthenticatedMailbox is { } mailbox)
+        {
+            SmtpCommandResult? refusal = await CheckSubmissionAsync(
+                mailbox,
+                reversePath,
+                cancellationToken).ConfigureAwait(false);
+
+            if (refusal is not null)
+            {
+                return refusal;
+            }
+        }
+
         _session.BeginTransaction(reversePath, declaredSize);
 
         return new SmtpCommandResult(SmtpReplies.Ok("Sender accepted"));
+    }
+
+    /// <summary>
+    /// Checks what an authenticated client may send and how much. Returns null when it may.
+    /// </summary>
+    /// <remarks>
+    /// Both checks run at MAIL FROM, before a recipient is named and long before a body arrives.
+    /// A client that is over its limit or claiming somebody else's address should learn so at the
+    /// cheapest possible moment.
+    /// </remarks>
+    private async ValueTask<SmtpCommandResult?> CheckSubmissionAsync(
+        EmailAddress mailbox,
+        EmailAddress? reversePath,
+        CancellationToken cancellationToken)
+    {
+        bool mayActAs = reversePath is not null && await _directory
+            .MayActAsAsync(mailbox, reversePath, cancellationToken)
+            .ConfigureAwait(false);
+
+        SubmissionPolicy.Result decision = _submissionPolicy.Evaluate(
+            new SubmissionContext(mailbox, reversePath),
+            _ => mayActAs);
+
+        if (!decision.IsPermitted)
+        {
+            // The signal that a compromised account is being used to forge a colleague's
+            // address, which is most of what a stolen password is worth to an attacker.
+            _logger.LogWarning(
+                "Sender forgery refused: {Mailbox} from {RemoteAddress} tried to send as {ClaimedSender}.",
+                mailbox.Value,
+                _session.RemoteAddress.Value,
+                reversePath?.Value ?? "<>");
+
+            return new SmtpCommandResult(SmtpReplies.SenderNotPermitted(decision.Reason));
+        }
+
+        if (_rateLimiter is null)
+        {
+            return null;
+        }
+
+        SubmissionRateDecision rate = await _rateLimiter
+            .CheckAsync(mailbox, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (rate.IsWithinLimit)
+        {
+            return null;
+        }
+
+        _logger.LogWarning(
+            "{Mailbox} has submitted {Count} message(s) in the last {Window} and is over its limit of {Limit}.",
+            mailbox.Value,
+            rate.MessagesInWindow,
+            rate.Window,
+            rate.MessageLimit);
+
+        return new SmtpCommandResult(SmtpReplies.SubmissionRateExceeded(rate.MessageLimit, rate.Window));
     }
 
     private async ValueTask<SmtpCommandResult> RcptToAsync(

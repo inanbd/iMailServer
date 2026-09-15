@@ -56,6 +56,21 @@ internal sealed class FakeSmtpDirectory : ISmtpDirectory
         CancellationToken cancellationToken) =>
         ValueTask.FromResult(AuthorizedRelayAddresses.Contains(address.Value));
 
+    /// <summary>Addresses a mailbox is permitted to send as, beyond its own.</summary>
+    public Dictionary<string, HashSet<string>> SendAsPermissions { get; } =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    public ValueTask<bool> MayActAsAsync(
+        EmailAddress authenticatedMailbox,
+        EmailAddress claimedSender,
+        CancellationToken cancellationToken) =>
+        ValueTask.FromResult(
+            claimedSender.NormalizedValue.Equals(
+                authenticatedMailbox.NormalizedValue,
+                StringComparison.Ordinal)
+            || (SendAsPermissions.TryGetValue(authenticatedMailbox.ToString(), out HashSet<string>? allowed)
+                && allowed.Contains(claimedSender.ToString())));
+
     public ValueTask<bool> MayRelayAsAsync(
         EmailAddress authenticatedMailbox,
         EmailAddress recipient,

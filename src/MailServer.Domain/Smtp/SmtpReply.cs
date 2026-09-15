@@ -200,6 +200,29 @@ public static class SmtpReplies
     public static SmtpReply TooManyRecipients(int limit) =>
         new(452, "4.5.3", $"Too many recipients; at most {limit} per message");
 
+    /// <summary>
+    /// 550 5.7.1 — the authenticated session may not use that sender.
+    /// </summary>
+    /// <remarks>
+    /// Permanent, because retrying with the same credentials and the same address will fail
+    /// identically. The text names what to change, because the usual cause is a client
+    /// configured with one address and authenticating with another — an ordinary misconfiguration
+    /// that an unexplained refusal turns into a support call.
+    /// </remarks>
+    public static SmtpReply SenderNotPermitted(string reason) =>
+        new(550, "5.7.1", $"Sender address rejected: {reason}");
+
+    /// <summary>
+    /// 451 4.7.1 — the mailbox has submitted too much, too recently.
+    /// </summary>
+    /// <remarks>
+    /// <b>Transient.</b> The sender is over a rate limit, not wrong: the message is perfectly
+    /// deliverable an hour from now, and a 5xx would destroy legitimate mail to enforce a
+    /// throttle. A client that retries later succeeds, which is exactly the behaviour wanted.
+    /// </remarks>
+    public static SmtpReply SubmissionRateExceeded(int limit, TimeSpan window) =>
+        new(451, "4.7.1", $"Submission rate limit reached ({limit} messages per {window.TotalHours:0.#} hour(s)); try again later");
+
     public static SmtpReply SyntaxError(string detail) => new(501, "5.5.4", detail);
 
     public static SmtpReply CommandNotRecognised(string command) =>
@@ -224,6 +247,57 @@ public static class SmtpReplies
     /// <summary>530 5.7.0 — STARTTLS required before this command.</summary>
     public static SmtpReply TlsRequired() =>
         new(530, "5.7.0", "Must issue a STARTTLS command first");
+
+    /// <summary>
+    /// 334 — the server's SASL challenge.
+    /// </summary>
+    /// <remarks>
+    /// The challenge is base64 and is server-generated, so it is not sanitised away by
+    /// <see cref="SmtpReply.Format"/> the way peer-supplied text is. An empty challenge is legal
+    /// and common — PLAIN uses one.
+    /// </remarks>
+    public static SmtpReply AuthenticationChallenge(string challenge) =>
+        new(334, null, challenge);
+
+    /// <summary>235 2.7.0 — authentication accepted.</summary>
+    public static SmtpReply AuthenticationSucceeded() =>
+        new(235, "2.7.0", "Authentication successful");
+
+    /// <summary>501 5.7.0 — the client abandoned the exchange.</summary>
+    /// <remarks>
+    /// RFC 4954 §4. Distinct from a failure, and deliberately so: a client that changed its mind
+    /// has not guessed a password wrongly, and counting it as such would walk a hesitant client
+    /// into a lockout it never earned.
+    /// </remarks>
+    public static SmtpReply AuthenticationCancelled() =>
+        new(501, "5.7.0", "Authentication exchange cancelled");
+
+    /// <summary>
+    /// 504 5.5.4 — the named mechanism is not one this server offers.
+    /// </summary>
+    /// <remarks>
+    /// The mechanism NAME is echoed because it is not a credential. Anything else on the AUTH
+    /// line is, and never appears in a reply.
+    /// </remarks>
+    public static SmtpReply UnsupportedAuthenticationMechanism(string mechanism) =>
+        new(504, "5.5.4", $"Authentication mechanism not supported: {mechanism}");
+
+    /// <summary>
+    /// 421 4.7.0 — too many authentication attempts on one connection.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Transient rather than permanent. A legitimate client whose user mistyped a password three
+    /// times should reconnect and try again; a 5xx would tell it to stop for good.
+    /// </para>
+    /// <para>
+    /// The connection closes after this. Bounding attempts per connection sits underneath the
+    /// per-mailbox lockout: lockout protects one account across every connection, and this stops
+    /// one connection being used to walk a dictionary across many accounts.
+    /// </para>
+    /// </remarks>
+    public static SmtpReply TooManyAuthenticationAttempts() =>
+        new(421, "4.7.0", "Too many authentication attempts; closing connection");
 
     public static SmtpReply AuthenticationFailed() =>
         new(535, "5.7.8", "Authentication credentials invalid");

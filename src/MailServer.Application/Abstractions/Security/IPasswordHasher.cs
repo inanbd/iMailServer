@@ -40,6 +40,14 @@ public interface IPasswordHasher
     /// <summary>Hashes a password with the current work factors.</summary>
     PasswordHash Hash(string password);
 
+    /// <summary>Hashes a password held in a buffer the caller can clear.</summary>
+    /// <remarks>
+    /// Used when re-hashing a submission password at the one moment the plaintext is available.
+    /// Going through the <see cref="string"/> overload there would put an uncleareable copy on
+    /// the managed heap, which is what the caller's array exists to avoid.
+    /// </remarks>
+    PasswordHash Hash(ReadOnlySpan<char> password);
+
     /// <summary>
     /// Verifies a candidate against a stored verifier.
     /// </summary>
@@ -51,6 +59,17 @@ public interface IPasswordHasher
     PasswordVerificationResult Verify(string candidate, PasswordHash stored);
 
     /// <summary>
+    /// Verifies a candidate held in a buffer the caller can clear.
+    /// </summary>
+    /// <remarks>
+    /// The overload the SMTP submission path uses. A password that arrives over SASL is held in
+    /// a <see cref="char"/> array precisely so it can be overwritten after verification; routing
+    /// it through the <see cref="string"/> overload would create an immutable copy on the
+    /// managed heap that nothing can clear, which is the thing the array was for.
+    /// </remarks>
+    PasswordVerificationResult Verify(ReadOnlySpan<char> candidate, PasswordHash stored);
+
+    /// <summary>
     /// Performs equivalent work and returns false, for the case where no account exists.
     /// </summary>
     /// <remarks>
@@ -60,4 +79,7 @@ public interface IPasswordHasher
     /// authentication path calls this so both cases cost the same.
     /// </remarks>
     bool VerifyAgainstDummy(string candidate);
+
+    /// <summary>Spends a verification's worth of work against a buffer the caller can clear.</summary>
+    bool VerifyAgainstDummy(ReadOnlySpan<char> candidate);
 }
