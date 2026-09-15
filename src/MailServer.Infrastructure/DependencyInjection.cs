@@ -185,6 +185,8 @@ public static class DependencyInjection
         services.TryAddScoped<SmtpDataReceiver>();
         services.TryAddScoped<SmtpConnectionHandler>();
         services.TryAddScoped<ISmtpDirectory, SmtpDirectory>();
+        services.TryAddScoped<ISmtpQueries, Persistence.Queries.SmtpQueries>();
+        services.TryAddSingleton<ISmtpConfigurationView, SmtpConfigurationView>();
 
         // Pure policies with configuration but no state, so one instance serves every session.
         services.TryAddSingleton<RelayPolicy>();

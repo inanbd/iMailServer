@@ -12,6 +12,8 @@ using MailServer.Application.Certificates.Queries;
 using MailServer.Application.Domains.Queries;
 using MailServer.Application.Mailboxes.Commands;
 using MailServer.Application.Mailboxes.Dtos;
+using MailServer.Application.Smtp.Queries;
+using MailServer.Application.Smtp.Dtos;
 using MailServer.Application.Mailboxes.Queries;
 using MailServer.Application.Monitoring.Dtos;
 using MailServer.Application.Monitoring.Queries;
@@ -228,6 +230,14 @@ public sealed class IpcCommandRegistry
         new("Acme.Orders", typeof(GetAcmeOrdersQuery), typeof(IReadOnlyList<AcmeOrderDto>)),
         new("Acme.CheckReadiness", typeof(CheckIssuanceReadinessCommand), typeof(IReadOnlyList<PreflightFindingDto>)),
         new("Acme.RequestCertificate", typeof(RequestCertificateCommand), typeof(IssuanceResultDto)),
+
+        // ---- SMTP ------------------------------------------------------------------------------
+        //
+        // Read-only, and deliberately so. There is no command here that changes a listener, and
+        // no query that returns message content: an operator diagnoses delivery from envelopes,
+        // and reading customers' mail is not an administrative function.
+        new("Smtp.Status", typeof(GetSmtpStatusQuery), typeof(SmtpStatusDto)),
+        new("Smtp.Received", typeof(GetReceivedMessagesQuery), typeof(PagedResult<ReceivedMessageDto>)),
 
         // ---- Monitoring ---------------------------------------------------------------------
         new("Monitoring.Dashboard", typeof(GetDashboardQuery), typeof(DashboardDto)),

@@ -1926,4 +1926,82 @@ need to.
 
 ---
 
-*Document version 1.4 — baseline for Milestone 1, with the Milestone 2–5 addenda.*
+---
+
+## Addendum — decisions taken during Milestone 6
+
+§23 stands. Six decisions are worth recording; three of them were forced by bugs that only
+running the server exposed.
+
+### A6.1 — The end-of-DATA marker is decided on raw octets, before anything else touches them
+
+`SmtpDataDecoder` does three jobs — find the end of the message, normalise line endings,
+unstuff the transparency dot — and **the order is the security property**, not an
+implementation detail.
+
+Normalising first would rewrite a body containing `"\n.\n"` into `"\r\n.\r\n"`, and the
+scan would then find a terminator the sending server never sent. The message truncates there
+and the remainder — attacker-chosen octets, including a fresh `MAIL FROM` — reaches the command
+parser. That is SMTP smuggling (2023), and the defence is exactly this ordering: only the
+five-octet sequence `CRLF "." CRLF` ends a message, decided before normalisation exists.
+
+Unstuffing cannot reintroduce the problem because it only ever *removes* a dot; it can never
+manufacture a terminator.
+
+### A6.2 — An over-long command line poisons the session rather than resynchronising
+
+`SmtpLineReader` latches on `LineTooLong` and stays there. The obvious recovery — skip to the
+next CRLF and carry on — hands the tail of an over-long line to the command parser, and that
+tail is attacker-chosen text. It is the same command-injection shape as the STARTTLS bug
+reached from a different direction. The only correct response is 500 and close.
+
+### A6.3 — Pipelining across STARTTLS closes the connection rather than being silently dropped
+
+RFC 3207 §4 requires discarding what arrived before the handshake, and discarding silently
+would satisfy it. This server refuses the connection and logs it instead.
+
+No legitimate client pipelines across STARTTLS — the RFC forbids it precisely because those
+octets would execute inside the tunnel with the authority the real client later establishes. A
+peer doing it is either broken in a way its operator needs to know about, or attacking. Both
+are worth a log line and neither is worth continuing.
+
+### A6.4 — Submission listeners fail closed, and are therefore off by default
+
+`RequiresAuthentication` is **not** conditioned on whether SASL is implemented. While
+authentication is unavailable a submission listener refuses every sender, which is the safe
+failure; the alternative is a listener that quietly accepts unauthenticated mail because the
+means to authenticate had not been written yet.
+
+Because a port that is advertised and unusable is worse than one that is absent, both
+submission listeners ship disabled. They are enabled with SASL in Milestone 7.
+
+### A6.5 — Three bugs of the A4.2 shape, two of which only running the server found
+
+The pattern recorded in A4.2 — *code that looks correct, passes review, and silently does
+nothing* — produced three more instances here. All three are worth naming because the first two
+had passing tests around them.
+
+| Bug | Why the tests missed it | What now catches it |
+|---|---|---|
+| `SmtpSessionContext` cleared its recipient list **in place** while delivery still held a view of it — a message delivered to nobody, with no error anywhere | The unit tests read `Recipients` before the reset; only a socket test held the snapshot across it | The list is **replaced** on reset, so snapshots already taken stay valid |
+| `SmtpDirectory` reported a mailbox full whenever its quota was smaller than the server-wide message size limit — which is most mailboxes, including empty ones | `SmtpDirectory` had no tests at all. Every other layer did | 23 directory tests; the old check fails seven of them |
+| `SmtpConnectionHandler` was resolved from the root provider despite being scoped | No test started the real host | The service starts as part of milestone verification, not just the test suite |
+
+The practice this reinforces: **a component that answers a question the rest of the system acts
+on needs its own tests, however thin it looks.** `SmtpDirectory` is ninety lines of lookups and
+it was the only untested file in the milestone — which is why it held two of the three bugs.
+
+### A6.6 — The administration app cannot read mail, and this is structural
+
+There is no IPC command that returns message content, no gateway method that fetches it, and no
+column the read model could select it from — the body is a file outside the database. An
+operator diagnosing a delivery needs the envelope: who sent it, from where, to whom, and whether
+it landed. Reading customers' mail is not an administrative function, and a screen that offered
+it would be used — by an administrator with a grievance, or by whoever compromises one.
+
+A test over the IPC registry asserts that no command's response type is a stream or a byte
+array, so adding one is a deliberate act that fails the build.
+
+---
+
+*Document version 1.5 — baseline for Milestone 1, with the Milestone 2–6 addenda.*

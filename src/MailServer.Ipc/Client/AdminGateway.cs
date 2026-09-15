@@ -15,6 +15,8 @@ using MailServer.Application.Security.Dtos;
 using MailServer.Application.Security.Queries;
 using MailServer.Application.Domains.Dtos;
 using MailServer.Application.Domains.Queries;
+using MailServer.Application.Smtp.Dtos;
+using MailServer.Application.Smtp.Queries;
 using MailServer.Application.Monitoring.Dtos;
 using MailServer.Application.Monitoring.Queries;
 using MailServer.Domain.Enums;
@@ -93,6 +95,22 @@ public interface IAdminGateway
 
     Task<PagedResult<SecurityEventDto>> GetSecurityEventsAsync(
         GetSecurityEventsQuery query,
+        CancellationToken cancellationToken = default);
+
+    // ---- SMTP --------------------------------------------------------------------------------
+
+    /// <summary>What the SMTP subsystem is doing, and how each listener is configured.</summary>
+    Task<SmtpStatusDto> GetSmtpStatusAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// A page of the received-mail log, newest first.
+    /// </summary>
+    /// <remarks>
+    /// Envelopes only. There is no gateway method that returns message content, because there is
+    /// no service command that returns it.
+    /// </remarks>
+    Task<PagedResult<ReceivedMessageDto>> GetReceivedMessagesAsync(
+        GetReceivedMessagesQuery query,
         CancellationToken cancellationToken = default);
 
     // ---- Monitoring and domains ------------------------------------------------------------
@@ -458,6 +476,26 @@ public sealed class AdminGateway(IpcClient client) : IAdminGateway
     /// </remarks>
     private static string DescribeOrigin() =>
         $"{Environment.UserName}@{Environment.MachineName}";
+
+    public async Task<SmtpStatusDto> GetSmtpStatusAsync(CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetSmtpStatusQuery, SmtpStatusDto>(
+                "Smtp.Status",
+                new GetSmtpStatusQuery(),
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException("The service returned an empty SMTP status payload.");
+
+    public async Task<PagedResult<ReceivedMessageDto>> GetReceivedMessagesAsync(
+        GetReceivedMessagesQuery query,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetReceivedMessagesQuery, PagedResult<ReceivedMessageDto>>(
+                "Smtp.Received",
+                query,
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? PagedResult<ReceivedMessageDto>.Empty();
 
     public async Task<DashboardDto> GetDashboardAsync(CancellationToken cancellationToken = default) =>
         await client

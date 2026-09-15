@@ -18,19 +18,28 @@ Status values:
 
 ## Transport and message format
 
+> **What "exercised against a real peer" has meant so far.** The Milestone 6 rows were verified
+> against the running service over a real TCP socket and a real TLS handshake, driven by a
+> hand-written SMTP client — a real peer in the sense that it speaks the protocol on a socket,
+> not in the sense that it is Gmail. **This server has not yet exchanged mail with Google
+> Workspace, Microsoft 365, Yahoo, iCloud or Proton Mail**, because that needs a public IP, a
+> PTR record and a publicly trusted certificate, none of which a build agent has. Those rows say
+> Implemented because the standard is implemented and tested; they do not say the server has
+> been proven to interoperate, and nothing here should be read as a claim about inbox placement.
+
 | Standard | RFC | Status | Milestone | Notes |
 |---|---|---|---|---|
-| SMTP / ESMTP | 5321 | Planned | 6 | Explicit state machine; see `docs/SMTP.md` |
-| Internet Message Format | 5322 | Planned | 6 | Via MimeKit |
+| SMTP / ESMTP | 5321 | **Partial** | 6 | Receipt is built and tested end to end over a real socket: state machine, relay decision, bounded reads, dot-stuffing, streaming DATA. **AUTH (RFC 4954) is not built**, so the submission listeners ship disabled; outbound delivery is Milestone 8. See `docs/SMTP.md` |
+| Internet Message Format | 5322 | **Partial** | 6 | The `Received:` trace header is generated, folded correctly, and every client-supplied field is sanitised and length-bounded against header injection. **Message parsing is not built** — MimeKit is not yet referenced, and nothing reads a stored message's headers |
 | Message Submission | 6409 | Planned | 7 | Ports 587 and 465 |
-| MIME (parts 1–5) | 2045–2049 | Planned | 6 | Via MimeKit; not hand-rolled |
-| SMTP Service Extension for SIZE | 1870 | Planned | 6 | Advertised per-connection from the effective limit |
-| PIPELINING | 2920 | Planned | 6 | Interacts with STARTTLS; see risk note below |
-| 8BITMIME | 6152 | Planned | 6 | |
-| CHUNKING / BDAT | 3030 | Planned | 6 | Exact byte counting, `LAST` semantics |
-| ENHANCEDSTATUSCODES | 3463 | Planned | 6 | |
+| MIME (parts 1–5) | 2045–2049 | Planned | 7 | Via MimeKit; not hand-rolled. Nothing parses MIME today — receipt is byte-transparent, which is why it can be correct without it |
+| SMTP Service Extension for SIZE | 1870 | **Implemented** | 6 | Advertised per-connection from the effective limit; a declared size over the limit is refused at `MAIL FROM`, and the real size is counted during DATA and charged against raw octets |
+| PIPELINING | 2920 | **Implemented** | 6 | Advertised and honoured: the reader hands the DATA pump a window and keeps what it does not consume, so a command sharing a packet with the end-of-data marker is not lost. Pipelining across STARTTLS closes the connection — see `docs/SMTP.md` |
+| 8BITMIME | 6152 | **Implemented** | 6 | Receipt is byte-transparent; the decoder rewrites line endings and transparency dots and nothing else |
+| CHUNKING / BDAT | 3030 | Planned | Post-7 | Exact byte counting, `LAST` semantics. Not advertised, so no peer attempts it |
+| ENHANCEDSTATUSCODES | 3463 | **Implemented** | 6 | Every reply carries one, paired with its code in a single vocabulary so the two cannot drift apart at a call site |
 | DSN (delivery status notifications) | 3461, 3464 | Planned | 8 | Null reverse path; loop prevention |
-| SMTPUTF8 | 6531, 6532, 6533 | **Partial** | 6 | Address model complete and tested (`EmailAddress`, `DomainName` round-trip Unicode ↔ punycode without loss); the transport-level extension lands in Milestone 6 |
+| SMTPUTF8 | 6531, 6532, 6533 | **Partial** | 7 | Address model complete and tested (`EmailAddress`, `DomainName` round-trip Unicode ↔ punycode without loss) and the SMTP path parser preserves it. The transport-level extension is **not advertised**, so nothing downgrades yet — moved to Milestone 7 rather than claimed |
 | IDNA 2008 | 5890, 5891 | **Implemented** | 1 | `DomainName` normalises to A-labels and preserves U-labels; 20 tests |
 
 ---
@@ -39,7 +48,7 @@ Status values:
 
 | Standard | RFC | Status | Milestone | Notes |
 |---|---|---|---|---|
-| STARTTLS for SMTP | 3207 | Planned | 6 | Full session-state reset after the handshake |
+| STARTTLS for SMTP | 3207 | **Implemented** | 6 | Full session-state reset after the handshake, verified over a real TLS handshake on a real socket. Octets pipelined before the handshake close the connection; a reflection test requires every piece of session state to be classified as cleared or deliberately surviving |
 | Implicit TLS for submission | 8314 | Planned | 7 | Ports 465, 993, 995 |
 | MTA-STS | 8461 | Planned | 11 | Policy served over HTTPS by the in-process Kestrel |
 | TLS-RPT | 8460 | Planned | 11 | Report ingestion and analysis |
@@ -53,7 +62,7 @@ Status values:
 
 | Standard | RFC | Status | Milestone | Notes |
 |---|---|---|---|---|
-| SASL PLAIN | 4616 | Planned | 7 | Offered only over TLS |
+| SASL PLAIN | 4616 | Planned | 7 | Offered only over TLS. Until it exists the submission listeners are **disabled**, because they would refuse every sender |
 | SASL LOGIN | (de facto) | Planned | 7 | Offered only over TLS |
 | SCRAM-SHA-256 | 7677 | Planned | Post-7 | Architected for; not in the initial submission work |
 | OAUTHBEARER | 7628 | Planned | Post-7 | |

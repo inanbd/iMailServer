@@ -63,6 +63,10 @@
                 <pages:SecurityEventsView />
             </DataTemplate>
 
+            <DataTemplate DataType="{x:Type vm:SmtpViewModel}">
+                <pages:SmtpView />
+            </DataTemplate>
+
         </ResourceDictionary>
     </Application.Resources>
 </Application>

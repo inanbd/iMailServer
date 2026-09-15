@@ -9,6 +9,9 @@ using MailServer.Application.Abstractions.Repositories;
 using MailServer.Application.Abstractions.Security;
 using MailServer.Application.Abstractions.Time;
 using MailServer.Application.Common;
+using MailServer.Application.Smtp.Queries;
+using MailServer.Application.Smtp.Dtos;
+using MailServer.Application.Abstractions.Smtp;
 using MailServer.Application.Domains.Commands;
 using MailServer.Application.Domains.Dtos;
 using MailServer.Application.Domains.Queries;
@@ -71,6 +74,8 @@ public sealed class IpcEndToEndTests : IAsyncLifetime
         services.AddSingleton<IEnvironmentInfo, FakeEnvironmentInfo>();
         services.AddSingleton<IServerIdentityProvider, FakeServerIdentity>();
         services.AddSingleton<ISqlDialect, FakeSqlDialect>();
+        services.AddSingleton<ISmtpQueries, FakeSmtpQueries>();
+        services.AddSingleton<ISmtpConfigurationView, FakeSmtpConfigurationView>();
 
         // Scoped, exactly as the real container registers them: one identity and one
         // correlation id per request.
@@ -291,6 +296,61 @@ public sealed class IpcEndToEndTests : IAsyncLifetime
 
         page.ShouldNotBeNull();
         page.Items.Count.ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task The_smtp_status_crosses_the_pipe()
+    {
+        // Milestone 6 adds two IPC commands. Registering one without a working round trip is how
+        // the admin app ends up showing an empty screen with no error.
+        IpcResponse response = await SendAsync("Smtp.Status", new GetSmtpStatusQuery());
+
+        response.Success.ShouldBeTrue();
+
+        SmtpStatusDto? status = IpcFrame.DeserializePayload<SmtpStatusDto>(response.Payload);
+
+        status.ShouldNotBeNull();
+        status.Listeners.Count.ShouldBe(3);
+        status.Listeners.ShouldContain(l => l.Role == SmtpListenerRole.InboundMta && l.Port == 25);
+
+        // The MTA listener never offers AUTH, and the status screen must say so rather than
+        // leaving an operator to assume it does.
+        status.Listeners
+            .Single(l => l.Role == SmtpListenerRole.InboundMta)
+            .OffersAuthentication.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task The_received_mail_log_crosses_the_pipe()
+    {
+        IpcResponse response = await SendAsync(
+            "Smtp.Received",
+            new GetReceivedMessagesQuery { PageSize = 10 });
+
+        response.Success.ShouldBeTrue();
+
+        PagedResult<ReceivedMessageDto>? page =
+            IpcFrame.DeserializePayload<PagedResult<ReceivedMessageDto>>(response.Payload);
+
+        page.ShouldNotBeNull();
+        page.Items.ShouldHaveSingleItem().ReversePath.ShouldBe("sender@example.net");
+    }
+
+    [Fact]
+    public void No_ipc_command_returns_message_content()
+    {
+        // The administration app cannot read customers' mail because there is no command that
+        // would let it. Asserted over the registry rather than trusted, so adding one is a
+        // deliberate act that fails here.
+        IpcCommandRegistry registry = new();
+
+        foreach (IpcCommandDescriptor descriptor in registry.Commands)
+        {
+            string response = descriptor.ResponseType.FullName ?? string.Empty;
+
+            response.ShouldNotContain("Stream", Case.Insensitive);
+            response.ShouldNotContain("System.Byte[]");
+        }
     }
 
     [Fact]

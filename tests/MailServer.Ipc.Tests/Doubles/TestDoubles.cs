@@ -1,3 +1,5 @@
+using MailServer.Application.Smtp.Dtos;
+using MailServer.Application.Abstractions.Smtp;
 using System.Data.Common;
 using System.Reflection;
 using MailServer.Application.Abstractions.Certificates;
@@ -490,4 +492,65 @@ internal sealed class RecordingTlsReloadCoordinator : ITlsReloadCoordinator
         FlushCount++;
         return Task.CompletedTask;
     }
+}
+
+/// <summary>One received message, so the read side has something to return.</summary>
+internal sealed class FakeSmtpQueries : ISmtpQueries
+{
+    public Task<PagedResult<ReceivedMessageDto>> SearchReceivedAsync(
+        ReceivedMessageSearchRequest request,
+        CancellationToken cancellationToken) =>
+        Task.FromResult(new PagedResult<ReceivedMessageDto>(
+            [
+                new ReceivedMessageDto
+                {
+                    Id = Guid.Parse("0f8fad5b-d9cb-469f-a165-70867728950e"),
+                    SizeBytes = 2048,
+                    ContentSha256 = new string('a', 64),
+                    ReversePath = "sender@example.net",
+                    RemoteAddress = "198.51.100.20",
+                    GreetedName = "relay.example.net",
+                    ListenerRole = SmtpListenerRole.InboundMta,
+                    TlsActive = true,
+                    ReceivedUtc = new DateTimeOffset(2026, 3, 1, 9, 0, 0, TimeSpan.Zero),
+                    Recipients = [new ReceivedRecipientDto("user@example.com", RelayDecision.AcceptLocal)],
+                    DeliveryCount = 1,
+                },
+            ],
+            request.Page,
+            request.PageSize,
+            1));
+
+    public Task<(long LastDay, long LastHour, long StoredBytes)> GetThroughputAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken) =>
+        Task.FromResult((LastDay: 12L, LastHour: 3L, StoredBytes: 2048L));
+}
+
+/// <summary>The default listener configuration, as shipped.</summary>
+internal sealed class FakeSmtpConfigurationView : ISmtpConfigurationView
+{
+    public bool IsAuthenticationAvailable => false;
+
+    public IReadOnlyList<string> AuthorizedRelayAddresses => [];
+
+    public IReadOnlyList<SmtpListenerStatusDto> DescribeListeners() =>
+    [
+        Describe(SmtpListenerRole.InboundMta, 25, enabled: true),
+        Describe(SmtpListenerRole.Submission, 587, enabled: false),
+        Describe(SmtpListenerRole.ImplicitTlsSubmission, 465, enabled: false),
+    ];
+
+    private static SmtpListenerStatusDto Describe(SmtpListenerRole role, int port, bool enabled) => new()
+    {
+        Role = role,
+        Port = port,
+        Enabled = enabled,
+        BindAddresses = [],
+
+        // Authentication is unavailable, so no listener offers it - which is what the real
+        // configuration view computes from SmtpCapabilities rather than restating.
+        OffersAuthentication = false,
+        CanRelayForAuthenticatedSenders = false,
+    };
 }

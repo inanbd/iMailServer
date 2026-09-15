@@ -1,0 +1,152 @@
+<UserControl x:Class="MailServer.Admin.Views.Pages.SmtpView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="clr-namespace:MailServer.Admin.ViewModels"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=vm:SmtpViewModel}">
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="SMTP" Style="{StaticResource PageTitle}" />
+            <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
+                       Text="The listeners that accept mail, and the envelopes of what has arrived. Message content is not shown here: reading mailbox contents is not an administrative function, and the envelope is what explains a delivery." />
+        </StackPanel>
+
+        <Border Grid.Row="1" Style="{StaticResource ErrorBanner}" Margin="0,12,0,8"
+                Visibility="{Binding ErrorMessage, Converter={StaticResource StringToVisibility}}">
+            <TextBlock Text="{Binding ErrorMessage}" TextWrapping="Wrap" />
+        </Border>
+
+        <!-- A mail server accepting no mail looks identical to one nobody is writing to. -->
+        <Border Grid.Row="2" Style="{StaticResource MaintenanceBanner}" Margin="0,4,0,8"
+                Visibility="{Binding IsAcceptingNoMail, Converter={StaticResource BoolToVisibility}}">
+            <TextBlock TextWrapping="Wrap"
+                       Text="No SMTP listener is enabled, so this server is not accepting mail. Enable one under MailServer:Smtp in the service's settings and restart the service." />
+        </Border>
+
+        <Border Grid.Row="3" Style="{StaticResource MaintenanceBanner}" Margin="0,4,0,8"
+                Visibility="{Binding HasUnusableSubmissionListener, Converter={StaticResource BoolToVisibility}}">
+            <TextBlock TextWrapping="Wrap"
+                       Text="A submission listener is enabled but SASL authentication is not available, so it will refuse every sender. This is the safe failure rather than accepting unauthenticated mail; submission authentication arrives in Milestone 7." />
+        </Border>
+
+        <!-- Listeners and throughput. -->
+        <Grid Grid.Row="4" Margin="0,8,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="2*" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Border Grid.Column="0" Style="{StaticResource Card}" Margin="0,0,8,0">
+                <StackPanel>
+                    <TextBlock Text="Listeners" Style="{StaticResource SectionHeader}" />
+
+                    <DataGrid ItemsSource="{Binding Listeners}" MaxHeight="150" Margin="0,8,0,0">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Role" Binding="{Binding Role}" Width="180" />
+                            <DataGridTextColumn Header="Port" Binding="{Binding Port}" Width="70" />
+                            <DataGridCheckBoxColumn Header="Enabled" Binding="{Binding Enabled}" Width="80" />
+                            <DataGridTextColumn Header="Bind" Width="160"
+                                                Binding="{Binding BindAddresses, Converter={StaticResource JoinStrings}}" />
+                            <DataGridCheckBoxColumn Header="Offers AUTH" Binding="{Binding OffersAuthentication}" Width="100" />
+                            <DataGridCheckBoxColumn Header="Can relay" Binding="{Binding CanRelayForAuthenticatedSenders}" Width="90" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,8,0,0"
+                               Text="&quot;Can relay&quot; means the listener can relay for an AUTHENTICATED sender. Port 25 never can, whatever else is configured, and no setting changes that." />
+                </StackPanel>
+            </Border>
+
+            <Border Grid.Column="1" Style="{StaticResource Card}">
+                <StackPanel>
+                    <TextBlock Text="Throughput" Style="{StaticResource SectionHeader}" />
+
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,8,0,0" Text="Accepted, last hour" />
+                    <TextBlock Style="{StaticResource MetricValue}" Text="{Binding MessagesLastHour}" />
+
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,8,0,0" Text="Accepted, last 24 hours" />
+                    <TextBlock Style="{StaticResource MetricValue}" Text="{Binding MessagesLastDay}" />
+
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,8,0,0" Text="Message content stored" />
+                    <TextBlock Style="{StaticResource MetricValue}"
+                               Text="{Binding StoredBytes, Converter={StaticResource ByteSize}}" />
+
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,12,0,0" Text="Authorised to relay without authenticating" />
+                    <ItemsControl ItemsSource="{Binding AuthorizedRelayAddresses}" Margin="0,4,0,0">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding}" FontFamily="Consolas" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
+                               Visibility="{Binding HasNoAuthorizedRelayAddresses, Converter={StaticResource BoolToVisibility}}"
+                               Text="None. This is the correct default." />
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <!-- The received-mail log. -->
+        <DockPanel Grid.Row="5" LastChildFill="True">
+            <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,8,0,8">
+                <TextBlock Text="Received mail" Style="{StaticResource SectionHeader}" VerticalAlignment="Center" />
+                <TextBox Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}"
+                         MinWidth="240" Margin="16,0,0,0" VerticalAlignment="Center" />
+                <Button Content="Search" Command="{Binding SearchCommand}" Margin="8,0,0,0" />
+                <Button Content="Refresh" Command="{Binding RefreshCommand}" Margin="8,0,0,0" />
+                <TextBlock Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="16,0,0,0"
+                           Text="Matches the sender, a recipient, or the peer address." />
+            </StackPanel>
+
+            <DataGrid ItemsSource="{Binding Received}"
+                      SelectedItem="{Binding SelectedMessage, Mode=TwoWay}"
+                      AutoGenerateColumns="False" IsReadOnly="True">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Received (UTC)" Width="160"
+                                        Binding="{Binding ReceivedUtc, StringFormat='yyyy-MM-dd HH:mm:ss'}" />
+
+                    <!-- Empty for the null reverse path, which is a bounce and a real value. -->
+                    <DataGridTextColumn Header="Sender" Binding="{Binding ReversePath}" Width="200" />
+
+                    <DataGridTextColumn Header="Recipients" Width="240"
+                                        Binding="{Binding Recipients.Count}" />
+                    <DataGridTextColumn Header="Delivered to" Binding="{Binding DeliveryCount}" Width="100" />
+                    <DataGridTextColumn Header="Size" Width="90"
+                                        Binding="{Binding SizeBytes, Converter={StaticResource ByteSize}}" />
+
+                    <!-- The transport's fact, next to the client's claim. -->
+                    <DataGridTextColumn Header="From address" Binding="{Binding RemoteAddress}" Width="140" />
+                    <DataGridTextColumn Header="Claimed (EHLO)" Binding="{Binding GreetedName}" Width="160" />
+
+                    <DataGridTextColumn Header="Listener" Binding="{Binding ListenerRole}" Width="140" />
+                    <DataGridCheckBoxColumn Header="TLS" Binding="{Binding TlsActive}" Width="50" />
+                </DataGrid.Columns>
+            </DataGrid>
+        </DockPanel>
+
+        <StackPanel Grid.Row="6" Orientation="Horizontal" Margin="0,8,0,0">
+            <Button Content="Previous" Command="{Binding PreviousPageCommand}" />
+            <Button Content="Next" Command="{Binding NextPageCommand}" Margin="8,0,0,0" />
+            <TextBlock Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="12,0,0,0">
+                <Run Text="Page " />
+                <Run Text="{Binding Page, Mode=OneWay}" FontWeight="SemiBold" />
+                <Run Text=" of " />
+                <Run Text="{Binding TotalMessages, Mode=OneWay}" FontWeight="SemiBold" />
+                <Run Text=" message(s)" />
+            </TextBlock>
+        </StackPanel>
+    </Grid>
+</UserControl>

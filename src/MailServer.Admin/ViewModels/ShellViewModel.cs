@@ -151,6 +151,10 @@ public sealed partial class ShellViewModel : ObservableObject, IDisposable
         // the other, and deciding which to create is a single decision rather than a choice
         // between two screens.
         new("Mailboxes & Aliases", "Mail", typeof(MailboxesViewModel)),
+        // Listeners and the received-mail log on one page: "is this server accepting mail" and
+        // "did this message arrive" are the same question asked from two directions, and an
+        // operator chasing a delivery needs both at once.
+        new("SMTP", "Mail", typeof(SmtpViewModel)),
         new("Queue", "Mail", typeof(DomainsViewModel), IsAvailable: false),
         new("Quarantine", "Mail", typeof(DomainsViewModel), IsAvailable: false),
         new("Message Trace", "Mail", typeof(DomainsViewModel), IsAvailable: false),
