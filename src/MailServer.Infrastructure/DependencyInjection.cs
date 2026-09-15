@@ -1,6 +1,7 @@
 using MailServer.Application.Abstractions.Monitoring;
 using MailServer.Application.Abstractions.Acme;
 using MailServer.Application.Abstractions.Certificates;
+using MailServer.Application.Abstractions.Dns;
 using MailServer.Application.Abstractions.Persistence;
 using MailServer.Application.Abstractions.Platform;
 using MailServer.Application.Abstractions.Queries;
@@ -10,11 +11,13 @@ using MailServer.Domain.Policies;
 using MailServer.Application.Abstractions.Smtp;
 using MailServer.Application.Abstractions.Security;
 using MailServer.Application.Abstractions.Time;
+using DnsClient;
 using MailServer.Infrastructure.Acme;
 using MailServer.Infrastructure.Certificates;
 using MailServer.Infrastructure.Configuration;
 using MailServer.Infrastructure.Dns;
 using MailServer.Infrastructure.Monitoring;
+using MailServer.Infrastructure.Smtp.Outbound;
 using MailServer.Infrastructure.Persistence;
 using MailServer.Infrastructure.Persistence.Queries;
 using MailServer.Infrastructure.Persistence.Repositories;
@@ -201,6 +204,28 @@ public static class DependencyInjection
 
         services.TryAddScoped<IDomainQueries, DomainQueries>();
         services.TryAddScoped<IServerStatusQueries, ServerStatusQueries>();
+
+        // ---- Outbound MTA (Milestone 8) ----------------------------------------------------
+        services.TryAddScoped<IOutboundQueueRepository, OutboundQueueRepository>();
+
+        // Singleton: the resolver's cache is exactly the thing that must be shared across every
+        // delivery attempt, not rebuilt per scope. docs/DNS.md's TTL floor and ceiling are the
+        // library's own cache bounds, configured once here.
+        services.TryAddSingleton<ILookupClient>(_ => new LookupClient(new LookupClientOptions
+        {
+            UseCache = true,
+            MinimumCacheTimeout = TimeSpan.FromSeconds(30),
+            MaximumCacheTimeout = TimeSpan.FromHours(1),
+            CacheFailedResults = true,
+            FailedResultsCacheDuration = TimeSpan.FromSeconds(15),
+            Timeout = TimeSpan.FromSeconds(10),
+            Retries = 2,
+            ThrowDnsErrors = false,
+        }));
+        services.TryAddSingleton<IMxDnsClient, LookupClientMxAdapter>();
+        services.TryAddSingleton<IDnsResolver, DnsMxResolver>();
+        services.TryAddScoped<IOutboundDeliveryClient, OutboundSmtpClient>();
+        services.TryAddScoped<IDsnComposer, PlainTextDsnComposer>();
 
         return services;
     }

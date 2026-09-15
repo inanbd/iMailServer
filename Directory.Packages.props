@@ -67,6 +67,12 @@
     <PackageVersion Include="Microsoft.Data.SqlClient" Version="7.0.3" />
   </ItemGroup>
 
+  <ItemGroup Label="Outbound delivery">
+    <!-- MX/A/AAAA resolution for the outbound queue (Milestone 8). System.Net.Dns cannot
+         resolve MX or TXT records at all - see docs/DNS.md. Apache-2.0 licensed. -->
+    <PackageVersion Include="DnsClient" Version="1.8.0" />
+  </ItemGroup>
+
   <ItemGroup Label="Presentation">
     <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.2" />
   </ItemGroup>

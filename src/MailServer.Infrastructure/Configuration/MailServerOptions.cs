@@ -48,6 +48,79 @@ public sealed class MailServerOptions
     public AcmeOptions Acme { get; set; } = new();
 
     public SmtpOptions Smtp { get; set; } = new();
+
+    public OutboundOptions Outbound { get; set; } = new();
+}
+
+/// <summary>The outbound queue and delivery client.</summary>
+public sealed class OutboundOptions
+{
+    /// <summary>How many due items one worker claims per poll.</summary>
+    [Range(1, 1_000)]
+    public int ClaimBatchSize { get; set; } = 20;
+
+    /// <summary>
+    /// How long a claimed item is leased before another worker may reclaim it.
+    /// </summary>
+    /// <remarks>
+    /// Must comfortably exceed the longest a single delivery attempt can plausibly take
+    /// (connect, STARTTLS, and a multi-recipient DATA transfer) - a lease shorter than one
+    /// attempt would let a second worker "reclaim" an item that is still being worked on.
+    /// </remarks>
+    [Range(30, 3_600)]
+    public int LeaseDurationSeconds { get; set; } = 300;
+
+    /// <summary>How often the scheduler polls for due work when the queue is empty.</summary>
+    [Range(1, 300)]
+    public int PollIntervalSeconds { get; set; } = 5;
+
+    /// <summary>Concurrent deliveries permitted to one destination domain at once.</summary>
+    /// <remarks>
+    /// The per-domain throttle <c>docs/Architecture.md</c> §8 requires: without it, a large
+    /// backlog for one slow-to-answer domain would consume every worker, starving delivery to
+    /// every other domain in the queue.
+    /// </remarks>
+    [Range(1, 100)]
+    public int MaxConcurrentDeliveriesPerDomain { get; set; } = 4;
+
+    /// <summary>Total concurrent deliveries across every domain.</summary>
+    [Range(1, 1_000)]
+    public int MaxConcurrentDeliveriesTotal { get; set; } = 20;
+
+    /// <summary>Longest wait for a TCP connection to a remote MX.</summary>
+    [Range(1, 120)]
+    public int ConnectTimeoutSeconds { get; set; } = 30;
+
+    /// <summary>Longest wait for a reply to any single command, including the banner and STARTTLS.</summary>
+    [Range(1, 300)]
+    public int CommandTimeoutSeconds { get; set; } = 60;
+
+    /// <summary>Longest wait for the final reply after the message body has been sent.</summary>
+    /// <remarks>
+    /// Separate from <see cref="CommandTimeoutSeconds"/> because a large message can take a
+    /// receiving server much longer to scan and commit than any other single step in the
+    /// conversation, and timing it out at the same bound as <c>EHLO</c> would defer mail that
+    /// was, in fact, about to succeed.
+    /// </remarks>
+    [Range(1, 1_800)]
+    public int DataTimeoutSeconds { get; set; } = 300;
+
+    /// <summary>Port used to connect directly to a resolved MX host.</summary>
+    [Range(1, 65_535)]
+    public int DeliveryPort { get; set; } = 25;
+
+    /// <summary>
+    /// Backoff schedule in minutes, ascending. Null uses <c>RetryBackoffPolicy</c>'s own default.
+    /// </summary>
+    public IList<int>? RetryScheduleMinutes { get; set; }
+
+    /// <summary>How many days a message is retried before it is bounced.</summary>
+    [Range(1, 30)]
+    public int MaximumLifetimeDays { get; set; } = 5;
+
+    /// <summary>Age at which a "delivery is delayed" warning DSN is sent.</summary>
+    [Range(1, 720)]
+    public int DelayWarningThresholdHours { get; set; } = 4;
 }
 
 /// <summary>The SMTP listeners.</summary>

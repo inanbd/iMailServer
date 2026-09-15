@@ -36,6 +36,18 @@ public enum SmtpListenerRole
 
     /// <summary>Port 465. Authenticated client submission, TLS from the first byte.</summary>
     ImplicitTlsSubmission = 2,
+
+    /// <summary>
+    /// Not a listener at all: a message this server originated itself, such as a DSN.
+    /// </summary>
+    /// <remarks>
+    /// A DSN is not received from anywhere, so recording it against one of the three real
+    /// listeners would be a fabricated provenance - it would claim a peer that never connected.
+    /// This value keeps <see cref="Entities.MessageRecord"/> honest for messages the server
+    /// wrote itself: no remote address (recorded as the loopback address), no TLS, no
+    /// authenticated sender, because none of those questions apply.
+    /// </remarks>
+    Generated = 3,
 }
 
 /// <summary>Where an SMTP session has got to.</summary>

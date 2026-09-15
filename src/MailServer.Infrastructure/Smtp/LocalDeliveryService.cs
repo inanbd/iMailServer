@@ -36,6 +36,8 @@ public sealed class LocalDeliveryService(
     IDeliveryRepository deliveries,
     IMailboxRepository mailboxes,
     IAliasRepository aliases,
+    IDomainRepository domains,
+    IOutboundQueueRepository outboundQueue,
     AliasExpansionPolicy expansionPolicy,
     IClock clock,
     ILogger<LocalDeliveryService> logger) : ILocalDeliveryService
@@ -109,11 +111,33 @@ public sealed class LocalDeliveryService(
 
         if (accepted.Decision == RelayDecision.AcceptRelay)
         {
-            // Onward relay is the outbound queue's business, and the queue is Milestone 8. The
-            // recipient row exists either way, so the message is not silently dropped and the
-            // gap is visible in the database rather than only in this comment.
+            // RequireTlsForOutbound is a property of the SENDING domain - the hosted domain
+            // whose mailbox is relaying this mail out, not the destination - so it is looked up
+            // from the envelope reverse path, snapshotted onto the queue item at enqueue time.
+            bool requireTls = false;
+
+            if (request.ReversePath is not null)
+            {
+                MailDomain? originDomain = await domains
+                    .GetByNameAsync(request.ReversePath.Domain, cancellationToken)
+                    .ConfigureAwait(false);
+
+                requireTls = originDomain?.RequireTlsForOutbound ?? false;
+            }
+
+            OutboundQueueItem queueItem = OutboundQueueItem.Create(
+                request.Message.Id,
+                recipient.Id,
+                accepted.Address,
+                request.ReversePath,
+                requireTls,
+                isDsn: false,
+                now);
+
+            await outboundQueue.AddAsync(queueItem, cancellationToken).ConfigureAwait(false);
+
             logger.LogInformation(
-                "Recipient {Recipient} of message {MessageId} is for onward relay; queued handling arrives with the outbound queue.",
+                "Recipient {Recipient} of message {MessageId} queued for onward relay.",
                 accepted.Address.Value,
                 request.Message.Id.Value);
 

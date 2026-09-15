@@ -52,6 +52,10 @@ public sealed class SmtpProtocolSecurityTests
         return files;
     }
 
+    /// <summary>True for the outbound delivery client, the SMTP tree's one legitimate TLS client.</summary>
+    private static bool IsOutboundClientSource(string file) =>
+        file.Contains(Path.Combine("Smtp", "Outbound"), StringComparison.Ordinal);
+
     /// <summary>
     /// A file's executable source, with comments removed.
     /// </summary>
@@ -77,10 +81,15 @@ public sealed class SmtpProtocolSecurityTests
     [Fact]
     public void The_smtp_tls_path_installs_no_certificate_validation_callback()
     {
-        // This server is the TLS server on these connections, so it validates nothing and needs
-        // no callback. The danger is the callback EXISTING: it is the obvious place for somebody
-        // debugging a handshake to write "return true" and never take it out again.
-        foreach (string file in SmtpSourceFiles())
+        // This server is the TLS SERVER on every connection under Smtp/ except one: the
+        // Milestone 8 outbound delivery client, under Smtp/Outbound, which is the TLS CLIENT
+        // when connecting to a remote MX and therefore is the one place in the SMTP tree that
+        // legitimately validates a peer certificate. That callback is asserted elsewhere
+        // (NoCertificateValidationBypassTests) to never be an unconditional "true" - this test
+        // is about the inbound listener specifically, which validates nothing and needs no
+        // callback at all. The danger there is the callback EXISTING: it is the obvious place
+        // for somebody debugging a handshake to write "return true" and never take it out again.
+        foreach (string file in SmtpSourceFiles().Where(static f => !IsOutboundClientSource(f)))
         {
             string source = ExecutableSource(file);
 
@@ -94,6 +103,23 @@ public sealed class SmtpProtocolSecurityTests
                 Case.Insensitive,
                 $"{Path.GetFileName(file)} installs a certificate validation callback.");
         }
+    }
+
+    [Fact]
+    public void The_outbound_clients_certificate_callback_genuinely_validates_rather_than_rubber_stamping()
+    {
+        // The one exception carved out above: it must still go through a real chain validator,
+        // never a shortcut. NoCertificateValidationBypassTests already forbids every unconditional
+        // "true" form anywhere in production source; this asserts the specific shape expected
+        // here - the callback calls the real validator and the decision is conditional on the
+        // policy (RequireTls) and the validation outcome, not a bare "return true;".
+        string file = SmtpSourceFiles().Single(
+            f => IsOutboundClientSource(f) && Path.GetFileName(f) == "OutboundSmtpClient.cs");
+        string source = ExecutableSource(file);
+
+        source.ShouldContain("RemoteCertificateValidationCallback");
+        source.ShouldContain("chainValidator.Validate");
+        source.ShouldNotContain("=> true;");
     }
 
     [Fact]

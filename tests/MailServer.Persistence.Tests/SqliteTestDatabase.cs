@@ -156,6 +156,16 @@ public sealed class SqliteTestDatabase : IAsyncDisposable
                 database.ConnectionFactory,
                 AmbientSession,
                 database.Dialect);
+
+            Outbound = new OutboundQueueRepository(
+                database.ConnectionFactory,
+                AmbientSession,
+                database.Dialect);
+
+            Deliveries = new DeliveryRepository(
+                database.ConnectionFactory,
+                AmbientSession,
+                database.Dialect);
         }
 
         internal AmbientDbSession AmbientSession { get; }
@@ -169,6 +179,10 @@ public sealed class SqliteTestDatabase : IAsyncDisposable
         public Application.Abstractions.Queries.IDomainQueries DomainQueries { get; }
 
         public Application.Abstractions.Queries.IServerStatusQueries StatusQueries { get; }
+
+        public IOutboundQueueRepository Outbound { get; }
+
+        public IDeliveryRepository Deliveries { get; }
     }
 }
 

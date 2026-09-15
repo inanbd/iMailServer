@@ -104,6 +104,14 @@ public sealed class SubmissionSecurityTests
 
         foreach (SmtpListenerRole role in Enum.GetValues<SmtpListenerRole>())
         {
+            // Not a listener role at all - see its own remarks. No session is ever constructed
+            // with it, so it has no place in a matrix of "how does a session with this role
+            // behave".
+            if (role == SmtpListenerRole.Generated)
+            {
+                continue;
+            }
+
             foreach (bool tls in (bool[])[false, true])
             {
                 foreach (bool available in (bool[])[false, true])
