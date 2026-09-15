@@ -202,6 +202,25 @@ detection mechanism; it is what keeps the blast radius small enough that detecti
 work. It is counted from the `Messages` table rather than memory, because a limit cleared by a
 restart is a limit an attacker resets by waiting for Patch Tuesday.
 
+## Outbound delivery
+
+A message accepted for onward relay (`RelayDecision.AcceptRelay`) becomes one
+`OutboundQueueItem` per recipient, referencing the same stored body every other recipient's row
+also references — see `docs/Architecture.md` §8 for why the unit is the recipient, not the
+message. `OutboundDeliveryHostedService` claims due items, resolves MX records
+(`IDnsResolver`/`DnsMxResolver`, `docs/DNS.md`), orders the results per RFC 5321 §5.1
+(`MxSelectionPolicy`), and drives the conversation with `OutboundSmtpClient` — the client-side
+mirror of everything above: it issues `EHLO`, negotiates `STARTTLS` opportunistically or refuses
+to proceed without it when required (`docs/TLS.md`), sends `MAIL FROM`/`RCPT TO`/`DATA`, and
+re-stuffs the stored body on the way out with the same `SmtpDotStuffing` class the receiving side
+unstuffed it with on the way in.
+
+A reply's 2xx/4xx/5xx class decides everything downstream: 2xx delivers, 5xx bounces
+immediately and generates a DSN (never retried — see A8.2/A8.4 in `docs/Architecture.md` for what
+that DSN is and is not), 4xx defers to a time computed by `RetryBackoffPolicy` (1m, 5m, 15m, 30m,
+1h, 2h, 4h, 8h, then every 8h until the 5-day expiry window). A message whose own reverse path is
+null never generates a DSN on failure, regardless of outcome — the bounce-loop rule.
+
 ## Bounded reads everywhere
 
 Every attacker-controlled quantity has a limit, configured in `MailServer:Limits`:
@@ -253,6 +272,16 @@ These get extra test investment because "almost right" is indistinguishable from
    host stops; the listener then waits `MailServer:Smtp:ShutdownGraceSeconds` for sessions to
    end. Abandoning a delivery mid-`DATA` risks a duplicate at the sending server, which saw no
    reply and will retry.
+6. **MX selection, fallback and failure classification.** ✅ **Built.** `IDnsResolver` collapses
+   every DNS outcome to Success/Temporary/Permanent before the queue worker ever sees it,
+   handles the implicit-MX fallback to a domain's own A/AAAA record internally, and treats a
+   published null MX (RFC 7505) as an immediate permanent failure. Getting the
+   temporary/permanent split wrong either bounces mail that would have gone through on retry or
+   retries a domain that will never answer.
+7. **Bounce-loop prevention.** ⚠️ **Partial.** A message with a null reverse path never generates
+   a DSN on failure. Detecting an inbound `Auto-Submitted` header to suppress a DSN the same way
+   is not built — that needs header parsing, which arrives with MIME in Milestone 9. See
+   A8.4 in `docs/Architecture.md`.
 
 ## What was verified against a running server
 
@@ -275,3 +304,16 @@ behind, the null reverse path refused on 587 and accepted on 25, and both submis
 to the recipient's INBOX.
 
 That exercise found the third bug of the A6.5 shape — see A7.3.
+
+**Milestone 8** was verified the same way in spirit, with one honest difference: there is no
+independent client library that plays a *remote MX*, so `FakeRemoteMta` — a real `TcpListener`
+answering with a real self-signed certificate over a real TLS handshake — stands in for one, and
+the production `OutboundSmtpClient` is driven against it exactly as `smtplib` drove the real
+listener above. Over a real loopback socket: a message was accepted and the fake's own reply
+code, reverse path and body all matched what was sent (including a body line that is itself a
+bare `.`, round-tripping through dot-stuffing intact); a `550` at `RCPT TO` was classified
+permanent and a `452` at `DATA` was classified temporary; TLS was negotiated and used against an
+untrusted certificate when opportunistic, and refused to fall back to plaintext — whether the
+certificate was untrusted or `STARTTLS` was never offered — when required; and a closed port
+failed as a temporary result rather than an unhandled exception. This server has not yet
+exchanged mail with a live Internet mail exchanger — see `docs/Standards.md`'s known gaps.

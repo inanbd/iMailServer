@@ -2104,4 +2104,100 @@ detection has time to work.
 
 ---
 
-*Document version 1.6 — baseline for Milestone 1, with the Milestone 2–7 addenda.*
+## Addendum — decisions taken during Milestone 8
+
+### A8.1 — One hosted service claims and delivers; §8's diagram shows two
+
+The design in §8 separates `QueueSchedulerHostedService` (leases work) from
+`OutboundDeliveryHostedService` (N workers delivering it). The shipped implementation is a
+single `OutboundDeliveryHostedService` that does both: claim a batch, deliver the whole batch
+concurrently under a global and a per-domain `SemaphoreSlim`, claim again.
+
+The leasing contract the split exists to protect — claim atomically, do the network I/O with no
+transaction open, record the outcome in a second short transaction — is identical either way,
+and per-domain throttling is the same semaphore regardless of how many hosted-service classes it
+lives in. Splitting the claim and the delivery into a producer and a channel of consumers would
+add a coordination layer this milestone's concurrency needs do not require. If a future milestone
+needs the claim and the delivery to run at genuinely different cadences — a scheduler polling
+far more often than any one delivery attempt takes — this is the seam to split along, and nothing
+here forecloses it: `IOutboundQueueRepository.ClaimDueAsync` already returns a batch a separate
+consumer could just as easily read from a channel.
+
+### A8.2 — DSNs are single-part `text/plain`, not RFC 3464's `multipart/report`
+
+Building the RFC 3464-correct structure (`multipart/report` containing a human-readable part, a
+machine-parsable `message/delivery-status` part, and optionally the original headers) needs a
+MIME writer, and MIME does not arrive until Milestone 9. `docs/Standards.md` records this as
+Partial rather than Implemented. The plain-text body is legible in every mail client and is
+addressed with the null reverse path and `Auto-Submitted: auto-replied`, which is what bounce-loop
+prevention actually depends on; the multipart structure is a machine-readability nicety that a
+human reading a bounce does not need and that this milestone does not claim to have built.
+
+A related, smaller simplification: one DSN is generated per failed recipient, not one DSN batched
+per original message across every recipient that failed. A message sent to three recipients where
+two fail produces two separate bounce messages rather than one naming both. RFC 3464 permits
+either shape; batching would need to correlate sibling queue items back to a common origin at
+generation time, which the one-row-per-recipient design (§8) deliberately does not need for
+delivery itself and was not worth adding solely for this.
+
+### A8.3 — Opportunistic TLS records an untrusted certificate; it does not refuse it
+
+`docs/TLS.md`'s outbound policy table says "use TLS when the remote offers it, deliver in
+plaintext otherwise" for the default (opportunistic) case. The outbound client's
+`RemoteCertificateValidationCallback` always calls the real `CertificateChainValidator` — there
+is no unconditional `true` — but what it *does* with an untrusted or hostname-mismatched result
+depends entirely on `RequireTlsForOutbound`:
+
+* **Opportunistic (default):** the session proceeds encrypted regardless of trust. Encryption
+  without authentication is what "opportunistic" means; refusing to encrypt over an untrusted
+  certificate would not make the mail more secure, it would make it plaintext, which is strictly
+  worse. The certificate's subject, issuer and trust outcome are recorded on the delivery attempt
+  regardless, so an operator asking "was this actually encrypted, and against what" always has an
+  answer.
+* **Required:** anything short of a trusted, matching certificate fails the handshake, and a
+  failed handshake is never followed by a plaintext retry on the same connection — RFC 3207's
+  downgrade-attack concern applies exactly as much to a client silently retrying in the clear as
+  to a network attacker stripping the capability.
+
+### A8.4 — Bounce-loop prevention is enforced by the null reverse path; the `Auto-Submitted` half is not, yet
+
+§8's bounce-loop rule has two parts: never generate a DSN for a message with a null reverse path,
+and never generate one for a message that already carries `Auto-Submitted` other than `no`. Only
+the first is enforced (`OutboundQueueItem.ShouldGenerateDsnOnFailure`). Reading an *inbound*
+message's `Auto-Submitted` header requires parsing headers out of a byte-transparent stored
+body, which is header parsing this product does not do until MIME lands in Milestone 9 (see
+`docs/Standards.md`'s Auto-Submitted row). The null-reverse-path rule is the more load-bearing of
+the two in practice — RFC 3834-compliant auto-responders are expected to use a null reverse path
+as well precisely so that the first rule already catches them — so this is a real, bounded gap
+rather than a load-bearing hole.
+
+### A8.5 — Every outbound message connects directly to the recipient's MX; there is no smarthost mode
+
+Risk 2 (§28) names smarthost relay as a first-class mode this product should offer, since outbound
+port 25 is blocked on most clouds and residential ISPs. It is not built in this milestone.
+`OutboundDeliveryRequest` already names an explicit target host and port rather than assuming
+"always the resolved MX", so adding a smarthost mode later is a new source for that host/port
+(a configured upstream relay instead of DNS) rather than a redesign of the delivery client. Stated
+here so the gap is a decision, not a discovery.
+
+### A8.6 — Outbound queue visibility in the admin application is deferred, not forgotten
+
+Milestone 8's exit criterion (§27) is "mail delivered to a live external provider; bounces
+generated correctly," which does not require an operator-facing queue view — the queue and its
+attempt history are fully queryable in the database today, just not yet through IPC or a WPF
+screen. That surface is deferred to Milestone 11 alongside the rest of the deliverability
+dashboard, rather than built now and rebuilt once that milestone's read-model conventions are
+settled.
+
+### A8.7 — The DNS resolver's cache is `DnsClient.NET`'s own, not a second cache layered on top
+
+`docs/DNS.md` asks for TTLs respected with a 30-second floor and a one-hour ceiling, plus a
+shorter negative-cache duration. `DnsMxResolver` gets all three from
+`LookupClientOptions.MinimumCacheTimeout`/`MaximumCacheTimeout`/`CacheFailedResults`/
+`FailedResultsCacheDuration` rather than wrapping the client in an application-level cache. A
+second cache would mean two places that could disagree about whether an answer is still fresh,
+for no benefit the library's own cache does not already provide.
+
+---
+
+*Document version 1.7 — baseline for Milestone 1, with the Milestone 2–8 addenda.*

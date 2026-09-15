@@ -35,6 +35,11 @@ application ossifies the day it ships.
 
 ## Outbound TLS policy
 
+> **Status: Opportunistic and required modes implemented in Milestone 8**
+> (`OutboundSmtpClient`, `src/MailServer.Infrastructure/Smtp/Outbound/`). MTA-STS enforcement and
+> REQUIRETLS remain planned for Milestone 11; the table below states the target policy, not a
+> claim that every row is built.
+
 | Setting | Behaviour |
 |---|---|
 | Opportunistic (default) | Use TLS when the remote offers it; deliver in plaintext otherwise |

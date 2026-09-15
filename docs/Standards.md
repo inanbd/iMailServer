@@ -31,7 +31,7 @@ Status values:
 
 | Standard | RFC | Status | Milestone | Notes |
 |---|---|---|---|---|
-| SMTP / ESMTP | 5321 | **Partial** | 6–7 | Receipt and submission are both built and tested end to end over a real socket, including AUTH. **Outbound delivery is not built** — this server accepts mail but does not yet send it onward, which is Milestone 8. See `docs/SMTP.md` |
+| SMTP / ESMTP | 5321 | **Partial** | 6–8 | Receipt, submission and outbound delivery are all built and tested end to end over a real socket, including AUTH and a full EHLO/STARTTLS/MAIL/RCPT/DATA client conversation. `BDAT`/`CHUNKING` is not advertised on either side, and a message that used `SMTPUTF8` addressing on the way in is not yet re-advertised on the way out — see the `SMTPUTF8` row. See `docs/SMTP.md` |
 | Internet Message Format | 5322 | **Partial** | 6 | The `Received:` trace header is generated, folded correctly, and every client-supplied field is sanitised and length-bounded against header injection. **Message parsing is not built** — MimeKit is not yet referenced, and nothing reads a stored message's headers |
 | Message Submission | 6409 | **Implemented** | 7 | Port 587 with STARTTLS-before-AUTH and port 465 with implicit TLS, both enabled by default. Verified with Python's `smtplib` — an independent client library doing its own EHLO parsing, STARTTLS and AUTH negotiation. A sender may use its own address or an alias it is behind, and nothing else |
 | MIME (parts 1–5) | 2045–2049 | Planned | 9 | Via MimeKit; not hand-rolled. Still nothing parses MIME — receipt and submission are byte-transparent, which is why they can be correct without it. The first consumer is DKIM signing |
@@ -40,7 +40,7 @@ Status values:
 | 8BITMIME | 6152 | **Implemented** | 6 | Receipt is byte-transparent; the decoder rewrites line endings and transparency dots and nothing else |
 | CHUNKING / BDAT | 3030 | Planned | Post-7 | Exact byte counting, `LAST` semantics. Not advertised, so no peer attempts it |
 | ENHANCEDSTATUSCODES | 3463 | **Implemented** | 6 | Every reply carries one, paired with its code in a single vocabulary so the two cannot drift apart at a call site |
-| DSN (delivery status notifications) | 3461, 3464 | Planned | 8 | Null reverse path; loop prevention |
+| DSN (delivery status notifications) | 3461, 3464 | **Partial** | 8 | Generated on permanent failure and on a configurable delay-warning threshold, addressed with the null reverse path and never generated for a message that itself has one (bounce-loop prevention). **Single-part `text/plain`, not RFC 3464's `multipart/report`** — that needs a MIME writer, which is Milestone 9. Detecting an *inbound* `Auto-Submitted` header to suppress a DSN is not implemented (needs header parsing, also Milestone 9); only the null-reverse-path half of loop prevention is enforced today |
 | SMTPUTF8 | 6531, 6532, 6533 | **Partial** | Post-7 | Address model complete and tested (`EmailAddress`, `DomainName` round-trip Unicode ↔ punycode without loss) and the SMTP path parser preserves it. The transport-level extension is still **not advertised**, so nothing downgrades yet. It did not land in Milestone 7 and is not claimed to have |
 | IDNA 2008 | 5890, 5891 | **Implemented** | 1 | `DomainName` normalises to A-labels and preserves U-labels; 20 tests |
 
@@ -97,9 +97,9 @@ Status values:
 |---|---|---|---|---|
 | One-Click Unsubscribe | 8058 | Planned | 11 | Cryptographically secure tokens; no internal ids exposed |
 | List-Unsubscribe header | 2369 | Planned | 11 | |
-| Auto-Submitted header | 3834 | Planned | 8 | Central to bounce-loop prevention |
+| Auto-Submitted header | 3834 | **Partial** | 8 | Every generated DSN carries `Auto-Submitted: auto-replied`. Reading the header on an *inbound* message to decide whether to bounce it is not implemented — that is header parsing, gated on MIME in Milestone 9; today's bounce-loop prevention relies solely on the null reverse path, which is the more load-bearing of the two rules regardless |
 | Reverse DNS / FCrDNS | 1912 (BCP) | Planned | 11 | Checked and scored, not merely documented |
-| Null MX | 7505 | Planned | 8 | Honoured as an immediate permanent failure |
+| Null MX | 7505 | **Implemented** | 8 | A domain publishing a single `0 .` record is treated as an immediate permanent failure, never a retry |
 
 ---
 
@@ -175,6 +175,19 @@ These, and the Milestone 2 entries below, are the only entries currently backed 
 | Address uniqueness across mailboxes and aliases | — | `MailboxAdministrationTests` — refused in both directions |
 | Full mailbox and alias CRUD | — | `MailboxAdministrationTests` — 42 tests through the real pipeline; `IpcEndToEndTests` proves all 11 new commands require a session |
 
+---
+
+## Implemented in Milestone 8
+
+| Capability | Standard | Evidence |
+|---|---|---|
+| MX resolution, implicit MX, null MX | RFC 5321 §5.1, RFC 7505 | `DnsMxResolverTests` — 10 tests including NXDOMAIN/SERVFAIL classification, the implicit fallback to a domain's own A record, and a single `0 .` record refused as an immediate permanent failure |
+| MX preference ordering | RFC 5321 §5.1 | `MxSelectionPolicyTests` — ascending preference band, shuffled within a band, every host returned exactly once |
+| Outbound SMTP client | RFC 5321 | `OutboundSmtpClientTests` — 10 tests over a real loopback socket against a fake remote MX: acceptance, 5xx/4xx classification, a body line that is itself a bare dot surviving dot-stuffing, and a closed port failing as temporary rather than throwing |
+| Opportunistic and required STARTTLS (client side) | RFC 3207, this product's outbound TLS policy (`docs/TLS.md`) | `OutboundSmtpClientTests` — encrypts and records an untrusted certificate's subject/issuer when TLS is opportunistic; refuses to fall back to plaintext, whether the certificate was untrusted or STARTTLS was never offered, when TLS is required |
+| No certificate validation bypass (outbound client) | — | `NoCertificateValidationBypassTests`, plus a dedicated test that the callback calls the real chain validator rather than a rubber stamp |
+| Queue leasing and reclaim | — | `OutboundQueueRepositoryTests` — 11 tests including two workers racing for the same item, a deferred item becoming claimable exactly at its next-attempt time, and a crashed worker's lease being reclaimed only after it expires |
+| Retry backoff, bounce, DSN, delay warning | RFC 3461/3464 (partial — see the Standards table), RFC 3834 (partial) | `OutboundDeliveryHostedServiceTests` — 8 tests including the exact retry interval, a permanent failure generating a DSN addressed to the original sender, a null-reverse-path message never generating one, MX failures short-circuiting the delivery client entirely, maximum-lifetime expiry, and a delay-warning DSN sent once and never repeated |
 
 
 
@@ -195,7 +208,21 @@ These, and the Milestone 2 entries below, are the only entries currently backed 
 * **IMAP UID correctness** causes silent mail loss in clients when wrong. Allocation happens
   inside the insert transaction with a unique constraint, and interoperability testing against
   three real clients is an explicit Milestone 10 exit criterion.
+* **Outbound delivery has not exchanged mail with a real Internet mail exchanger.**
+  `OutboundSmtpClientTests` proves the client speaks correct SMTP and TLS against a fake MX over
+  a real socket, the same rigor Milestone 4's ACME tests used against a fake CA; it has not been
+  run against a live provider, because that needs a public IP, PTR-clean address space and
+  outbound port 25, none of which a build agent has. See the port-25 warning in the README.
+* **No smarthost / relay-via-upstream mode.** Every outbound message connects directly to the
+  recipient's own MX. `docs/Architecture.md` risk 2 recommends smarthost delivery as a
+  first-class mode for the (common) case where outbound port 25 is blocked; the request path
+  (`OutboundDeliveryRequest` names an explicit host and port) does not preclude adding it, but
+  nothing in this milestone builds it.
+* **A retry-storm is possible only in the sense that nothing has proven it isn't.** The backoff
+  schedule, jitter and per-domain concurrency cap are all unit-tested individually;
+  `OutboundDeliveryHostedServiceTests` proves the worker calls them correctly, not that a
+  production-scale backlog against a slow or hostile destination behaves acceptably under load.
 
 ---
 
-*Last updated at the completion of Milestone 5.*
+*Last updated at the completion of Milestone 8.*

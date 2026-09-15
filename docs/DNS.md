@@ -1,10 +1,12 @@
 # DNS Architecture
 
-> **Status: Planned — Milestones 8 and 11.**
+> **Status: `IDnsResolver` implemented in Milestone 8. `IDnsDiagnosticsService` planned — Milestone 11.**
 
 ## Two consumers, two abstractions
 
-`IDnsResolver` is the hot path: MX resolution for delivery. Cached, bounded, fast.
+`IDnsResolver` is the hot path: MX resolution for delivery. Cached, bounded, fast. Implemented
+in Milestone 8 as `DnsMxResolver` (`src/MailServer.Infrastructure/Dns/`), on `DnsClient.NET`;
+see `DnsMxResolverTests` for the classification matrix this page describes.
 
 `IDnsDiagnosticsService` is for the admin tools. It **bypasses the cache** and may query
 authoritative nameservers directly, because "it works on my resolver" is exactly the problem a

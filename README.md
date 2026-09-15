@@ -6,9 +6,12 @@ This is a complete mail platform — SMTP receipt, authenticated submission, dir
 delivery, IMAP access, DKIM/SPF/DMARC, automatic TLS certificates and deliverability
 diagnostics — not an SMTP sending utility.
 
-> **Status: Milestone 5 of 13 complete.** The foundation, security, certificates, ACME and
-> mailbox administration are built, compile with warnings as errors, and are covered by 1,164
-> passing tests. It does not yet send or receive mail; see
+> **Status: Milestone 8 of 13 complete.** The foundation, security, certificates, ACME, mailbox
+> administration, SMTP inbound and submission, and now outbound delivery — MX resolution, the
+> queue, retry, per-domain throttling and bounce/delay DSNs — are built, compile with warnings as
+> errors, and are covered by 2,084 passing tests. This server can receive mail from the Internet,
+> accept authenticated submission from a mail client, and relay it onward to another server's MX;
+> it does not yet do so with DKIM/SPF/DMARC signing or offer IMAP access. See
 > [Roadmap](#roadmap) for what lands when, and `docs/Standards.md` for exactly which standards
 > are implemented versus planned. Nothing is described as working until it has tests.
 
@@ -38,7 +41,10 @@ diagnostics — not an SMTP sending utility.
 | Rate-limit and pre-flight protection | Built and tested |
 | Mailboxes, credentials, quotas and folders | Built and tested |
 | Aliases with cycle and fan-out protection | Built and tested |
-| SMTP, IMAP, POP3, DKIM, queue, filtering | **Not yet built** — milestones 6–12 |
+| SMTP inbound (listener, relay protection, local delivery) | Built and tested against a real MTA-shaped client |
+| SMTP submission (587/465, SASL PLAIN/LOGIN, per-mailbox rate limits) | Built and tested; a real client (Python's `smtplib`) authenticates and submits |
+| Outbound MTA (MX resolution, delivery client, queue, retry, per-domain throttling, DSNs) | Built and tested against a fake remote MX over a real socket; **not yet exercised against a live Internet mail exchanger** — see `docs/Standards.md` |
+| IMAP, POP3, DKIM/SPF/DMARC, filtering | **Not yet built** — milestones 9–12 |
 
 ---
 
@@ -190,15 +196,17 @@ src/
   MailServer.Admin/                  # WPF administration application
 
 tests/
-  MailServer.Domain.Tests/           # 193 tests
-  MailServer.Application.Tests/      #  50 tests
-  MailServer.Infrastructure.Tests/   #  61 tests
-  MailServer.Ipc.Tests/              # 131 tests (end to end over a real pipe, incl. session enforcement)
-  MailServer.Persistence.Tests/      #  37 tests (against real SQLite)
-  MailServer.SecurityTests/          # 561 tests (real Argon2, real SQLite, no-bypass source scan)
+  MailServer.Domain.Tests/           # 268 tests
+  MailServer.Application.Tests/      #  51 tests
+  MailServer.Infrastructure.Tests/   #  71 tests
+  MailServer.Ipc.Tests/              # 138 tests (end to end over a real pipe, incl. session enforcement)
+  MailServer.Persistence.Tests/      #  56 tests (against real SQLite)
+  MailServer.SecurityTests/          # 779 tests (real Argon2, real SQLite, no-bypass source scan)
   MailServer.Certificates.Tests/     #  51 tests (real certificate generation and hot reload)
   MailServer.Acme.Tests/             #  37 tests (issuance against a fake CA, DNS parsing, limits)
   MailServer.Mailboxes.Tests/        #  42 tests (quota enforcement, aliases, full CRUD)
+  MailServer.Smtp.Tests/             # 573 tests (wire-level: grammar, dot-stuffing, STARTTLS, open-relay matrix)
+  MailServer.Outbound.Tests/         #  18 tests (delivery client and queue worker against a fake remote MX)
 ```
 
 Projects for milestones 4–13 are created **in** those milestones. A solution full of empty
@@ -240,10 +248,10 @@ assemblies looks finished and provides no compile-time value.
 | 3 | Certificate Infrastructure | **Complete** |
 | 4 | ACME / Let's Encrypt | **Complete** |
 | 5 | Domain Administration (mailboxes, aliases, quotas) | **Complete** |
-| 6 | SMTP Inbound + relay protection | Next |
-| 7 | SMTP Submission | Planned |
-| 8 | Outbound MTA | Planned |
-| 9 | Mail Authentication (DKIM/SPF/DMARC) | Planned |
+| 6 | SMTP Inbound + relay protection | **Complete** |
+| 7 | SMTP Submission | **Complete** |
+| 8 | Outbound MTA | **Complete** |
+| 9 | Mail Authentication (DKIM/SPF/DMARC) | Next |
 | 10 | IMAP (+ optional POP3) | Planned |
 | 11 | Deliverability | Planned |
 | 12 | Filtering | Planned |
