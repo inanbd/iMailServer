@@ -1549,7 +1549,7 @@ message.
 | 4 | ACME / Let's Encrypt | ACME account, HTTP-01, DNS-01 abstraction + manual fallback, issuance, install, renewal service, Kestrel endpoints | Staging certificate issued and renewed end to end |
 | 5 | Domain Administration | Mailboxes, aliases, credentials, quotas, folders, special addresses | Full CRUD through IPC + WPF; quota enforcement tested |
 | 6 | SMTP Inbound | Listener, state machine, ESMTP verbs, STARTTLS, local delivery, **relay protection** | Open-relay test suite green; inbound mail from a real MTA delivered |
-| 7 | SMTP Submission | 587/465, AUTH PLAIN/LOGIN over TLS, submission policy, per-mailbox rate limits | A real mail client sends through the server |
+| 7 | SMTP Submission | 587/465, AUTH PLAIN/LOGIN over TLS, submission policy, per-mailbox rate limits | A real mail client sends through the server — **met**: Python's `smtplib` authenticates and submits on both ports; see `docs/SMTP.md` |
 | 8 | Outbound MTA | MX lookup, delivery client, queue, leasing, retry, per-domain throttling, DSN | Mail delivered to a live external provider; bounces generated correctly |
 | 9 | Mail Authentication | DKIM signing/verification, SPF, DMARC, alignment, ARC groundwork | Google/Microsoft report SPF+DKIM+DMARC pass |
 | 10 | IMAP (+ optional POP3) | Full mailbox access, UID correctness, IDLE, SPECIAL-USE | Thunderbird/Outlook/Apple Mail interoperate without mail loss |
@@ -2004,4 +2004,104 @@ array, so adding one is a deliberate act that fails the build.
 
 ---
 
-*Document version 1.5 — baseline for Milestone 1, with the Milestone 2–6 addenda.*
+---
+
+## Addendum — decisions taken during Milestone 7
+
+§23 stands. Five decisions, one of which is a bug that had been shipping since Milestone 2.
+
+### A7.1 — A SASL password never becomes a string, and that required changing `IPasswordHasher`
+
+A password that arrives over SASL lives in a `char[]` until it has been hashed and is overwritten
+immediately afterwards. A `string` cannot be: it is immutable, it sits on the managed heap until
+a collection that may never come, and it can be copied by compaction on the way.
+
+That is only worth doing if nothing downstream re-materialises it, so `IPasswordHasher` gained
+`ReadOnlySpan<char>` overloads for `Hash`, `Verify` and `VerifyAgainstDummy` — and the span
+versions became the **single implementations**, with the `string` overloads delegating to them
+rather than the reverse. Adding an overload that delegated the other way would have looked like
+the same work and achieved nothing.
+
+The honest limit: a process dump taken during verification still contains the password. This
+shortens the window from "the life of a GC cycle" to "the duration of one Argon2 call". It is a
+reduction in exposure, not an elimination of it.
+
+`SaslCredential` has no finaliser, deliberately. A credential cleared at an unpredictable time is
+a credential not cleared, and a finaliser would make the `Dispose` contract look optional.
+
+### A7.2 — The mechanism name is never echoed, and the obvious mitigation does not work
+
+`AUTH <base64>` with no mechanism is a malformed exchange but an easy one to produce, and the
+credential then arrives in the mechanism-name position. Quoting it back in a `504` puts it in the
+client's logs, any intermediary's logs and a packet capture.
+
+The obvious fix — echo the name only when it *looks* like a mechanism name — was written, tested,
+and **found not to work**. RFC 4422 §3.1 allows 1–20 characters of `A–Z 0–9 - _`, and a great
+many real passwords match that exactly; `hunter2` is a valid mechanism name. There is no test
+that separates "a mechanism a client mistyped" from "a password in the wrong field", so the name
+is not echoed at all. It goes to the server's own log at debug level, where an operator can see
+it and the peer cannot.
+
+Recorded because the first fix was plausible, was written, and would have shipped a credential
+leak that a shape test appeared to close.
+
+### A7.3 — Security events on the SMTP path were recorded, logged as recorded, and discarded
+
+The fourth defect of the A4.2 shape, and the worst of them.
+
+Security events are **buffered** rather than written immediately, because writing one inside a
+delivery transaction deadlocks SQLite (A2.2). Buffering is only safe if something flushes, and
+`FlushAsync` was called from exactly two places: the MediatR pipeline behaviour, and the IPC
+dispatcher. **An SMTP session goes through neither.**
+
+So every mailbox authentication failure, every lockout, every forged sender and every rate-limit
+refusal was recorded into a buffer, logged at Information level as having been recorded, and
+dropped when the connection's scope was disposed. The audit trail for a compromised mailbox —
+the one record that answers "when did this start, and from where" — did not exist.
+
+It was found by querying `SecurityEvents` after a live brute-force exercise and seeing an empty
+table next to a log full of "Security event MailboxAuthenticationFailed". No test caught it
+because every test asserted that the *recorder was called*.
+
+The listener now flushes in a `finally`, so a session that ends the way an attacker's session
+ends still leaves its evidence. Four tests fail if the flush is removed.
+
+**The practice this reinforces, again:** for anything that is meant to end up somewhere, assert
+that it arrived — not that the code which would send it ran. A4.2 said this about behaviour;
+this says it about evidence, which is harder to notice because its absence looks like nothing
+happening.
+
+### A7.4 — Authentication entitles a client to its own address and nothing more
+
+`SubmissionPolicy` is the sender-side counterpart of `RelayPolicy`, and exists because
+authentication answers a different question from authorisation. Proving who you are does not
+entitle you to claim anybody's address.
+
+Without it, one stolen password sends as every colleague — from the real server, over the real
+TLS, passing SPF, DKIM and DMARC, because as far as every downstream check is concerned the mail
+genuinely is from this domain. That is what a compromised mailbox is worth to an attacker, and
+every control downstream of submission is powerless against it.
+
+The null reverse path is refused on submission and accepted on port 25. `<>` is a bounce's
+sender; a mail client does not send bounces, and an authenticated client emitting mail that
+cannot itself be bounced is a backscatter campaign.
+
+### A7.5 — The rate limit is counted from the database, and what it does not bound is stated
+
+An in-memory window would be faster and would be cleared by a restart — and a limit an attacker
+resets by waiting for Patch Tuesday is not a limit. It is counted from the `Messages` table,
+which is the true record and survives.
+
+What it does not bound, stated rather than discovered later: a message is counted once
+**accepted**, so messages in flight on other connections are not yet visible, and a mailbox can
+overshoot by roughly the number of connections it holds open — itself bounded by
+`MaxConcurrentConnectionsPerIp`. A counter that reserved capacity before `DATA` would have to
+release it on every failure path, and a reservation leaked on one of those paths locks a mailbox
+out for an hour.
+
+A rate limit is not a detection mechanism. It is what keeps the blast radius small enough that
+detection has time to work.
+
+---
+
+*Document version 1.6 — baseline for Milestone 1, with the Milestone 2–7 addenda.*

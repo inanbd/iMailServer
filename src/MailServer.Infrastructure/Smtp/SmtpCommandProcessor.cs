@@ -291,10 +291,16 @@ public sealed class SmtpCommandProcessor
 
         if (mechanism is null)
         {
-            // 504 5.5.4 is the RFC 4954 §4 answer for a mechanism the server does not support.
-            // The mechanism name is echoed because it is not a credential - the initial response
-            // on the same line is, and is not.
-            return new SmtpCommandResult(SmtpReplies.UnsupportedAuthenticationMechanism(mechanismName));
+            // Logged, not echoed. A client that sends "AUTH <base64>" with no mechanism puts its
+            // credential in the mechanism position, and no shape test separates that from a
+            // mistyped mechanism name - a great many passwords match RFC 4422's charset exactly.
+            // Debug level, so the name reaches an operator and not the peer.
+            _logger.LogDebug(
+                "Unsupported SASL mechanism requested from {RemoteAddress}: {Mechanism}",
+                _session.RemoteAddress.Value,
+                mechanismName);
+
+            return new SmtpCommandResult(SmtpReplies.UnsupportedAuthenticationMechanism());
         }
 
         _mechanism = mechanism;

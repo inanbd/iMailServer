@@ -273,14 +273,25 @@ public static class SmtpReplies
         new(501, "5.7.0", "Authentication exchange cancelled");
 
     /// <summary>
-    /// 504 5.5.4 — the named mechanism is not one this server offers.
+    /// 504 5.5.4 — the requested mechanism is not one this server offers.
     /// </summary>
     /// <remarks>
-    /// The mechanism NAME is echoed because it is not a credential. Anything else on the AUTH
-    /// line is, and never appears in a reply.
+    /// <para>
+    /// <b>The name is never echoed.</b> That looks over-cautious until you notice what a client
+    /// can put there: <c>AUTH &lt;base64&gt;</c> with no mechanism is a malformed exchange but an
+    /// easy one to produce, and the credential then arrives in the mechanism position. Quoting
+    /// it back puts it in the client's logs, any intermediary's logs and a packet capture.
+    /// </para>
+    /// <para>
+    /// The obvious mitigation — echo it only when it looks like a mechanism name — does not
+    /// work. RFC 4422 §3.1 allows 1–20 characters of <c>A–Z 0–9 - _</c>, and a great many real
+    /// passwords fit that exactly. There is no test that separates "a mechanism name a client
+    /// mistyped" from "a password in the wrong field", so the name goes to the server's own log
+    /// at debug level, where an operator can see it and the peer cannot.
+    /// </para>
     /// </remarks>
-    public static SmtpReply UnsupportedAuthenticationMechanism(string mechanism) =>
-        new(504, "5.5.4", $"Authentication mechanism not supported: {mechanism}");
+    public static SmtpReply UnsupportedAuthenticationMechanism() =>
+        new(504, "5.5.4", "The requested authentication mechanism is not supported");
 
     /// <summary>
     /// 421 4.7.0 — too many authentication attempts on one connection.

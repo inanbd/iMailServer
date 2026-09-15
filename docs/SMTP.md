@@ -1,15 +1,15 @@
 # SMTP Architecture
 
-> **Status: Milestone 6 is built and tested; Milestones 7 and 8 are not.**
+> **Status: Milestones 6 and 7 are built and tested; Milestone 8 is not.**
 >
 > What exists today: the three listener roles, the relay decision, the session state machine
 > including the STARTTLS reset, bounded reads, dot-stuffing, streaming receipt to the message
-> store, and local delivery with alias expansion. 472 tests in `MailServer.Smtp.Tests` plus the
-> open-relay suite in `MailServer.SecurityTests`.
+> store, local delivery with alias expansion, and **authenticated submission on 587 and 465**
+> with SASL PLAIN and LOGIN, a sender policy and per-mailbox rate limits.
 >
-> What does not: **AUTH** (Milestone 7 — the submission listeners therefore ship disabled),
-> **BDAT/CHUNKING**, **SMTPUTF8 as a transport extension**, and **outbound delivery**
-> (Milestone 8). Each is named again below where it appears. See `docs/Standards.md`.
+> What does not: **outbound delivery** — this server accepts mail but does not yet send it
+> onward, which is Milestone 8 — plus **BDAT/CHUNKING** and **SMTPUTF8 as a transport
+> extension**. Each is named again below where it appears. See `docs/Standards.md`.
 
 ## Three roles, not one listener with a flag
 
@@ -22,11 +22,10 @@ wild. The roles are distinct types with distinct policies.
 | `Submission` | 587 | STARTTLS **required before AUTH** | Required | For the authenticated mailbox | Mail clients |
 | `ImplicitTlsSubmission` | 465 | Implicit from byte zero | Required | For the authenticated mailbox | Mail clients |
 
-Only `InboundMta` is enabled by default. The two submission listeners require AUTH, AUTH
-requires SASL, and SASL lands in Milestone 7 — so today they would refuse every sender. That
-refusal is correct (see A6.4 in `docs/Architecture.md`: they fail closed rather than accepting
-unauthenticated mail), but a port advertised and unusable is worse than one absent, so they are
-off until the mechanism exists.
+All three are enabled by default. The submission listeners refuse every sender until one
+authenticates — they fail closed rather than accepting unauthenticated mail (A6.4), and turning
+`EnableAuthentication` off does **not** relax that: it makes them refuse everything, which is
+the correct behaviour for an operator running this server purely as an inbound MTA.
 
 ## The relay decision
 
@@ -114,12 +113,94 @@ is fails the build rather than quietly becoming the next STARTTLS injection.
 * `SIZE` reflects the effective limit for this connection.
 * Extensions appear only when the feature has passing tests.
 
-**As built**, EHLO advertises `PIPELINING`, `SIZE`, `8BITMIME`, `ENHANCEDSTATUSCODES`, and
-`STARTTLS` where permitted. `SMTPUTF8` and `CHUNKING` are behind flags that are off, because
-neither is implemented; `AUTH` is behind the same kind of flag for Milestone 7.
+**As built**, EHLO advertises `PIPELINING`, `SIZE`, `8BITMIME`, `ENHANCEDSTATUSCODES`,
+`STARTTLS` where permitted, and `AUTH PLAIN LOGIN` on a submission listener once TLS is active.
+`SMTPUTF8` and `CHUNKING` are behind flags that are off, because neither is implemented.
 
 Advertising an extension that is not honoured is worse than not advertising it, because peers
 make delivery decisions from it.
+
+## Submission
+
+### AUTH is offered under three conditions, all required
+
+Authentication is implemented and enabled, the listener is a submission role, and TLS is active.
+Dropping any one of them is an incident: without the role check port 25 becomes an
+authenticating relay reachable from the Internet; without the TLS check credentials cross the
+network in the clear; without the availability check the server advertises a mechanism it cannot
+perform.
+
+The conditions are enforced where the capability is advertised **and** again where a mechanism is
+selected **and** a third time in `SmtpSessionContext.Authenticate`, which throws if TLS is not
+active. A defence that depends on another component being right is not a defence.
+
+**PLAIN and LOGIN only.** Both send the password in a form equivalent to the clear, which is
+acceptable only inside TLS — and which is strictly better than a challenge-response mechanism,
+because CRAM-MD5 and DIGEST-MD5 require the server to hold something it can compute a response
+from. See addendum A5.1.
+
+### The password never becomes a string
+
+A SASL password lives in a `char[]` from the moment it is decoded until it has been hashed, and
+is overwritten immediately afterwards. `IPasswordHasher` has `ReadOnlySpan<char>` overloads for
+`Hash`, `Verify` and `VerifyAgainstDummy`, and those are the single implementations — the
+`string` overloads delegate to them, not the reverse.
+
+This is not a complete defence: a process dump taken during verification still contains the
+password. It shortens the window from "the life of a garbage-collection cycle" to "the duration
+of one Argon2 call".
+
+`SaslCredential` deliberately has **no finaliser**. A credential cleared at an unpredictable time
+is a credential not cleared, and a finaliser would make the `Dispose` contract look optional.
+
+### Authentication refuses uniformly
+
+An unknown address, a disabled mailbox, one not permitted to submit, a wrong password and a
+locked-out account all produce `535 5.7.8` and all cost a full Argon2 verification first.
+
+Returning early on an unknown address would make that refusal arrive in microseconds instead of
+roughly a hundred milliseconds, and the difference is measurable from anywhere on the Internet.
+It would turn the submission port into an address-enumeration oracle, which is the first step of
+every credential-stuffing run against a mail server. The security event log is uniform for the
+same reason: a description that distinguished the cases would hand the same oracle to whoever
+can read the log.
+
+### The submission policy: what a stolen password is worth
+
+An authenticated client may use its own address, or an alias that resolves to it. Nothing else.
+
+Without this, one stolen password sends as every colleague in the organisation — from the real
+server, over the real TLS, passing SPF, DKIM and DMARC, because as far as every downstream check
+is concerned the mail genuinely is from this domain. That is what a compromised mailbox is worth
+to an attacker.
+
+The null reverse path is refused here and accepted on port 25. `<>` is a bounce's sender; a mail
+client does not send bounces, and an authenticated client emitting mail that cannot itself be
+bounced is the shape of a backscatter campaign.
+
+`SubmissionPolicy` is a total function with `Deny` as the fall-through, like `RelayPolicy`, and
+`SubmissionPolicy.MayAuthenticatedSenderUseAnyAddress` is asserted false by a test.
+
+### Two bounds on guessing, doing different jobs
+
+| Bound | Protects | Spends |
+|---|---|---|
+| `MaxAuthAttemptsPerSession` (3) | Many accounts from one connection | Closes the connection with `421 4.7.0` |
+| Mailbox lockout (`MailboxCredential`) | One account across every connection | Locks the account for the lockout duration |
+
+Neither is refunded by anything. In particular the STARTTLS reset does not clear the session's
+attempt counter — that counter is this server's own accounting, not knowledge obtained from the
+client, so RFC 3207's discard requirement does not reach it, and clearing it would buy an
+attacker three more guesses per handshake.
+
+A **cancelled** exchange (`*`) is not a failed attempt. A client that changed its mind has not
+guessed a password wrongly, and counting it would walk a hesitant client into a lockout it never
+earned. A **malformed** exchange does count, or a client could probe indefinitely with garbage.
+
+`MaxMessagesPerMailboxPerHour` (200) bounds what a successful compromise achieves. It is not a
+detection mechanism; it is what keeps the blast radius small enough that detection has time to
+work. It is counted from the `Messages` table rather than memory, because a limit cleared by a
+restart is a limit an attacker resets by waiting for Patch Tuesday.
 
 ## Bounded reads everywhere
 
@@ -182,3 +263,15 @@ naming **the address the sender wrote** rather than the mailbox behind it, mailb
 charged, a relay attempt was refused `554 5.7.1`, and `EHLO` advertised no `AUTH`.
 
 Two of the three bugs recorded in A6.5 were found by that exercise and not by the tests.
+
+**Milestone 7** was verified the same way, with Python's `smtplib` rather than a hand-written
+client — an independent implementation doing its own EHLO parsing, STARTTLS and AUTH
+negotiation. Over both 587 and 465: no `AUTH` advertised before TLS, `AUTH PLAIN LOGIN` after it,
+login and send succeeding, `AUTH LOGIN` driven by hand through its two challenges, a wrong
+password and an unknown mailbox answered identically, three wrong passwords closing the
+connection with 421, `AUTH` before TLS refused 530, `AUTH` on port 25 refused 502 and never
+advertised, alice refused when sending as bob but accepted when sending as an alias she is
+behind, the null reverse path refused on 587 and accepted on 25, and both submissions delivered
+to the recipient's INBOX.
+
+That exercise found the third bug of the A6.5 shape — see A7.3.
