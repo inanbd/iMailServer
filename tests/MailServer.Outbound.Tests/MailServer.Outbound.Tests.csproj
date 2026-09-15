@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Milestone 8: outbound delivery against a real socket. A fake remote MTA plays the server
+    side of the conversation (banner, EHLO, STARTTLS, MAIL FROM, RCPT TO, DATA) so the real
+    production OutboundSmtpClient can be driven end to end without a network - MX resolution,
+    the queue worker's retry/DSN decisions and per-domain throttling are exercised against fakes
+    of IDnsResolver and the repositories, exactly as SmtpWireTests exercises the inbound listener
+    against a real socket with fakes below it.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>MailServer.Outbound.Tests</RootNamespace>
+    <AssemblyName>MailServer.Outbound.Tests</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MailServer.Domain\MailServer.Domain.csproj" />
+    <ProjectReference Include="..\..\src\MailServer.Application\MailServer.Application.csproj" />
+    <ProjectReference Include="..\..\src\MailServer.Infrastructure\MailServer.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\MailServer.Service\MailServer.Service.csproj" />
+    <ProjectReference Include="..\..\src\MailServer.Persistence.Sqlite\MailServer.Persistence.Sqlite.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Shouldly" />
+    <PackageReference Include="Microsoft.Extensions.Logging" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Using Include="Shouldly" />
+  </ItemGroup>
+
+</Project>

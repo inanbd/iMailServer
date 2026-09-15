@@ -140,6 +140,12 @@ public static class Program
         // no-op unless MailServer:Acme:EnableHttpChallengeListener is set.
         builder.Services.AddHostedService<AcmeChallengeListener>();
 
+        // The outbound queue worker (Milestone 8). After certificates, because a STARTTLS
+        // handshake to a remote MX needs no certificate of its own but does need
+        // CertificateChainValidator's dependencies ready; before the SMTP listener only by
+        // convention - it is a background processor, not something inbound connections wait on.
+        builder.Services.AddHostedService<OutboundDeliveryHostedService>();
+
         // Last, and deliberately so. Hosted services start in registration order, so by the time
         // a socket is accepting mail the schema is migrated, the message store's directories
         // exist and the TLS provider holds a certificate. A listener that started before any of
