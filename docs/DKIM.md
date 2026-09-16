@@ -1,6 +1,10 @@
 # DKIM
 
-> **Status: Planned — Milestone 9.** The `DkimSelector` value object exists and is tested.
+> **Status: Partial — Milestone 9.** Signing, verification and DNS key lookup are built and
+> tested, including against RFC 6376's official canonicalization vectors — see
+> `docs/Standards.md` for the exact scope. **The real gap:** there is no operator-facing command
+> yet to generate a key and activate it for a domain — see "What is not built yet" below. None of
+> this depends on MimeKit; see `docs/Architecture.md`'s A9 addendum for why.
 
 DomainKeys Identified Mail (RFC 6376) signs outbound mail so receivers can verify it was
 authorised by the domain owner and has not been altered in transit.
@@ -55,21 +59,38 @@ signature stops verifying until new keys propagate.
 
 ## Verification (inbound)
 
-Every signature on a message is verified; a message may legitimately carry several. The result
-feeds DMARC alignment: DKIM passes for DMARC only if the `d=` domain aligns with the `From`
-header domain.
+Every signature on a message is verified; a message may legitimately carry several. Only
+`rsa-sha256` with `relaxed/relaxed` canonicalisation is accepted — anything else (`simple`
+canonicalisation, `rsa-sha1`, an unrecognised algorithm) is a permanent verification failure for
+that signature, never treated as a pass. The result feeds DMARC alignment: DKIM passes for DMARC
+only if the `d=` domain aligns with the `From` header domain, extracted by
+`FromHeaderDomain` — which refuses to name a domain at all (not "picks one") when the `From:`
+field names more than one mailbox or the message carries more than one `From:` field, per RFC
+7489 §6.6.1. A malformed `t=`/`x=` timestamp outside the representable date range fails only
+that one signature, not the whole message.
 
 ## The canonicalisation trap
 
 Relaxed **body** canonicalisation is unforgiving about trailing whitespace and trailing empty
 lines. One byte wrong and every signature this server produces fails verification everywhere —
-silently, at the receiver, with no error visible locally.
+silently, at the receiver, with no error visible locally. This is tested against RFC 6376 §3.4.5's
+official canonicalization example; it has **not** been verified against real signed mail from
+Gmail or Microsoft 365 — that needs a public IP and a live exchange, which a build agent does not
+have (the same caveat `docs/Standards.md` records for every standard in this milestone).
 
-Milestone 9 budgets RFC 6376 test vectors plus verification of real signed mail from Gmail and
-Microsoft 365 specifically because of this.
+## What is not built yet
+
+* **No operator-facing way to provision a key.** `DkimKeyGenerator`, `DkimKeyRepository` and the
+  signing/verification pipeline are all built and tested, but nothing — no IPC command, no WPF
+  screen — currently calls `DkimKeyGenerator.Generate` and activates the result for a domain.
+  Today a key can only reach the database through a test or a direct insert. Exposing this is
+  necessary before any real domain can actually sign outbound mail.
+* **Key rotation is a documented procedure, not automation.** The steps above are what an
+  operator (or a future scheduled job) must do by hand today.
+* **Ed25519 (RFC 8463)** is not implemented — see below.
 
 ## Ed25519
 
 RFC 8463 Ed25519 signatures are cheap to add alongside RSA and increasingly recognised.
-Recommended as a **secondary** signature post-Milestone 9 — publishing only Ed25519 would fail
-at receivers that do not support it.
+Recommended as a **secondary** signature in a later milestone — publishing only Ed25519 would
+fail at receivers that do not support it.

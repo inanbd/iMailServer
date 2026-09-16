@@ -1,6 +1,11 @@
 # SPF
 
-> **Status: Planned — Milestone 9.**
+> **Status: Implemented — Milestone 9.** The evaluator, parser and DNS resolver are built and
+> tested, including against every example in RFC 7208 Appendix A's official DNS zone. Macro
+> expansion (`%{s}`, `%{i}`, …) is deliberately not implemented — a directive that uses one is a
+> hard `permerror`, never evaluated against its literal, unexpanded text. The `ptr` mechanism is
+> recognised (a record naming it does not `permerror`) but never queried and never matches; see
+> "What this evaluator does not do" below.
 
 Sender Policy Framework (RFC 7208) lets a domain owner declare which IPs may send mail using
 that domain in the SMTP `MAIL FROM`.
@@ -38,10 +43,22 @@ be void lookups. Exceeding either is a `permerror`, which most receivers treat a
 `include:` is the usual culprit: each one costs a lookup, and each nested record inside it
 costs more. Three mail providers can silently blow the budget.
 
-The implementation enforces both limits and reports `permerror` rather than continuing to
-evaluate, because partial evaluation would produce a result the rest of the world disagrees
-with. The diagnostics screen shows the running lookup count against a record so the problem is
-visible before it is published.
+The implementation enforces both limits (a single shared budget across every level of nested
+`include`/`redirect` recursion, never reset per level) and reports `permerror` rather than
+continuing to evaluate, because partial evaluation would produce a result the rest of the world
+disagrees with. **There is no diagnostics screen yet** showing the running lookup count against
+a record before it is published — that is Admin UI work for a later milestone, not built here.
+
+## What this evaluator does not do
+
+* **Macro expansion (`%{s}`, `%{i}`, `%{d}`, …).** A record is parsed regardless of whether a
+  mechanism uses one, but evaluation stops with `permerror` the moment it would need to expand
+  one — see `SpfDirective.UsesMacros`. The alternative, evaluating the literal unexpanded text,
+  would silently produce a result the rest of the world's implementations do not agree with.
+* **The `ptr` mechanism.** Recognised — a record naming it does not `permerror` — but it is
+  never queried and never matches. RFC 7208 §5.5 itself downgrades `ptr` to "should be avoided
+  if at all possible," and this product avoids it entirely rather than half-implementing reverse
+  DNS resolution for a mechanism the standard already recommends against publishing.
 
 ## Evaluation (inbound)
 

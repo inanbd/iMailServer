@@ -34,13 +34,13 @@ Status values:
 | SMTP / ESMTP | 5321 | **Partial** | 6–8 | Receipt, submission and outbound delivery are all built and tested end to end over a real socket, including AUTH and a full EHLO/STARTTLS/MAIL/RCPT/DATA client conversation. `BDAT`/`CHUNKING` is not advertised on either side, and a message that used `SMTPUTF8` addressing on the way in is not yet re-advertised on the way out — see the `SMTPUTF8` row. See `docs/SMTP.md` |
 | Internet Message Format | 5322 | **Partial** | 6 | The `Received:` trace header is generated, folded correctly, and every client-supplied field is sanitised and length-bounded against header injection. **Message parsing is not built** — MimeKit is not yet referenced, and nothing reads a stored message's headers |
 | Message Submission | 6409 | **Implemented** | 7 | Port 587 with STARTTLS-before-AUTH and port 465 with implicit TLS, both enabled by default. Verified with Python's `smtplib` — an independent client library doing its own EHLO parsing, STARTTLS and AUTH negotiation. A sender may use its own address or an alias it is behind, and nothing else |
-| MIME (parts 1–5) | 2045–2049 | Planned | 9 | Via MimeKit; not hand-rolled. Still nothing parses MIME — receipt and submission are byte-transparent, which is why they can be correct without it. The first consumer is DKIM signing |
+| MIME (parts 1–5) | 2045–2049 | Planned | 10 | Via MimeKit; not hand-rolled. Still nothing parses MIME — receipt and submission are byte-transparent, which is why they can be correct without it. **Milestone 9 did not turn out to need it after all**: DKIM canonicalization and header inspection only ever needed to find the header/body boundary and read individual header fields, which `RawMessageHeaders` (a small, hand-rolled, Domain-layer parser — deliberately not MimeKit, since Domain cannot reference third-party packages) does without understanding MIME structure at all. The first real consumer is now IMAP `BODY[…]` part addressing in Milestone 10 — see `docs/Architecture.md`'s A9 addendum |
 | SMTP Service Extension for SIZE | 1870 | **Implemented** | 6 | Advertised per-connection from the effective limit; a declared size over the limit is refused at `MAIL FROM`, and the real size is counted during DATA and charged against raw octets |
 | PIPELINING | 2920 | **Implemented** | 6 | Advertised and honoured: the reader hands the DATA pump a window and keeps what it does not consume, so a command sharing a packet with the end-of-data marker is not lost. Pipelining across STARTTLS closes the connection — see `docs/SMTP.md` |
 | 8BITMIME | 6152 | **Implemented** | 6 | Receipt is byte-transparent; the decoder rewrites line endings and transparency dots and nothing else |
 | CHUNKING / BDAT | 3030 | Planned | Post-7 | Exact byte counting, `LAST` semantics. Not advertised, so no peer attempts it |
 | ENHANCEDSTATUSCODES | 3463 | **Implemented** | 6 | Every reply carries one, paired with its code in a single vocabulary so the two cannot drift apart at a call site |
-| DSN (delivery status notifications) | 3461, 3464 | **Partial** | 8 | Generated on permanent failure and on a configurable delay-warning threshold, addressed with the null reverse path and never generated for a message that itself has one (bounce-loop prevention). **Single-part `text/plain`, not RFC 3464's `multipart/report`** — that needs a MIME writer, which is Milestone 9. Detecting an *inbound* `Auto-Submitted` header to suppress a DSN is not implemented (needs header parsing, also Milestone 9); only the null-reverse-path half of loop prevention is enforced today |
+| DSN (delivery status notifications) | 3461, 3464 | **Partial** | 8 | Generated on permanent failure and on a configurable delay-warning threshold, addressed with the null reverse path and never generated for a message that itself has one (bounce-loop prevention). **Single-part `text/plain`, not RFC 3464's `multipart/report`** — that needs a MIME *writer*, which is still unbuilt (see the MIME row). Detecting an *inbound* `Auto-Submitted` header to suppress a DSN is still not implemented, but no longer because of a MIME dependency: Milestone 9's `RawMessageHeaders`/`MessageHeaderReader` can read any header, including `Auto-Submitted`, without understanding MIME structure at all — this is simply not wired into DSN generation yet, a smaller remaining gap than originally scoped. Only the null-reverse-path half of loop prevention is enforced today |
 | SMTPUTF8 | 6531, 6532, 6533 | **Partial** | Post-7 | Address model complete and tested (`EmailAddress`, `DomainName` round-trip Unicode ↔ punycode without loss) and the SMTP path parser preserves it. The transport-level extension is still **not advertised**, so nothing downgrades yet. It did not land in Milestone 7 and is not claimed to have |
 | IDNA 2008 | 5890, 5891 | **Implemented** | 1 | `DomainName` normalises to A-labels and preserves U-labels; 20 tests |
 
@@ -62,18 +62,28 @@ Status values:
 
 ## Authentication
 
+> **What "tested" has meant for the Milestone 9 rows.** SPF, DKIM and DMARC are tested against
+> their own RFC's official examples (RFC 7208 Appendix A, RFC 6376 §3.4.5, RFC 7489 Appendix
+> B.1) and against this product's own round-trip (its signer verifies against its own verifier,
+> its evaluator checked against a fake DNS zone). **None of it has been exchanged with a real
+> mail provider** — the same "not yet exercised against a live peer" caveat as the Milestone 6–8
+> rows above, for the same reason (no public IP, no PTR record, no publicly trusted certificate
+> available to a build agent). A future milestone's exit criterion — "Google/Microsoft report
+> SPF+DKIM+DMARC pass" (`docs/Architecture.md` §27) — is therefore still open, independent of
+> these rows saying Implemented/Partial.
+
 | Standard | RFC | Status | Milestone | Notes |
 |---|---|---|---|---|
 | SASL PLAIN | 4616 | **Implemented** | 7 | Offered only over TLS, on submission listeners only, never on port 25. The password is held in a clearable buffer from the wire to Argon2 and overwritten immediately afterwards |
 | SASL LOGIN | (de facto) | **Implemented** | 7 | Same conditions as PLAIN. Offered solely because Outlook and others support it and not PLAIN; it is strictly worse — an extra round trip and no authorization identity |
 | SCRAM-SHA-256 | 7677 | Planned | Post-7 | Architected for; not in the initial submission work |
 | OAUTHBEARER | 7628 | Planned | Post-7 | |
-| SPF | 7208 | Planned | 9 | Enforces the 10-lookup and 2-void-lookup limits as `permerror` |
-| DKIM | 6376 | Planned | 9 | RSA-2048/SHA-256; `From` oversigned; `l=` omitted by default |
+| SPF | 7208 | **Implemented** | 9 | Parser, evaluator and DNS resolver, tested against every example in RFC 7208 Appendix A's official DNS zone. Enforces the 10-lookup/2-void-lookup limits as `permerror`, with one shared budget across nested `include`/`redirect` recursion. Macro expansion (`%{s}`, `%{i}`, …) is a deliberate non-goal — a directive using one is `permerror`, never evaluated unexpanded. The `ptr` mechanism is recognised but never queried or matched, per RFC 7208 §5.5's own recommendation against publishing it |
+| DKIM | 6376 | **Partial** | 9 | RSA-2048/3072/4096-SHA-256, relaxed/relaxed only; `From` oversigned; `l=` omitted; tested against RFC 6376 §3.4.5's official canonicalization vectors and round-tripped through this product's own signer/verifier. **Not built: any operator-facing command to generate a key and activate it for a domain** — `DkimKeyGenerator` and `DkimKeyRepository` exist and are tested, but nothing currently calls them outside a test. Simple canonicalization and `rsa-sha1` are correctly rejected as unsupported, never silently accepted |
 | DKIM Ed25519 | 8463 | Planned | Post-9 | Recommended as a secondary signature |
-| DMARC | 7489 | Planned | 9 | Requires the Public Suffix List for organisational-domain resolution |
-| ARC | 8617 | Planned | 9 | Chain validation for forwarded mail |
-| Authentication-Results header | 8601 | Planned | 9 | Untrusted upstream copies are stripped before ours is added |
+| DMARC | 7489 | **Partial** | 9 | Policy discovery (exact domain, one fallback to the organizational domain per §6.6.3), alignment and `pct=`-sampled `p=reject` enforcement at the SMTP level, tested against RFC 7489 Appendix B.1's official alignment examples. Organisational-domain resolution uses a real embedded Public Suffix List snapshot (see `docs/DMARC.md`), refreshed by replacing the embedded file and rebuilding — **not yet an automated or scheduled refresh**. **Not implemented: aggregate (`rua=`) and failure (`ruf=`) reporting** — this product records its own per-message verdict, not reports from other receivers about its own domains' mail. `p=quarantine` is evaluated and recorded identically to `p=reject` but does not route mail anywhere different; only `p=reject` is actually enforced |
+| ARC | 8617 | **Partial** | 9 | Groundwork only: `ArcChain.Parse` structurally parses and groups `ARC-Seal`/`ARC-Message-Signature`/`ARC-Authentication-Results` headers by instance, checking well-formedness (contiguous instances, a correctly placed `cv=none`). **No cryptographic seal or signature validation** — nothing here lets an ARC chain rescue a message that fails DMARC on its own. A security test asserts no SPF/DKIM/DMARC decision reads an ARC header's claims as its own verdict |
+| Authentication-Results header | 8601 | **Partial** | 9 | `AuthenticationResultsComposer` formats this server's own SPF/DKIM/DMARC verdicts into a header value, tested in isolation. **Not yet attached to any served message** — the first consumer (IMAP `FETCH`) is a later milestone, so there is nothing yet to strip an untrusted upstream's copy from |
 | SRS (Sender Rewriting Scheme) | (de facto) | Planned | Post-9 | HMAC-authenticated, time-limited envelope rewriting |
 
 ---
@@ -97,7 +107,7 @@ Status values:
 |---|---|---|---|---|
 | One-Click Unsubscribe | 8058 | Planned | 11 | Cryptographically secure tokens; no internal ids exposed |
 | List-Unsubscribe header | 2369 | Planned | 11 | |
-| Auto-Submitted header | 3834 | **Partial** | 8 | Every generated DSN carries `Auto-Submitted: auto-replied`. Reading the header on an *inbound* message to decide whether to bounce it is not implemented — that is header parsing, gated on MIME in Milestone 9; today's bounce-loop prevention relies solely on the null reverse path, which is the more load-bearing of the two rules regardless |
+| Auto-Submitted header | 3834 | **Partial** | 8 | Every generated DSN carries `Auto-Submitted: auto-replied`. Reading the header on an *inbound* message to decide whether to bounce it is not implemented. The header-reading capability this needs now exists (`RawMessageHeaders`, Milestone 9) — this is unwired application logic, not a missing parser; today's bounce-loop prevention relies solely on the null reverse path, which is the more load-bearing of the two rules regardless |
 | Reverse DNS / FCrDNS | 1912 (BCP) | Planned | 11 | Checked and scored, not merely documented |
 | Null MX | 7505 | **Implemented** | 8 | A domain publishing a single `0 .` record is treated as an immediate permanent failure, never a retry |
 

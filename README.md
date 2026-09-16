@@ -6,14 +6,18 @@ This is a complete mail platform — SMTP receipt, authenticated submission, dir
 delivery, IMAP access, DKIM/SPF/DMARC, automatic TLS certificates and deliverability
 diagnostics — not an SMTP sending utility.
 
-> **Status: Milestone 8 of 13 complete.** The foundation, security, certificates, ACME, mailbox
-> administration, SMTP inbound and submission, and now outbound delivery — MX resolution, the
-> queue, retry, per-domain throttling and bounce/delay DSNs — are built, compile with warnings as
-> errors, and are covered by 2,084 passing tests. This server can receive mail from the Internet,
-> accept authenticated submission from a mail client, and relay it onward to another server's MX;
-> it does not yet do so with DKIM/SPF/DMARC signing or offer IMAP access. See
-> [Roadmap](#roadmap) for what lands when, and `docs/Standards.md` for exactly which standards
-> are implemented versus planned. Nothing is described as working until it has tests.
+> **Status: Milestone 9 of 13 complete.** The foundation, security, certificates, ACME, mailbox
+> administration, SMTP inbound and submission, outbound delivery, and now mail authentication —
+> DKIM signing/verification, SPF, DMARC alignment and enforcement, ARC groundwork — are built,
+> compile with warnings as errors, and are covered by 3,409 passing tests. This server can
+> receive mail from the Internet, accept authenticated submission from a mail client, relay it
+> onward to another server's MX, and evaluate/enforce SPF+DKIM+DMARC on the way in; it does not
+> yet offer IMAP access, and two real Milestone 9 gaps are worth knowing before relying on this:
+> there is no operator-facing way yet to generate and activate a DKIM key for a domain, and none
+> of this has been proven against a live Gmail/Microsoft 365 exchange, only RFC test vectors and
+> this product's own round-trip. See [Roadmap](#roadmap) for what lands when, and
+> `docs/Standards.md` for exactly which standards are implemented versus planned. Nothing is
+> described as working until it has tests.
 
 ---
 
@@ -44,7 +48,11 @@ diagnostics — not an SMTP sending utility.
 | SMTP inbound (listener, relay protection, local delivery) | Built and tested against a real MTA-shaped client |
 | SMTP submission (587/465, SASL PLAIN/LOGIN, per-mailbox rate limits) | Built and tested; a real client (Python's `smtplib`) authenticates and submits |
 | Outbound MTA (MX resolution, delivery client, queue, retry, per-domain throttling, DSNs) | Built and tested against a fake remote MX over a real socket; **not yet exercised against a live Internet mail exchanger** — see `docs/Standards.md` |
-| IMAP, POP3, DKIM/SPF/DMARC, filtering | **Not yet built** — milestones 9–12 |
+| DKIM (signing, verification, DNS key lookup) | Built and tested against RFC 6376's official vectors; **no operator-facing way yet to generate/activate a key for a domain** — see `docs/DKIM.md` |
+| SPF (parser, evaluator, DNS resolver) | Built and tested against every RFC 7208 Appendix A example |
+| DMARC (Public Suffix List, alignment, `pct=` sampling, `p=reject` enforcement) | Built and tested against RFC 7489's official alignment examples; **aggregate/failure reporting not implemented** — see `docs/DMARC.md` |
+| ARC (groundwork) | Structural parsing and grouping only; **no cryptographic chain validation** |
+| IMAP, POP3, filtering | **Not yet built** — milestones 10–12 |
 
 ---
 
@@ -251,8 +259,8 @@ assemblies looks finished and provides no compile-time value.
 | 6 | SMTP Inbound + relay protection | **Complete** |
 | 7 | SMTP Submission | **Complete** |
 | 8 | Outbound MTA | **Complete** |
-| 9 | Mail Authentication (DKIM/SPF/DMARC) | Next |
-| 10 | IMAP (+ optional POP3) | Planned |
+| 9 | Mail Authentication (DKIM/SPF/DMARC) | **Complete** |
+| 10 | IMAP (+ optional POP3) | Next |
 | 11 | Deliverability | Planned |
 | 12 | Filtering | Planned |
 | 13 | Production Hardening (installer, backups, migration) | Planned |

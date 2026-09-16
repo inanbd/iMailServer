@@ -1259,7 +1259,6 @@ the whole solution. `NuGet.config` restricts sources to nuget.org.
 | `Serilog.Extensions.Hosting` + sinks (`Console`, `File`, `EventLog`) | 10.0.0 / 6.x / 7.x | Structured logging with correlation enrichment, rolling files with retention, and selective Event Log escalation |
 | `CommunityToolkit.Mvvm` | 8.4.2 | Source-generated `ObservableProperty`/`RelayCommand`. Removes boilerplate without a heavyweight MVVM framework |
 | `Konscious.Security.Cryptography.Argon2` | 1.3.x | Argon2id for master and mailbox passwords. The BCL has no Argon2; PBKDF2 is materially weaker against GPU attack (Milestone 2) |
-| `MimeKit` | 4.x | MIME parsing/generation, header encoding, DKIM canonicalization helpers. Writing a MIME parser by hand is a well-documented source of security bugs (Milestone 6) |
 | `DnsClient` | 1.8.x | Async DNS with TTL handling, arbitrary record types and explicit server selection — `Dns.GetHostEntry` cannot do MX/TXT/PTR properly (Milestone 8) |
 | `Certes` | 3.x | ACME v2 with correct JWS. Hand-implementing ACME cryptography is an unnecessary risk (Milestone 4) |
 | `System.IO.Hashing` | 10.0.x | Fast non-cryptographic hashing for shard/caching paths |
@@ -1268,8 +1267,11 @@ the whole solution. `NuGet.config` restricts sources to nuget.org.
 | `Microsoft.SourceLink.GitHub` | 8.x | Debuggable production builds |
 
 **Deliberately excluded:** any Entity Framework package, AutoMapper (commercial from v15;
-hand-written mapping is clearer for ~30 DTOs anyway), and any "SMTP server in a box"
-library — the SMTP engine is the product.
+hand-written mapping is clearer for ~30 DTOs anyway), any "SMTP server in a box"
+library — the SMTP engine is the product — and, as of Milestone 9, **MimeKit**: this table
+originally listed it for MIME parsing and "DKIM canonicalization helpers," but DKIM turned out
+to need neither. See A9.1 for what replaced it and why full MIME parsing remains unbuilt and
+un-depended-on.
 
 ---
 
@@ -1598,11 +1600,13 @@ test investment is budgeted up front.
    when the remote lacks `SMTPUTF8`; never silently mangle an address. Round-trip fidelity
    is tested in both directions.
 5. **MIME edge cases.** Nested multiparts, malformed boundaries, RFC 2047 encoded words
-   with mixed charsets, `format=flowed`, 8-bit content in a 7-bit path. Delegated to MimeKit
-   precisely because these are where hand-rolled parsers fail.
+   with mixed charsets, `format=flowed`, 8-bit content in a 7-bit path. Still unbuilt as of
+   Milestone 9 (see A9.1) — planned to delegate to MimeKit precisely because these are where
+   hand-rolled parsers fail, whenever full MIME parsing actually arrives (Milestone 10).
 6. **DKIM canonicalization.** Relaxed body canonicalization's trailing-whitespace and
    trailing-empty-line rules are unforgiving: one byte wrong and every signature fails
-   verification everywhere. Tested against RFC 6376 vectors plus real signed mail.
+   verification everywhere. Tested against RFC 6376's official canonicalization vectors; **not
+   yet** against real signed mail from a live provider — see A9.1 and `docs/DKIM.md`.
 7. **DMARC organizational-domain resolution.** Requires a current Public Suffix List;
    `co.uk` vs `example.co.uk` errors silently invert alignment results.
 8. **SPF macro expansion and lookup limits.** Macros are obscure and rarely implemented
@@ -2198,6 +2202,119 @@ shorter negative-cache duration. `DnsMxResolver` gets all three from
 second cache would mean two places that could disagree about whether an answer is still fresh,
 for no benefit the library's own cache does not already provide.
 
+## Addendum — decisions taken during Milestone 9
+
+### A9.1 — MimeKit was never referenced; DKIM needed a header reader, not a MIME parser
+
+§22's dependency table and §29 item 5 both said MIME parsing — and DKIM canonicalization
+specifically — would be "delegated to MimeKit." Neither happened. DKIM signing and verification
+only ever need to find the header/body boundary and read individual header fields in wire order;
+nothing about RFC 6376 canonicalization requires understanding multipart structure, encoded
+words, or any other MIME concept. `RawMessageHeaders` — a small, hand-rolled parser — does
+exactly that, and lives in `MailServer.Domain` (where a third-party package could not be
+referenced at all; `ArchitectureTests` enforces this). MimeKit is not in any `.csproj` in this
+solution.
+
+This leaves full MIME parsing genuinely unbuilt, not merely renamed: RFC 3464's
+`multipart/report` DSN structure (A8.2) and reading an inbound `Auto-Submitted` header (A8.4)
+are still not implemented, but for a narrower reason than originally stated — the capability
+they were waiting on (reading a header off a stored message) has existed since this milestone
+started; nobody has wired it into DSN generation. `docs/Standards.md`'s MIME row now points at
+Milestone 10 (IMAP `BODY[…]` addressing) as the actual first consumer, since that is the first
+feature that needs to understand multipart structure rather than just find a header.
+
+### A9.2 — DKIM key generation, verification and DNS lookup are built; provisioning a key is not
+
+`DkimKeyGenerator` (RSA key generation), `DkimKeyRepository` (encrypted storage via
+`ISecretProtector`), the signer, the verifier, and `DnsDkimPublicKeyResolver` are all built and
+tested. Nothing calls `DkimKeyGenerator.Generate` and activates the result for a domain outside
+of a test — there is no IPC command, no WPF screen, no CLI. A real operator running this build
+today has no way to turn DKIM signing on for a domain short of inserting rows directly, which is
+not a supported path. This is recorded here rather than left implicit because "DKIM is
+Milestone 9" easily reads as "DKIM works end to end," and it does not yet, for exactly this
+reason. Exposing key generation and activation through IPC/WPF is required before any domain
+administered by this product can actually sign outbound mail.
+
+### A9.3 — One TXT resolver serves SPF and DMARC, not one per subsystem
+
+The narrow-interface-per-need pattern established for DNS (`IMxDnsClient`, `IDkimDnsClient`)
+argued, on a literal reading, for a third one when DMARC's `_dmarc.` policy lookup arrived. It was
+generalized instead: `ITxtRecordResolver` (renamed from an SPF-specific interface) serves both,
+because the operation — fetch every TXT record at a name, as concatenated strings — is identical
+for SPF's own record/`include`/`redirect` lookups and DMARC's policy lookup, and the narrow-
+interface pattern was never about one interface per calling subsystem; it was about one interface
+per distinct *shape* of need. DKIM's public-key lookup stays separate (`IDkimDnsClient`) because
+it genuinely is shaped differently — DKIM expects and requires exactly one record at a
+selector-specific name, while SPF and DMARC must each tolerate a domain publishing several
+unrelated TXT records and apply their own "exactly one matching record, or fail" rule to the list.
+
+### A9.4 — DMARC policy discovery falls back to the organizational domain once, not label by label
+
+RFC 7489 §6.6.3 says a Mail Receiver queries the exact `From:` domain first, and only if that
+domain publishes no usable record does it query the organizational domain instead. It does not
+describe walking every intermediate label between the two. `DmarcEvaluator.DiscoverPolicyAsync`
+implements exactly this: one query, and — only if that finds nothing and the `From:` domain is
+not already its own organizational domain — exactly one more. When the record is found only at
+the organizational-domain fallback, `sp=` governs rather than `p=` (falling back to `p=` if `sp=`
+is itself absent), which `DmarcRecord.SubdomainPolicy` already encodes as a property rather than
+a decision `DmarcEvaluator` has to make twice.
+
+### A9.5 — ARC is groundwork only, and a security test — not a comment — enforces the boundary
+
+RFC 8617 chain validation (verifying an `ARC-Seal`'s signature back through every prior instance)
+is out of scope for this milestone; only structural parsing and grouping is built
+(`ArcChain.Parse`). The risk with "groundwork only" scope decisions is that a future change adds
+real trust-taking logic incrementally, in a different file, without anyone deciding that on
+purpose. `NoUntrustedAuthenticationHeaderTrustTests` makes this a build-breaking assertion rather
+than a comment: it scans every production source file for the four untrusted header-name
+literals (only `ArcChain.cs` may reference them) and, tree-wide, for the `ArcChain`/`ArcSet` type
+names themselves (only `ArcChain.cs` may reference those either) — so a hypothetical bridge file
+that read an ARC chain's claims into a pass/fail decision would fail this test regardless of what
+it was called or which file it lived in, not just the three evaluators named explicitly.
+
+### A9.6 — `p=reject` deletes stored content rather than leaving it orphaned; `p=quarantine` changes nothing about where mail lands
+
+A message DMARC rejects is never delivered to a mailbox or queued for relay, so by the time
+`LocalDeliveryService` decides to reject, the content file committed at the start of
+`DeliverAsync` (§8's store-then-commit ordering) has already been written for a message about to
+be refused. Leaving it in place indefinitely is an unbounded disk-growth vector under repeated
+probing from a domain publishing `p=reject` — an adversarial review of this milestone (A9.7)
+found exactly this. `IDeliveryRepository.MarkContentRemovedAsync` and a call to
+`IMessageStore.DeleteAsync` on the reject path close it; the `Messages` row itself is kept, since
+`DmarcVerificationRecord`'s foreign key names it and an operator's record of what was rejected
+should outlive the bytes that were.
+
+`p=quarantine` is evaluated and recorded identically — `DmarcVerificationRecord.Disposition` is
+set the same way — but nothing routes the message anywhere different; it is delivered normally.
+Recording without enforcing every disposition is a deliberate, minimal first cut, not an
+oversight: only `p=reject`'s disposition currently has anywhere else for a message to go (refused
+outright); `p=quarantine`'s "goes to spam" has no destination yet, since there is no
+per-mailbox spam/junk folder concept built to route it into.
+
+### A9.7 — An adversarial review of this milestone's full diff found five real issues before this addendum was written
+
+Five independent reviews (DKIM, SPF, DMARC/PSL, DMARC persistence and enforcement wiring, ARC and
+the trust-boundary test) were run against the complete Milestone 9 diff before writing this
+addendum, specifically to check the claims above rather than merely assert them. They found:
+
+| Issue | Where | Consequence before the fix |
+|---|---|---|
+| A crafted `t=`/`x=` DKIM tag outside `DateTimeOffset`'s representable range threw uncaught | `DkimSignatureTags.ParseUnixSeconds` | One malformed signature crashed verification of the entire message, not just that signature |
+| A `From:` header naming more than one mailbox was resolved to whichever address a bracket-matching heuristic picked last, with no ambiguity check | `FromHeaderDomain.TryExtract` | An attacker could pass DMARC against their own domain while a client displayed a different, spoofed address in the same header — found independently by two of the five reviews |
+| The organizational-domain algorithm let a longer non-exception rule win over a shorter exception rule at a different label count | `PublicSuffixList.CountPublicSuffixLabels` | Not yet exploitable against the embedded snapshot, but contrary to the published algorithm and capable of silently misaligning a future PSL update |
+| SPF's `v=spf1` version-literal match was case-sensitive | `SpfRecord.TryParse`, `SpfEvaluator.IsSpfRecord` | RFC 7208's ABNF spells it as a case-insensitive quoted string (RFC 5234 §2.3); a domain publishing `V=SPF1` would be silently treated as having no SPF record at all |
+| A DMARC-rejected message's content and database row were never cleaned up | `LocalDeliveryService.DeliverAsync` | See A9.6 |
+
+All five are fixed and covered by new regression tests (`DkimSignatureTagsTests`,
+`FromHeaderDomainTests`, `PublicSuffixListTests`, `SpfRecordTests`/`SpfEvaluatorTests`,
+`LocalDeliveryDmarcVerificationTests`) rather than merely patched. Two lower-severity findings
+were left as documented, safe-direction gaps rather than fixed: `DkimSelector` rejects the
+(RFC-legal but vanishingly rare) dotted selector form, which fails closed — a receiver only ever
+under-verifies, never over-verifies — and the untrusted-header security test's per-line comment
+detection treats any line starting with `*` as a comment, which could hide a genuine violation
+in `unsafe` pointer-dereference code; this codebase contains no `unsafe` code anywhere, so the
+gap is currently inert.
+
 ---
 
-*Document version 1.7 — baseline for Milestone 1, with the Milestone 2–8 addenda.*
+*Document version 1.8 — baseline for Milestone 1, with the Milestone 2–9 addenda.*
