@@ -83,6 +83,18 @@ public class DkimBodyCanonicalizerTests
         AssertCanonicalizesTo("Content\r\n" + manyBlankLines, "Content\r\n");
     }
 
+    /// <summary>
+    /// RFC 6376 §3.4.5 "Canonicalization Examples", Example 1's body, canonicalized with the
+    /// "relaxed" algorithm - the official vector, not just this suite's own expectations. A
+    /// leading space is preserved (only trailing whitespace and internal runs are affected), an
+    /// internal SP-HTAB-SP run collapses to one space, and the two trailing blank lines vanish.
+    /// </summary>
+    [Fact]
+    public void Matches_rfc_6376_section_3_4_5_example_1_body()
+    {
+        AssertCanonicalizesTo(" C \r\nD \t E\r\n\r\n\r\n", " C\r\nD E\r\n");
+    }
+
     [Fact]
     public void Feeding_the_whole_input_in_one_call_matches_feeding_it_byte_by_byte()
     {

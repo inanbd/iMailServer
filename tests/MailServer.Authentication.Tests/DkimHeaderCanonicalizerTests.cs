@@ -61,4 +61,26 @@ public class DkimHeaderCanonicalizerTests
     {
         Canonicalize("X-Empty:").ShouldBe("x-empty:\r\n");
     }
+
+    /// <summary>
+    /// RFC 6376 §3.4.5 "Canonicalization Examples", Example 1's first header field, canonicalized
+    /// with the "relaxed" algorithm - the official vector, not just this suite's own expectations.
+    /// </summary>
+    [Fact]
+    public void Matches_rfc_6376_section_3_4_5_example_1_first_header_field()
+    {
+        Canonicalize("A: X").ShouldBe("a:X\r\n");
+    }
+
+    /// <summary>
+    /// RFC 6376 §3.4.5 Example 1's second header field: folded across two physical lines, with a
+    /// trailing HTAB before the fold and a leading HTAB plus a doubled trailing SP on the
+    /// continuation - the exact case relaxed canonicalization's whitespace-run collapsing exists
+    /// for.
+    /// </summary>
+    [Fact]
+    public void Matches_rfc_6376_section_3_4_5_example_1_second_header_field()
+    {
+        Canonicalize("B : Y\t\r\n\tZ  ").ShouldBe("b:Y Z\r\n");
+    }
 }
