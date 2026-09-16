@@ -21,6 +21,7 @@ using MailServer.Infrastructure.Dns;
 using MailServer.Infrastructure.Monitoring;
 using MailServer.Infrastructure.Smtp.Outbound;
 using MailServer.Infrastructure.Persistence;
+using MailServer.Infrastructure.Spf;
 using MailServer.Infrastructure.Persistence.Queries;
 using MailServer.Infrastructure.Persistence.Repositories;
 using MailServer.Infrastructure.Platform;
@@ -239,6 +240,11 @@ public static class DependencyInjection
         // same ILookupClient singleton, so no reason to rebuild it per scope.
         services.TryAddSingleton<IDkimDnsClient, LookupClientDkimAdapter>();
         services.TryAddSingleton<IDkimPublicKeyResolver, DnsDkimPublicKeyResolver>();
+
+        // ---- SPF (Milestone 9) --------------------------------------------------------------
+        services.TryAddSingleton<ISpfDnsClient, LookupClientSpfAdapter>();
+        services.TryAddSingleton<ISpfTxtResolver, DnsSpfTxtResolver>();
+        services.TryAddScoped<SpfEvaluator>();
 
         return services;
     }
