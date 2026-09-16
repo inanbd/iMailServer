@@ -79,3 +79,20 @@ public enum DkimVerificationResult
     /// </summary>
     PermError = 4,
 }
+
+/// <summary>
+/// One side (header or body) of a DKIM signature's <c>c=</c> canonicalization tag.
+/// RFC 6376 §3.4.
+/// </summary>
+/// <remarks>
+/// This product only ever signs with <see cref="Relaxed"/> on both sides — see
+/// <c>docs/DKIM.md</c>. <see cref="Simple"/> is modelled anyway because a signature this server
+/// did not produce (mail it is verifying) can legitimately declare it, and the tag must parse
+/// rather than fail closed on an otherwise well-formed signature this product simply does not
+/// implement verification for.
+/// </remarks>
+public enum DkimCanonicalizationMode
+{
+    Simple = 0,
+    Relaxed = 1,
+}
