@@ -263,6 +263,18 @@ internal sealed class DeliveryRepository(
         }, cancellationToken);
     }
 
+    public Task MarkContentRemovedAsync(StoredMessageId messageId, DateTimeOffset removedUtc, CancellationToken cancellationToken) =>
+        ExecuteAsync(async (session, ct) =>
+        {
+            await session.Connection.ExecuteAsync(Command(
+                session,
+                "UPDATE Messages SET ContentRemovedUtc = @RemovedUtc WHERE Id = @Id",
+                new { Id = messageId.Value, RemovedUtc = removedUtc },
+                ct)).ConfigureAwait(false);
+
+            return true;
+        }, cancellationToken);
+
     public Task AddDmarcVerificationAsync(DmarcVerificationRecord record, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(record);

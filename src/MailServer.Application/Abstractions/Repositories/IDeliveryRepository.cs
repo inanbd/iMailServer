@@ -67,4 +67,18 @@ public interface IDeliveryRepository
     /// message.
     /// </summary>
     Task AddDmarcVerificationAsync(DmarcVerificationRecord record, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Records that a message's stored content has been deleted, without touching any other
+    /// column.
+    /// </summary>
+    /// <remarks>
+    /// Called for a message a DMARC <c>p=reject</c> policy refused outright: it was never
+    /// delivered to a mailbox or queued for relay, so keeping its content on disk indefinitely
+    /// serves no purpose and is an unbounded disk-growth vector under repeated probing from a
+    /// domain with a reject policy. The <c>Messages</c> row itself is kept — it is what
+    /// <see cref="DmarcVerificationRecord"/>'s foreign key names, and an operator's record of
+    /// "this was rejected and why" should outlive the bytes that were rejected.
+    /// </remarks>
+    Task MarkContentRemovedAsync(StoredMessageId messageId, DateTimeOffset removedUtc, CancellationToken cancellationToken);
 }

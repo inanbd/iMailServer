@@ -81,6 +81,30 @@ public class PublicSuffixListTests
         List.GetOrganizationalDomain(DomainName.Parse("www.bl.uk")).Value.ShouldBe("bl.uk");
     }
 
+    /// <summary>
+    /// An exception rule prevails over a non-exception rule regardless of length - not merely
+    /// over a shorter or equal-length one. publicsuffix.org's algorithm gives an exception match
+    /// absolute priority; the longest-match rule applies only among non-exception matches.
+    /// </summary>
+    [Fact]
+    public void An_exception_rule_prevails_even_over_a_longer_non_exception_match()
+    {
+        // "a.foo.example.com" is itself a longer (4-label) plain rule than the 3-label exception
+        // "!foo.example.com" - a naive "check each window length top-down, stop at the first
+        // match of any kind" algorithm hits the 4-label plain rule first and returns "a.foo.
+        // example.com" unchanged, never reaching the 3-label window where the exception applies.
+        // The exception must still prevail: it says "foo.example.com" is not itself a public
+        // suffix (example.com is), so anything below "foo.example.com" organizes under it.
+        PublicSuffixList list = PublicSuffixList.Parse("""
+            example.com
+            a.foo.example.com
+            !foo.example.com
+            """);
+
+        list.GetOrganizationalDomain(DomainName.Parse("a.foo.example.com")).Value.ShouldBe("foo.example.com");
+        list.GetOrganizationalDomain(DomainName.Parse("b.a.foo.example.com")).Value.ShouldBe("foo.example.com");
+    }
+
     [Fact]
     public void Exception_rule_under_a_single_label_wildcard_shortens_by_one_label()
     {

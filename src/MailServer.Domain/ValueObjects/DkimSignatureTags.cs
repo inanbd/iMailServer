@@ -417,10 +417,29 @@ public sealed class DkimSignatureTags
         return true;
     }
 
-    private static DateTimeOffset? ParseUnixSeconds(Dictionary<string, string> tags, string tagName) =>
-        tags.TryGetValue(tagName, out string? raw) && long.TryParse(raw, out long seconds)
-            ? DateTimeOffset.FromUnixTimeSeconds(seconds)
-            : null;
+    /// <summary>
+    /// Parses a <c>t=</c>/<c>x=</c> Unix-seconds tag, tolerating a value so large it cannot name
+    /// any real <see cref="DateTimeOffset"/> - a signature is signed data from an unauthenticated
+    /// sender at this point in parsing, and a single malformed timestamp must fail only this one
+    /// tag, not throw out of <see cref="TryParse"/> and abort verifying the message's other
+    /// signatures along with it.
+    /// </summary>
+    private static DateTimeOffset? ParseUnixSeconds(Dictionary<string, string> tags, string tagName)
+    {
+        if (!tags.TryGetValue(tagName, out string? raw) || !long.TryParse(raw, out long seconds))
+        {
+            return null;
+        }
+
+        try
+        {
+            return DateTimeOffset.FromUnixTimeSeconds(seconds);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return null;
+        }
+    }
 
     private static string StripWhitespace(string value)
     {

@@ -95,7 +95,10 @@ public sealed class SpfRecord
 
         string[] terms = recordText.Split(' ', StringSplitOptions.RemoveEmptyEntries);
 
-        if (terms.Length == 0 || !string.Equals(terms[0], "v=spf1", StringComparison.Ordinal))
+        // RFC 7208 section 4.5's ABNF (`version = "v=spf1"`) is a plain quoted string, which RFC
+        // 5234 section 2.3 makes case-insensitive absent an explicit %s prefix - a domain
+        // publishing "V=SPF1" is exactly as valid as one publishing "v=spf1".
+        if (terms.Length == 0 || !string.Equals(terms[0], "v=spf1", StringComparison.OrdinalIgnoreCase))
         {
             error = "the record does not begin with the exact term 'v=spf1'.";
             return false;

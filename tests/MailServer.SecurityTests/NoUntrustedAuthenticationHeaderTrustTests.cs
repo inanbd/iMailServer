@@ -95,11 +95,30 @@ public sealed class NoUntrustedAuthenticationHeaderTrustTests
     }
 
     /// <summary>
+    /// Only <c>ArcChain.cs</c> may reference its own types (<c>ArcChain</c>, <c>ArcSet</c>) at
+    /// all — not just the three named decision-making evaluators below. A hypothetical bridge
+    /// file that reads <c>ArcSet.AuthenticationResults.ResultsText</c> and string-searches it for
+    /// a result token would reference none of the four header-name literals, so this check —
+    /// scanning every production file for the type names themselves, not just the header text —
+    /// is what would catch it regardless of which file it lived in or what it was called.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ProductionSourceFiles))]
+    public void Only_the_arc_groundwork_parser_references_its_own_types(string file)
+    {
+        // ArcEnums.cs is allowed too: it defines the unrelated ArcChainValidation enum, whose
+        // name merely shares "ArcChain" as a prefix - it never references the ArcChain/ArcSet
+        // types themselves.
+        AssertNoNonCommentReference(file, "ArcChain", ArcParserFileName, "ArcEnums.cs");
+        AssertNoNonCommentReference(file, "ArcSet", ArcParserFileName, "ArcEnums.cs");
+    }
+
+    /// <summary>
     /// The decision-making evaluators, named explicitly: none may reference any of the four
-    /// untrusted header names, and none may reference the ARC groundwork parser's own types
-    /// (<c>ArcChain</c>, <c>ArcSet</c>) — DMARC alignment must be computed only from this
-    /// server's own SPF outcome and DKIM verification, never from an ARC chain's unverified
-    /// claims about either.
+    /// untrusted header names. (A reference to the ARC groundwork parser's own types -
+    /// <c>ArcChain</c>, <c>ArcSet</c> - is checked tree-wide by
+    /// <see cref="Only_the_arc_groundwork_parser_references_its_own_types"/>, which already
+    /// covers these three files along with every other one.)
     /// </summary>
     [Fact]
     public void No_spf_dkim_or_dmarc_evaluator_references_arc_or_authentication_results_at_all()
@@ -115,15 +134,17 @@ public sealed class NoUntrustedAuthenticationHeaderTrustTests
             {
                 AssertNoNonCommentReference(file, headerName, allowedFileName: null);
             }
-
-            AssertNoNonCommentReference(file, "ArcChain", allowedFileName: null);
-            AssertNoNonCommentReference(file, "ArcSet", allowedFileName: null);
         }
     }
 
-    private static void AssertNoNonCommentReference(string file, string needle, string? allowedFileName)
+    private static void AssertNoNonCommentReference(string file, string needle, string? allowedFileName) =>
+        AssertNoNonCommentReference(file, needle, allowedFileNames: allowedFileName is null ? [] : [allowedFileName]);
+
+    private static void AssertNoNonCommentReference(string file, string needle, params string[] allowedFileNames)
     {
-        if (allowedFileName is not null && string.Equals(Path.GetFileName(file), allowedFileName, StringComparison.Ordinal))
+        string fileName = Path.GetFileName(file);
+
+        if (allowedFileNames.Any(allowed => string.Equals(fileName, allowed, StringComparison.Ordinal)))
         {
             return;
         }
@@ -141,9 +162,12 @@ public sealed class NoUntrustedAuthenticationHeaderTrustTests
                 continue;
             }
 
+            // Case-insensitive: RawMessageHeaders.GetAll matches header names
+            // OrdinalIgnoreCase, so a literal spelled "authentication-results" or "arc-seal"
+            // would read the exact same header at runtime and must be caught just the same.
             trimmed.ShouldNotContain(
                 needle,
-                Case.Sensitive,
+                Case.Insensitive,
                 $"{Path.GetFileName(file)} references '{needle}' outside a comment. This server's " +
                 "own SPF/DKIM/DMARC verdicts must never be computed from a pre-existing header " +
                 "read off the wire — docs/DMARC.md's \"Inbound handling\" section explains why. " +

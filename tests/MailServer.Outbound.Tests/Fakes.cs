@@ -294,6 +294,9 @@ internal sealed class FakeDeliveryRepository : IDeliveryRepository
 
     public Task AddDmarcVerificationAsync(DmarcVerificationRecord record, CancellationToken cancellationToken) =>
         Task.CompletedTask;
+
+    public Task MarkContentRemovedAsync(StoredMessageId messageId, DateTimeOffset removedUtc, CancellationToken cancellationToken) =>
+        Task.CompletedTask;
 }
 
 /// <summary>

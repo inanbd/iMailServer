@@ -165,6 +165,25 @@ public sealed class LocalDeliveryDmarcVerificationTests : IAsyncLifetime
     private static byte[] Message(string fromAddress) => Encoding.ASCII.GetBytes(
         $"From: {fromAddress}\r\nTo: bob@destination.example\r\nSubject: Hi\r\n\r\nHello.\r\n");
 
+    private async Task<DateTimeOffset?> QueryContentRemovedUtcAsync(StoredMessageId messageId)
+    {
+        await using AsyncServiceScope scope = _services.CreateAsyncScope();
+        IDbConnectionFactory connectionFactory = scope.ServiceProvider.GetRequiredService<IDbConnectionFactory>();
+
+        await using System.Data.Common.DbConnection connection =
+            await connectionFactory.OpenConnectionAsync(CancellationToken.None);
+
+        return await Dapper.SqlMapper.QuerySingleAsync<DateTimeOffset?>(
+            connection, "SELECT ContentRemovedUtc FROM Messages WHERE Id = @Id", new { Id = messageId.Value });
+    }
+
+    private async Task<bool> ContentExistsAsync(StoredMessageId messageId)
+    {
+        await using AsyncServiceScope scope = _services.CreateAsyncScope();
+        IMessageStore store = scope.ServiceProvider.GetRequiredService<IMessageStore>();
+        return await store.ExistsAsync(messageId, CancellationToken.None);
+    }
+
     [Fact]
     public async Task A_message_failing_alignment_under_p_reject_is_rejected_and_delivers_to_nobody()
     {
@@ -184,6 +203,11 @@ public sealed class LocalDeliveryDmarcVerificationTests : IAsyncLifetime
         dbResult.ShouldBe((int)DmarcResult.Fail);
         disposition.ShouldBe((int)DmarcPolicy.Reject);
         policyDomain.ShouldBe("example.com");
+
+        // A rejected message is never delivered anywhere, so its content is removed rather than
+        // retained forever - see IDeliveryRepository.MarkContentRemovedAsync's own remarks.
+        (await ContentExistsAsync(messageId)).ShouldBeFalse();
+        (await QueryContentRemovedUtcAsync(messageId)).ShouldNotBeNull();
     }
 
     [Fact]

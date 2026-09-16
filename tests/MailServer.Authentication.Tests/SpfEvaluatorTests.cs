@@ -45,6 +45,18 @@ public sealed class SpfEvaluatorTests
     }
 
     [Fact]
+    public async Task An_uppercase_version_literal_is_still_recognised_as_an_spf_record()
+    {
+        var txt = new FakeSpfTxtResolver();
+        txt.SetRecord("example.com", "V=SPF1 ip4:203.0.113.0/24 -all");
+
+        SpfEvaluationResult result = await CreateEvaluator(txt, new FakeDnsResolver())
+            .EvaluateAsync(Domain("example.com"), Ip("203.0.113.10"), CancellationToken.None);
+
+        result.Result.ShouldBe(SpfResult.Pass);
+    }
+
+    [Fact]
     public async Task An_ip4_mechanism_not_matching_falls_through_to_the_default_qualifier()
     {
         var txt = new FakeSpfTxtResolver();

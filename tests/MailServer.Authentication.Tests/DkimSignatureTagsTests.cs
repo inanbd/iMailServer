@@ -125,4 +125,23 @@ public class DkimSignatureTagsTests
         parsed.ShouldBeNull();
         error.ShouldNotBeNull();
     }
+
+    /// <summary>
+    /// A crafted <c>t=</c>/<c>x=</c> so large it names no real <see cref="DateTimeOffset"/> must
+    /// not throw out of <see cref="DkimSignatureTags.TryParse"/> - a single malformed signature
+    /// on an inbound message must fail only that signature, never crash verification of the
+    /// whole message.
+    /// </summary>
+    [Theory]
+    [InlineData("v=1; a=rsa-sha256; c=relaxed/relaxed; d=example.com; s=mail; h=from; bh=YWJj; b=c2ln; t=99999999999999")]
+    [InlineData("v=1; a=rsa-sha256; c=relaxed/relaxed; d=example.com; s=mail; h=from; bh=YWJj; b=c2ln; x=99999999999999")]
+    [InlineData("v=1; a=rsa-sha256; c=relaxed/relaxed; d=example.com; s=mail; h=from; bh=YWJj; b=c2ln; t=-99999999999999")]
+    public void TryParse_tolerates_an_out_of_range_timestamp_instead_of_throwing(string value)
+    {
+        bool ok = DkimSignatureTags.TryParse(value, out DkimSignatureTags? parsed, out string? error);
+
+        ok.ShouldBeTrue(error);
+        parsed!.SignedAtUtc.ShouldBeNull();
+        parsed.ExpiresUtc.ShouldBeNull();
+    }
 }

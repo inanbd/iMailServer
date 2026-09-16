@@ -12,6 +12,18 @@ public class SpfRecordTests
         error.ShouldNotBeNull();
     }
 
+    [Theory]
+    [InlineData("V=SPF1 -all")]
+    [InlineData("v=SPF1 -all")]
+    [InlineData("V=spf1 -all")]
+    public void Accepts_the_version_literal_case_insensitively(string record)
+    {
+        // RFC 7208 section 4.5's ABNF spells "v=spf1" as a plain quoted string, which RFC 5234
+        // section 2.3 makes case-insensitive absent an explicit %s prefix.
+        SpfRecord.TryParse(record, out SpfRecord? parsed, out string? error).ShouldBeTrue(error);
+        parsed!.Directives.Count.ShouldBe(1);
+    }
+
     [Fact]
     public void Parses_a_bare_all_mechanism_with_default_pass_qualifier()
     {

@@ -140,11 +140,20 @@ public sealed class PublicSuffixList
         return DomainName.Parse(organizational);
     }
 
-    /// <summary>The standard PSL matching algorithm: longest matching rule wins, an exception overrides its own wildcard.</summary>
+    /// <summary>
+    /// The standard PSL matching algorithm: an exception rule always prevails over a
+    /// non-exception rule, at whatever length it matches - never merely the longest exception
+    /// match competing against a longer plain/wildcard one. Only when no exception matches
+    /// anywhere does the longest plain/wildcard match win.
+    /// </summary>
     private int CountPublicSuffixLabels(string[] labels)
     {
         int n = labels.Length;
 
+        // Pass 1: any exception match, at any length, prevails outright over every non-exception
+        // rule - including one that would otherwise match a longer window. publicsuffix.org's
+        // own algorithm is explicit that "an exception rule takes priority over any other
+        // matching rule," not merely the longest one.
         for (int windowLength = n; windowLength >= 1; windowLength--)
         {
             string candidate = string.Join('.', labels[(n - windowLength)..]);
@@ -156,6 +165,12 @@ public sealed class PublicSuffixList
                 // otherwise imply, so the actual public suffix is one label shorter.
                 return windowLength - 1;
             }
+        }
+
+        // Pass 2: no exception matched anywhere - the longest plain/wildcard match wins.
+        for (int windowLength = n; windowLength >= 1; windowLength--)
+        {
+            string candidate = string.Join('.', labels[(n - windowLength)..]);
 
             if (_plainRules.Contains(candidate))
             {
@@ -192,13 +207,10 @@ public sealed class PublicSuffixList
 
         // The list mixes ASCII/punycode and Unicode forms for internationalised TLDs; domains
         // this product compares against are always in DomainName's ASCII form, so every rule is
-        // normalised to match at load time rather than at every lookup.
-        if (IsAscii(trimmed))
-        {
-            normalized = trimmed.ToLowerInvariant();
-            return true;
-        }
-
+        // normalised to match at load time rather than at every lookup. GetAscii is the
+        // validating direction (DomainName.Parse's own remark) - run unconditionally, even for
+        // an already-ASCII line, rather than only for a Unicode one, so an already-ASCII rule is
+        // still validated rather than merely passed through.
         try
         {
             normalized = Idn.GetAscii(trimmed).ToLowerInvariant();
@@ -209,19 +221,6 @@ public sealed class PublicSuffixList
             normalized = string.Empty;
             return false;
         }
-    }
-
-    private static bool IsAscii(string value)
-    {
-        foreach (char c in value)
-        {
-            if (c > 127)
-            {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     /// <summary>Parses <c>// VERSION: 2026-09-15_10-18-26_UTC</c> into a timestamp.</summary>

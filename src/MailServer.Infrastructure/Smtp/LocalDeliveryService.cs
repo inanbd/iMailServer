@@ -90,6 +90,8 @@ public sealed class LocalDeliveryService(
                     "Message {MessageId} rejected: DMARC policy published at {PolicyDomain} requests reject for From: domain {FromDomain}.",
                     request.Message.Id.Value, dmarcOutcome.PolicyDomain!.Value, dmarcOutcome.FromDomain!.Value);
 
+                await RemoveRejectedContentAsync(request.Message.Id, now, cancellationToken).ConfigureAwait(false);
+
                 return new DeliveryResult(
                     request.Message.Id,
                     [],
@@ -288,6 +290,32 @@ public sealed class LocalDeliveryService(
             .ConfigureAwait(false);
 
         return true;
+    }
+
+    /// <summary>
+    /// Deletes a DMARC-rejected message's stored content and records that removal.
+    /// </summary>
+    /// <remarks>
+    /// A message refused by <c>p=reject</c> is never delivered to a mailbox or queued for relay,
+    /// so its content serves no further purpose - keeping it indefinitely would be an unbounded
+    /// disk-growth vector under repeated probing from a domain publishing a reject policy. The
+    /// <c>Messages</c> row itself is kept, since <see cref="DmarcVerificationRecord"/>'s foreign
+    /// key names it and an operator's record of what was rejected should outlive the bytes that
+    /// were. Never throws: a cleanup failure must not turn a successful rejection into a delivery
+    /// error, and a message a sweep fails to clean up today is exactly what a future housekeeping
+    /// pass exists to catch.
+    /// </remarks>
+    private async Task RemoveRejectedContentAsync(StoredMessageId messageId, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await messageStore.DeleteAsync(messageId, cancellationToken).ConfigureAwait(false);
+            await deliveries.MarkContentRemovedAsync(messageId, now, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Failed to remove stored content for DMARC-rejected message {MessageId}.", messageId.Value);
+        }
     }
 
     /// <summary>

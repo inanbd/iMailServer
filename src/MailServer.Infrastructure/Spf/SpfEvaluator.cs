@@ -497,8 +497,11 @@ public sealed class SpfEvaluator(ITxtRecordResolver txtResolver, IDnsResolver dn
         return true;
     }
 
+    // RFC 7208 section 4.5's version literal is a plain ABNF quoted string, hence
+    // case-insensitive by RFC 5234 section 2.3 - see SpfRecord.TryParse's matching fix.
     private static bool IsSpfRecord(string text) =>
-        text == "v=spf1" || text.StartsWith("v=spf1 ", StringComparison.Ordinal);
+        text.Equals("v=spf1", StringComparison.OrdinalIgnoreCase) ||
+        text.StartsWith("v=spf1 ", StringComparison.OrdinalIgnoreCase);
 
     private static SpfResult QualifierToResult(SpfQualifier qualifier) => qualifier switch
     {
