@@ -47,6 +47,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MailServer.Outbound.Tests",
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MailServer.Authentication.Tests", "tests\MailServer.Authentication.Tests\MailServer.Authentication.Tests.csproj", "{2162B8E0-BA07-4377-A384-2FFF2B3FBC39}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MailServer.Imap.Tests", "tests\MailServer.Imap.Tests\MailServer.Imap.Tests.csproj", "{90420DDE-3766-4F1E-90AC-7BEFEFC0B365}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -297,6 +299,18 @@ Global
 		{2162B8E0-BA07-4377-A384-2FFF2B3FBC39}.Release|x64.Build.0 = Release|Any CPU
 		{2162B8E0-BA07-4377-A384-2FFF2B3FBC39}.Release|x86.ActiveCfg = Release|Any CPU
 		{2162B8E0-BA07-4377-A384-2FFF2B3FBC39}.Release|x86.Build.0 = Release|Any CPU
+		{90420DDE-3766-4F1E-90AC-7BEFEFC0B365}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{90420DDE-3766-4F1E-90AC-7BEFEFC0B365}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{90420DDE-3766-4F1E-90AC-7BEFEFC0B365}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{90420DDE-3766-4F1E-90AC-7BEFEFC0B365}.Debug|x64.Build.0 = Debug|Any CPU
+		{90420DDE-3766-4F1E-90AC-7BEFEFC0B365}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{90420DDE-3766-4F1E-90AC-7BEFEFC0B365}.Debug|x86.Build.0 = Debug|Any CPU
+		{90420DDE-3766-4F1E-90AC-7BEFEFC0B365}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{90420DDE-3766-4F1E-90AC-7BEFEFC0B365}.Release|Any CPU.Build.0 = Release|Any CPU
+		{90420DDE-3766-4F1E-90AC-7BEFEFC0B365}.Release|x64.ActiveCfg = Release|Any CPU
+		{90420DDE-3766-4F1E-90AC-7BEFEFC0B365}.Release|x64.Build.0 = Release|Any CPU
+		{90420DDE-3766-4F1E-90AC-7BEFEFC0B365}.Release|x86.ActiveCfg = Release|Any CPU
+		{90420DDE-3766-4F1E-90AC-7BEFEFC0B365}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -322,5 +336,6 @@ Global
 		{973868A3-2AC3-4E2D-8B65-BDA971B5AB8C} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{1558E0B0-C3DA-4A3D-AEE2-48C3DE78F0EE} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{2162B8E0-BA07-4377-A384-2FFF2B3FBC39} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
+		{90420DDE-3766-4F1E-90AC-7BEFEFC0B365} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 	EndGlobalSection
 EndGlobal

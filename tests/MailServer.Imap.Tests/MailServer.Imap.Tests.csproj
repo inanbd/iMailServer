@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    IMAP protocol tests: command grammar, the session state machine, sequence-set parsing, and
+    (as the wire protocol itself lands) the listener at the socket level — the same split
+    MailServer.Smtp.Tests makes for SMTP.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>MailServer.Imap.Tests</RootNamespace>
+    <AssemblyName>MailServer.Imap.Tests</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MailServer.Domain\MailServer.Domain.csproj" />
+    <ProjectReference Include="..\..\src\MailServer.Application\MailServer.Application.csproj" />
+    <ProjectReference Include="..\..\src\MailServer.Infrastructure\MailServer.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\MailServer.Persistence.Sqlite\MailServer.Persistence.Sqlite.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Shouldly" />
+    <PackageReference Include="Microsoft.Extensions.Logging" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Using Include="Shouldly" />
+  </ItemGroup>
+
+</Project>

@@ -232,6 +232,7 @@ public sealed record Delivery
         MailboxId mailboxId,
         MailboxFolderId folderId,
         long uid,
+        MessageFlags flags,
         Guid? recipientId,
         DateTimeOffset internalDate)
     {
@@ -240,6 +241,7 @@ public sealed record Delivery
         MailboxId = mailboxId;
         FolderId = folderId;
         Uid = uid;
+        Flags = flags;
         RecipientId = recipientId;
         InternalDate = internalDate;
     }
@@ -265,6 +267,16 @@ public sealed record Delivery
     /// </remarks>
     public long Uid { get; }
 
+    /// <summary>
+    /// The IMAP flags currently set on this delivery — <c>\Seen</c>, <c>\Deleted</c>, and so on.
+    /// </summary>
+    /// <remarks>
+    /// Per-delivery, not per-message: the same message delivered to two mailboxes can be read in
+    /// one and unread in the other, because a flag describes what one recipient did with their
+    /// copy of the mail, not a property of the bytes themselves.
+    /// </remarks>
+    public MessageFlags Flags { get; private set; }
+
     /// <summary>The envelope recipient this came from, for tracing an expansion.</summary>
     public Guid? RecipientId { get; }
 
@@ -278,6 +290,7 @@ public sealed record Delivery
     public DateTimeOffset InternalDate { get; }
 
     /// <summary>Records a delivery.</summary>
+    /// <remarks>A new delivery is always unflagged — see <see cref="MessageFlags.Recent"/>'s own remarks.</remarks>
     public static Delivery Create(
         StoredMessageId messageId,
         MailboxId mailboxId,
@@ -290,8 +303,27 @@ public sealed record Delivery
         // confuse every client that spoke to it.
         ArgumentOutOfRangeException.ThrowIfLessThan(uid, 1);
 
-        return new Delivery(Guid.NewGuid(), messageId, mailboxId, folderId, uid, recipientId, internalDate);
+        return new Delivery(
+            Guid.NewGuid(), messageId, mailboxId, folderId, uid, MessageFlags.None, recipientId, internalDate);
     }
+
+    /// <summary>Replaces every flag at once — <c>STORE</c>'s plain <c>FLAGS</c> form.</summary>
+    public void SetFlags(MessageFlags flags) => Flags = WithoutRecent(flags);
+
+    /// <summary>Sets flags without disturbing others already set — <c>STORE</c>'s <c>+FLAGS</c> form.</summary>
+    public void AddFlags(MessageFlags flags) => Flags |= WithoutRecent(flags);
+
+    /// <summary>Clears flags without disturbing others still set — <c>STORE</c>'s <c>-FLAGS</c> form.</summary>
+    public void RemoveFlags(MessageFlags flags) => Flags &= ~flags;
+
+    /// <summary>
+    /// <c>\Recent</c> is never persisted, whatever a caller passes — see
+    /// <see cref="MessageFlags.Recent"/>'s own remarks on why this product does not implement it,
+    /// and RFC 3501 §2.3.2: a client is not even permitted to set it via <c>STORE</c> in the
+    /// first place, so silently accepting one here would not just be unimplemented, it would be
+    /// wrong.
+    /// </summary>
+    private static MessageFlags WithoutRecent(MessageFlags flags) => flags & ~MessageFlags.Recent;
 
     /// <summary>Rehydrates from storage.</summary>
     public static Delivery Rehydrate(
@@ -300,7 +332,8 @@ public sealed record Delivery
         MailboxId mailboxId,
         MailboxFolderId folderId,
         long uid,
+        MessageFlags flags,
         Guid? recipientId,
         DateTimeOffset internalDate) =>
-        new(id, messageId, mailboxId, folderId, uid, recipientId, internalDate);
+        new(id, messageId, mailboxId, folderId, uid, flags, recipientId, internalDate);
 }

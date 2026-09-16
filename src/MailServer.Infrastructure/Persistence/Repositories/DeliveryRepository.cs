@@ -182,7 +182,7 @@ internal sealed class DeliveryRepository(
                 INSERT INTO Deliveries
                     (Id, MessageId, MailboxId, FolderId, Uid, Flags, RecipientId, InternalDate, CreatedUtc)
                 VALUES
-                    (@Id, @MessageId, @MailboxId, @FolderId, @Uid, 0, @RecipientId, @InternalDate, @CreatedUtc)
+                    (@Id, @MessageId, @MailboxId, @FolderId, @Uid, @Flags, @RecipientId, @InternalDate, @CreatedUtc)
                 """,
                 new
                 {
@@ -191,6 +191,7 @@ internal sealed class DeliveryRepository(
                     MailboxId = delivery.MailboxId.Value,
                     FolderId = delivery.FolderId.Value,
                     delivery.Uid,
+                    Flags = (int)delivery.Flags,
                     delivery.RecipientId,
                     delivery.InternalDate,
                     CreatedUtc = delivery.InternalDate,
