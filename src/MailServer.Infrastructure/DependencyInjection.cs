@@ -249,6 +249,8 @@ public static class DependencyInjection
 
         // ---- DMARC (Milestone 9) ------------------------------------------------------------
         services.TryAddSingleton<PublicSuffixListLoader>();
+        services.TryAddSingleton<IPublicSuffixListProvider>(sp => sp.GetRequiredService<PublicSuffixListLoader>());
+        services.TryAddScoped<DmarcEvaluator>();
 
         return services;
     }

@@ -6,6 +6,18 @@ using Microsoft.Extensions.Logging;
 namespace MailServer.Infrastructure.Dmarc;
 
 /// <summary>
+/// Supplies the parsed Public Suffix List that DMARC alignment computes organizational domains
+/// from. A separate interface from the concrete <see cref="PublicSuffixListLoader"/> for the same
+/// reason every other DNS/lookup dependency in this evaluator's neighborhood is one - so a test
+/// can supply a small, deterministic list instead of the real multi-thousand-rule snapshot.
+/// </summary>
+public interface IPublicSuffixListProvider
+{
+    /// <summary>The parsed list, loaded and validated once per process.</summary>
+    PublicSuffixList List { get; }
+}
+
+/// <summary>
 /// Loads the Public Suffix List snapshot embedded in this assembly (<c>docs/DMARC.md</c>:
 /// "the list ships with the product") into a <see cref="Domain.ValueObjects.PublicSuffixList"/>.
 /// </summary>
@@ -14,7 +26,7 @@ namespace MailServer.Infrastructure.Dmarc;
 /// Loaded once and cached for the process lifetime — the embedded resource cannot change without
 /// a new build, so re-parsing it on every DMARC evaluation would be pure waste.
 /// </remarks>
-public sealed class PublicSuffixListLoader
+public sealed class PublicSuffixListLoader : IPublicSuffixListProvider
 {
     private const string ResourceName = "MailServer.Infrastructure.Dmarc.public_suffix_list.dat";
 
