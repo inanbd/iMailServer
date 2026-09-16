@@ -291,6 +291,9 @@ internal sealed class FakeDeliveryRepository : IDeliveryRepository
 
     public Task AddDkimVerificationAsync(DkimVerificationRecord record, CancellationToken cancellationToken) =>
         Task.CompletedTask;
+
+    public Task AddDmarcVerificationAsync(DmarcVerificationRecord record, CancellationToken cancellationToken) =>
+        Task.CompletedTask;
 }
 
 /// <summary>

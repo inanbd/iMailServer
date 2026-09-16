@@ -13,6 +13,10 @@ namespace MailServer.Application.Abstractions.Smtp;
 /// <param name="ListenerRole">Which listener took the message.</param>
 /// <param name="TlsActive">Whether the session was encrypted.</param>
 /// <param name="AuthenticatedAs">The authenticated mailbox, when there was one.</param>
+/// <param name="SpfOutcome">
+/// The session's recorded SPF result, when SPF was evaluated at <c>MAIL FROM</c> time — DMARC's
+/// own SPF alignment check needs it. Null for a Submission message, which never carries one.
+/// </param>
 public sealed record DeliveryRequest(
     StoredMessage Message,
     EmailAddress? ReversePath,
@@ -21,7 +25,8 @@ public sealed record DeliveryRequest(
     string? GreetedName,
     SmtpListenerRole ListenerRole,
     bool TlsActive,
-    EmailAddress? AuthenticatedAs);
+    EmailAddress? AuthenticatedAs,
+    SpfEvaluationOutcome? SpfOutcome = null);
 
 /// <summary>What happened to one envelope recipient.</summary>
 /// <param name="Address">The address the sender wrote.</param>
@@ -34,10 +39,24 @@ public sealed record RecipientOutcome(
     bool QueuedForRelay,
     string? Diagnostic = null);
 
+/// <summary>
+/// A message's DMARC policy requested outright rejection, and no recipient was delivered to or
+/// queued. RFC 7489's <c>p=reject</c>, after <c>pct=</c> sampling selected this message for
+/// enforcement.
+/// </summary>
+/// <param name="PolicyDomain">The domain the enforced DMARC policy was published at.</param>
+/// <param name="Diagnostic">Human-readable detail, for the SMTP reply and for logs.</param>
+public sealed record DmarcRejection(DomainName PolicyDomain, string Diagnostic);
+
 /// <summary>The result of delivering one message.</summary>
 /// <param name="MessageId">The stored message.</param>
-/// <param name="Outcomes">One entry per envelope recipient, in the order they were accepted.</param>
-public sealed record DeliveryResult(StoredMessageId MessageId, IReadOnlyList<RecipientOutcome> Outcomes)
+/// <param name="Outcomes">
+/// One entry per envelope recipient, in the order they were accepted. Empty when
+/// <paramref name="Rejection"/> is set — a DMARC-rejected message is delivered to nobody.
+/// </param>
+/// <param name="Rejection">Set when the message was refused outright; see <see cref="DmarcRejection"/>.</param>
+public sealed record DeliveryResult(
+    StoredMessageId MessageId, IReadOnlyList<RecipientOutcome> Outcomes, DmarcRejection? Rejection = null)
 {
     /// <summary>Total mailboxes the message reached.</summary>
     public int TotalDeliveries => Outcomes.Sum(o => o.MailboxesDelivered);

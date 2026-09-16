@@ -61,4 +61,10 @@ public interface IDeliveryRepository
     /// Called once per signature; a message with several signatures gets several rows.
     /// </summary>
     Task AddDkimVerificationAsync(DkimVerificationRecord record, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Records the outcome of evaluating DMARC alignment for a received message. Called once per
+    /// message.
+    /// </summary>
+    Task AddDmarcVerificationAsync(DmarcVerificationRecord record, CancellationToken cancellationToken);
 }

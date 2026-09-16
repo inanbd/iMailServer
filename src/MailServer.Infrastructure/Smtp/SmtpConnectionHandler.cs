@@ -486,11 +486,14 @@ public sealed class SmtpConnectionHandler(
             session.GreetedName,
             session.Role,
             session.IsTlsActive,
-            session.AuthenticatedMailbox);
+            session.AuthenticatedMailbox,
+            session.SpfOutcome);
+
+        DeliveryResult deliveryResult;
 
         try
         {
-            await delivery.DeliverAsync(request, shutdownToken).ConfigureAwait(false);
+            deliveryResult = await delivery.DeliverAsync(request, shutdownToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -505,6 +508,18 @@ public sealed class SmtpConnectionHandler(
             await WriteAsync(
                 stream,
                 SmtpReplies.LocalError("the message could not be delivered"),
+                CancellationToken.None).ConfigureAwait(false);
+
+            session.CompleteMessage();
+
+            return true;
+        }
+
+        if (deliveryResult.Rejection is { } rejection)
+        {
+            await WriteAsync(
+                stream,
+                SmtpReplies.DmarcRejected(rejection.Diagnostic),
                 CancellationToken.None).ConfigureAwait(false);
 
             session.CompleteMessage();

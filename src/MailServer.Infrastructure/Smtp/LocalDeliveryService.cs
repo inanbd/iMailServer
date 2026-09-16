@@ -9,6 +9,7 @@ using MailServer.Domain.Smtp;
 using MailServer.Domain.ValueObjects;
 using MailServer.Infrastructure.Configuration;
 using MailServer.Infrastructure.Dkim;
+using MailServer.Infrastructure.Dmarc;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -44,6 +45,7 @@ public sealed class LocalDeliveryService(
     IOutboundQueueRepository outboundQueue,
     IMessageStore messageStore,
     DkimMessageVerifier dkimVerifier,
+    DmarcEvaluator dmarcEvaluator,
     AliasExpansionPolicy expansionPolicy,
     IOptions<MailServerOptions> options,
     IClock clock,
@@ -74,12 +76,28 @@ public sealed class LocalDeliveryService(
 
         // SPF's premise - does the sending IP match the domain's published record - is
         // meaningless for an authenticated client's IP, which can legitimately be anywhere. DKIM
-        // has no such caveat, but is still scoped to InboundMta here to keep both mechanisms'
-        // wiring symmetric and because a Submission message is this server's own outbound
-        // signing's concern (OutboundSmtpClient), not something to re-verify on the way in.
+        // and DMARC have no such caveat, but are still scoped to InboundMta here to keep every
+        // mechanism's wiring symmetric and because a Submission message is this server's own
+        // outbound signing's concern (OutboundSmtpClient), not something to re-verify on the way in.
         if (request.ListenerRole == SmtpListenerRole.InboundMta)
         {
-            await VerifyDkimAsync(request.Message.Id, now, cancellationToken).ConfigureAwait(false);
+            DmarcEvaluationOutcome? dmarcOutcome = await VerifyAuthenticationAsync(
+                request.Message.Id, request.SpfOutcome, now, cancellationToken).ConfigureAwait(false);
+
+            if (dmarcOutcome is { Disposition: DmarcPolicy.Reject })
+            {
+                logger.LogInformation(
+                    "Message {MessageId} rejected: DMARC policy published at {PolicyDomain} requests reject for From: domain {FromDomain}.",
+                    request.Message.Id.Value, dmarcOutcome.PolicyDomain!.Value, dmarcOutcome.FromDomain!.Value);
+
+                return new DeliveryResult(
+                    request.Message.Id,
+                    [],
+                    new DmarcRejection(
+                        dmarcOutcome.PolicyDomain,
+                        $"it fails DMARC alignment against {dmarcOutcome.FromDomain.Value} " +
+                        $"(policy published at {dmarcOutcome.PolicyDomain.Value})"));
+            }
         }
 
         // The alias graph is read once per message rather than once per recipient. A message to
@@ -273,15 +291,19 @@ public sealed class LocalDeliveryService(
     }
 
     /// <summary>
-    /// Verifies every DKIM-Signature header on a message and records one row per signature.
+    /// Verifies every DKIM-Signature header on a message, evaluates DMARC alignment from those
+    /// results, and records one row per DKIM signature plus one DMARC row for the message.
     /// </summary>
     /// <remarks>
-    /// Never throws and never affects the delivery outcome: this milestone records DKIM's
-    /// verdict for a later DMARC step to act on, but does not itself reject or quarantine
-    /// anything, so a DKIM subsystem failure must not take delivery down with it.
+    /// <b>Fails open.</b> A subsystem failure (a malformed message this server could not even
+    /// locate headers for, an unexpected exception) is logged and treated as "DMARC does not
+    /// apply", never as a rejection — the one enforcement decision this step can make is a
+    /// positive one (a successfully evaluated <see cref="DmarcPolicy.Reject"/>), never a default.
+    /// Accepting a message a broken evaluator could not judge is safer than rejecting mail this
+    /// server never actually found to violate anything.
     /// </remarks>
-    private async Task VerifyDkimAsync(
-        StoredMessageId messageId, DateTimeOffset now, CancellationToken cancellationToken)
+    private async Task<DmarcEvaluationOutcome?> VerifyAuthenticationAsync(
+        StoredMessageId messageId, SpfEvaluationOutcome? spfOutcome, DateTimeOffset now, CancellationToken cancellationToken)
     {
         try
         {
@@ -294,21 +316,21 @@ public sealed class LocalDeliveryService(
             if (headers is null)
             {
                 logger.LogWarning(
-                    "Could not locate the header/body boundary for message {MessageId}; DKIM was not verified.",
+                    "Could not locate the header/body boundary for message {MessageId}; DKIM/DMARC were not verified.",
                     messageId.Value);
 
-                return;
+                return null;
             }
 
             content.Seek(headers.HeaderBlockLength, SeekOrigin.Begin);
 
-            IReadOnlyList<DkimVerifiedSignature> results = await dkimVerifier
+            IReadOnlyList<DkimVerifiedSignature> dkimResults = await dkimVerifier
                 .VerifyAsync(headers, content, cancellationToken)
                 .ConfigureAwait(false);
 
-            for (int i = 0; i < results.Count; i++)
+            for (int i = 0; i < dkimResults.Count; i++)
             {
-                DkimVerifiedSignature result = results[i];
+                DkimVerifiedSignature result = dkimResults[i];
 
                 DkimVerificationRecord verificationRecord = DkimVerificationRecord.Create(
                     messageId, i, result.Result, result.SigningDomain, result.Diagnostic, now);
@@ -316,10 +338,29 @@ public sealed class LocalDeliveryService(
                 await deliveries.AddDkimVerificationAsync(verificationRecord, cancellationToken)
                     .ConfigureAwait(false);
             }
+
+            DmarcEvaluationOutcome dmarcOutcome = await dmarcEvaluator
+                .EvaluateAsync(headers, spfOutcome, dkimResults, cancellationToken)
+                .ConfigureAwait(false);
+
+            DmarcVerificationRecord dmarcRecord = DmarcVerificationRecord.Create(
+                messageId,
+                dmarcOutcome.Result,
+                dmarcOutcome.Disposition,
+                dmarcOutcome.AlignedMechanisms,
+                dmarcOutcome.FromDomain,
+                dmarcOutcome.PolicyDomain,
+                dmarcOutcome.Diagnostic,
+                now);
+
+            await deliveries.AddDmarcVerificationAsync(dmarcRecord, cancellationToken).ConfigureAwait(false);
+
+            return dmarcOutcome;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogWarning(ex, "Failed to verify DKIM for message {MessageId}.", messageId.Value);
+            logger.LogWarning(ex, "Failed to verify DKIM/DMARC for message {MessageId}.", messageId.Value);
+            return null;
         }
     }
 }

@@ -236,6 +236,18 @@ public static class SmtpReplies
     public static SmtpReply SpfTemporaryError() =>
         new(451, "4.4.3", "Temporary error evaluating SPF for the sender's domain; please try again later");
 
+    /// <summary>
+    /// 550 5.7.1 — the message fails DMARC and its policy requests rejection.
+    /// </summary>
+    /// <remarks>
+    /// Sent after the message is fully received: DMARC alignment can only be computed once the
+    /// <c>From:</c> header and every signature are in hand, and RFC 5321 permits a permanent
+    /// failure on the final "." of DATA exactly as it does mid-transaction — nothing has been
+    /// "accepted" until this reply is sent, whatever this server did internally to get here.
+    /// </remarks>
+    public static SmtpReply DmarcRejected(string diagnostic) =>
+        new(550, "5.7.1", $"Message rejected: {diagnostic}");
+
     public static SmtpReply SyntaxError(string detail) => new(501, "5.5.4", detail);
 
     public static SmtpReply CommandNotRecognised(string command) =>

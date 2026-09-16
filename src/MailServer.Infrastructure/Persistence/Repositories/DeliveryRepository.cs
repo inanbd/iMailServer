@@ -262,4 +262,36 @@ internal sealed class DeliveryRepository(
             return true;
         }, cancellationToken);
     }
+
+    public Task AddDmarcVerificationAsync(DmarcVerificationRecord record, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+
+        return ExecuteAsync(async (session, ct) =>
+        {
+            await session.Connection.ExecuteAsync(Command(
+                session,
+                """
+                INSERT INTO DmarcVerificationResults
+                    (Id, MessageId, Result, Disposition, AlignedMechanisms, FromDomain, PolicyDomain, Diagnostic, CreatedUtc)
+                VALUES
+                    (@Id, @MessageId, @Result, @Disposition, @AlignedMechanisms, @FromDomain, @PolicyDomain, @Diagnostic, @CreatedUtc)
+                """,
+                new
+                {
+                    record.Id,
+                    MessageId = record.MessageId.Value,
+                    Result = (int?)record.Result,
+                    Disposition = (int)record.Disposition,
+                    AlignedMechanisms = (int)record.AlignedMechanisms,
+                    FromDomain = record.FromDomain?.Value,
+                    PolicyDomain = record.PolicyDomain?.Value,
+                    record.Diagnostic,
+                    record.CreatedUtc,
+                },
+                ct)).ConfigureAwait(false);
+
+            return true;
+        }, cancellationToken);
+    }
 }
