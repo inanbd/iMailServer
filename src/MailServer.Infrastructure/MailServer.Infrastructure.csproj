@@ -19,6 +19,18 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!--
+      A real Mozilla Public Suffix List snapshot (see https://publicsuffix.org/list/), embedded
+      rather than fetched live: DMARC's relaxed alignment needs the organizational domain, which
+      cannot be computed correctly without it (docs/DMARC.md). The file's own "// VERSION:"
+      comment records the snapshot date; PublicSuffixListLoader parses it so the snapshot's age
+      is a known fact, not an assumption. Refreshing this file from publicsuffix.org is an
+      operational task, not something this server does at runtime.
+    -->
+    <EmbeddedResource Include="Dmarc\public_suffix_list.dat" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Dapper" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" />

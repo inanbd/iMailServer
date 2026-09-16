@@ -17,6 +17,7 @@ using MailServer.Infrastructure.Acme;
 using MailServer.Infrastructure.Certificates;
 using MailServer.Infrastructure.Configuration;
 using MailServer.Infrastructure.Dkim;
+using MailServer.Infrastructure.Dmarc;
 using MailServer.Infrastructure.Dns;
 using MailServer.Infrastructure.Monitoring;
 using MailServer.Infrastructure.Smtp.Outbound;
@@ -245,6 +246,9 @@ public static class DependencyInjection
         services.TryAddSingleton<ITxtDnsClient, LookupClientTxtAdapter>();
         services.TryAddSingleton<ITxtRecordResolver, DnsTxtRecordResolver>();
         services.TryAddScoped<SpfEvaluator>();
+
+        // ---- DMARC (Milestone 9) ------------------------------------------------------------
+        services.TryAddSingleton<PublicSuffixListLoader>();
 
         return services;
     }
