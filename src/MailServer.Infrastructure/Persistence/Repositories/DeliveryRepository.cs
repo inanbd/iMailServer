@@ -232,4 +232,34 @@ internal sealed class DeliveryRepository(
                     row.CreatedUtc,
                     row.ModifiedUtc);
         }, cancellationToken);
+
+    public Task AddDkimVerificationAsync(DkimVerificationRecord record, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+
+        return ExecuteAsync(async (session, ct) =>
+        {
+            await session.Connection.ExecuteAsync(Command(
+                session,
+                """
+                INSERT INTO DkimVerificationResults
+                    (Id, MessageId, SignatureIndex, Result, SigningDomain, Diagnostic, CreatedUtc)
+                VALUES
+                    (@Id, @MessageId, @SignatureIndex, @Result, @SigningDomain, @Diagnostic, @CreatedUtc)
+                """,
+                new
+                {
+                    record.Id,
+                    MessageId = record.MessageId.Value,
+                    record.SignatureIndex,
+                    Result = (int)record.Result,
+                    SigningDomain = record.SigningDomain?.Value,
+                    record.Diagnostic,
+                    record.CreatedUtc,
+                },
+                ct)).ConfigureAwait(false);
+
+            return true;
+        }, cancellationToken);
+    }
 }

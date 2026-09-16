@@ -6,12 +6,17 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using MailServer.Application.Abstractions.Certificates;
 using MailServer.Application.Abstractions.Platform;
+using MailServer.Application.Abstractions.Repositories;
 using MailServer.Application.Abstractions.Smtp;
+using MailServer.Application.Abstractions.Time;
+using MailServer.Domain.Entities;
 using MailServer.Domain.Enums;
+using MailServer.Domain.Mail;
 using MailServer.Domain.Smtp;
 using MailServer.Domain.ValueObjects;
 using MailServer.Infrastructure.Certificates;
 using MailServer.Infrastructure.Configuration;
+using MailServer.Infrastructure.Dkim;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -49,6 +54,10 @@ internal sealed class OutboundSmtpClient(
     IServerIdentityProvider serverIdentity,
     IMessageStore messageStore,
     CertificateChainValidator chainValidator,
+    IDomainRepository domainRepository,
+    IDkimKeyRepository dkimKeyRepository,
+    DkimMessageSigner dkimSigner,
+    IClock clock,
     IOptions<MailServerOptions> options,
     ILogger<OutboundSmtpClient> logger) : IOutboundDeliveryClient
 {
@@ -192,7 +201,11 @@ internal sealed class OutboundSmtpClient(
                 return Classify(remoteAddress, activeTls, dataReply, "DATA");
             }
 
-            await StreamMessageBodyAsync(stream, request.MessageId, cancellationToken).ConfigureAwait(false);
+            byte[]? dkimSignatureLine = await ComputeDkimSignatureLineAsync(request.MessageId, cancellationToken)
+                .ConfigureAwait(false);
+
+            await StreamMessageBodyAsync(stream, request.MessageId, dkimSignatureLine, cancellationToken)
+                .ConfigureAwait(false);
 
             TimeSpan dataTimeout = TimeSpan.FromSeconds(Options.DataTimeoutSeconds);
             SmtpReply finalReply = await SmtpReplyParser.ReadAsync(reader, dataTimeout, cancellationToken)
@@ -266,12 +279,26 @@ internal sealed class OutboundSmtpClient(
     private async Task StreamMessageBodyAsync(
         Stream stream,
         StoredMessageId messageId,
+        byte[]? dkimSignatureLine,
         CancellationToken cancellationToken)
     {
         await using Stream content = await messageStore.OpenReadAsync(messageId, cancellationToken)
             .ConfigureAwait(false);
 
         SmtpDotStuffing stuffing = new();
+
+        // The signature line is fed through the SAME stuffer instance, before the stored
+        // content, so dot-stuffing state (which line-start position it thinks it is at) stays
+        // continuous across the boundary - a signature line beginning with '.' would otherwise
+        // not be stuffed and would be misread as the end-of-data terminator.
+        if (dkimSignatureLine is { Length: > 0 })
+        {
+            byte[] stuffedSignature = new byte[SmtpDotStuffing.MaxOutputFor(dkimSignatureLine.Length)];
+            int signatureWritten = stuffing.Stuff(dkimSignatureLine, stuffedSignature);
+            await stream.WriteAsync(stuffedSignature.AsMemory(0, signatureWritten), cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         byte[] input = new byte[BodyChunkBytes];
         byte[] output = new byte[SmtpDotStuffing.MaxOutputFor(BodyChunkBytes)];
 
@@ -287,6 +314,93 @@ internal sealed class OutboundSmtpClient(
         int terminatorLength = stuffing.WriteTerminator(terminator);
         await stream.WriteAsync(terminator.AsMemory(0, terminatorLength), cancellationToken).ConfigureAwait(false);
         await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Computes a DKIM-Signature header line for the message, or null when it should be sent
+    /// unsigned: the <c>From:</c> header does not parse, its domain is not one this server hosts,
+    /// or that domain has no active DKIM key. Never throws — a DKIM subsystem failure must not
+    /// block delivery of mail that would otherwise send successfully.
+    /// </summary>
+    private async Task<byte[]?> ComputeDkimSignatureLineAsync(
+        StoredMessageId messageId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using Stream content = await messageStore.OpenReadAsync(messageId, cancellationToken)
+                .ConfigureAwait(false);
+
+            RawMessageHeaders? headers = await MessageHeaderReader.TryReadHeadersAsync(
+                content, options.Value.Limits.MaxHeaderBytes, cancellationToken).ConfigureAwait(false);
+
+            if (headers is null)
+            {
+                logger.LogWarning(
+                    "Could not locate the header/body boundary for message {MessageId} while " +
+                    "preparing to sign it; sending unsigned.",
+                    messageId.Value);
+
+                return null;
+            }
+
+            if (!FromHeaderDomain.TryExtract(headers, out DomainName? fromDomain))
+            {
+                return null;
+            }
+
+            MailDomain? domain = await domainRepository.GetByNameAsync(fromDomain!, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (domain is null)
+            {
+                return null;
+            }
+
+            DkimKey? activeKey = await dkimKeyRepository
+                .GetActiveForDomainAsync(domain.Id, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (activeKey is null)
+            {
+                return null;
+            }
+
+            byte[]? privateKey = await dkimKeyRepository
+                .GetPrivateKeyAsync(activeKey.Id, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (privateKey is null)
+            {
+                logger.LogWarning(
+                    "DKIM key {KeyId} for domain {Domain} has no stored private key; sending " +
+                    "{MessageId} unsigned.",
+                    activeKey.Id.Value,
+                    fromDomain!.Value,
+                    messageId.Value);
+
+                return null;
+            }
+
+            content.Seek(headers.HeaderBlockLength, SeekOrigin.Begin);
+
+            DkimSignatureTags tags = await dkimSigner.SignAsync(
+                headers,
+                content,
+                fromDomain!,
+                activeKey.Selector,
+                privateKey,
+                clock.UtcNow,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            return Encoding.ASCII.GetBytes($"DKIM-Signature: {tags.Compose()}\r\n");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(
+                ex, "Failed to compute a DKIM signature for message {MessageId}; sending unsigned.", messageId.Value);
+
+            return null;
+        }
     }
 
     /// <summary>Negotiates STARTTLS, validating the peer's certificate for evidence, not as a gate.</summary>

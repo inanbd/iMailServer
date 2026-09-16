@@ -3,10 +3,14 @@ using MailServer.Application.Abstractions.Smtp;
 using MailServer.Application.Abstractions.Time;
 using MailServer.Domain.Entities;
 using MailServer.Domain.Enums;
+using MailServer.Domain.Mail;
 using MailServer.Domain.Policies;
 using MailServer.Domain.Smtp;
 using MailServer.Domain.ValueObjects;
+using MailServer.Infrastructure.Configuration;
+using MailServer.Infrastructure.Dkim;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace MailServer.Infrastructure.Smtp;
 
@@ -38,7 +42,10 @@ public sealed class LocalDeliveryService(
     IAliasRepository aliases,
     IDomainRepository domains,
     IOutboundQueueRepository outboundQueue,
+    IMessageStore messageStore,
+    DkimMessageVerifier dkimVerifier,
     AliasExpansionPolicy expansionPolicy,
+    IOptions<MailServerOptions> options,
     IClock clock,
     ILogger<LocalDeliveryService> logger) : ILocalDeliveryService
 {
@@ -64,6 +71,16 @@ public sealed class LocalDeliveryService(
             now);
 
         await deliveries.AddMessageAsync(record, cancellationToken).ConfigureAwait(false);
+
+        // SPF's premise - does the sending IP match the domain's published record - is
+        // meaningless for an authenticated client's IP, which can legitimately be anywhere. DKIM
+        // has no such caveat, but is still scoped to InboundMta here to keep both mechanisms'
+        // wiring symmetric and because a Submission message is this server's own outbound
+        // signing's concern (OutboundSmtpClient), not something to re-verify on the way in.
+        if (request.ListenerRole == SmtpListenerRole.InboundMta)
+        {
+            await VerifyDkimAsync(request.Message.Id, now, cancellationToken).ConfigureAwait(false);
+        }
 
         // The alias graph is read once per message rather than once per recipient. A message to
         // twenty recipients in the same domain would otherwise re-read the same aliases twenty
@@ -253,5 +270,56 @@ public sealed class LocalDeliveryService(
             .ConfigureAwait(false);
 
         return true;
+    }
+
+    /// <summary>
+    /// Verifies every DKIM-Signature header on a message and records one row per signature.
+    /// </summary>
+    /// <remarks>
+    /// Never throws and never affects the delivery outcome: this milestone records DKIM's
+    /// verdict for a later DMARC step to act on, but does not itself reject or quarantine
+    /// anything, so a DKIM subsystem failure must not take delivery down with it.
+    /// </remarks>
+    private async Task VerifyDkimAsync(
+        StoredMessageId messageId, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using Stream content = await messageStore.OpenReadAsync(messageId, cancellationToken)
+                .ConfigureAwait(false);
+
+            RawMessageHeaders? headers = await MessageHeaderReader.TryReadHeadersAsync(
+                content, options.Value.Limits.MaxHeaderBytes, cancellationToken).ConfigureAwait(false);
+
+            if (headers is null)
+            {
+                logger.LogWarning(
+                    "Could not locate the header/body boundary for message {MessageId}; DKIM was not verified.",
+                    messageId.Value);
+
+                return;
+            }
+
+            content.Seek(headers.HeaderBlockLength, SeekOrigin.Begin);
+
+            IReadOnlyList<DkimVerifiedSignature> results = await dkimVerifier
+                .VerifyAsync(headers, content, cancellationToken)
+                .ConfigureAwait(false);
+
+            for (int i = 0; i < results.Count; i++)
+            {
+                DkimVerifiedSignature result = results[i];
+
+                DkimVerificationRecord verificationRecord = DkimVerificationRecord.Create(
+                    messageId, i, result.Result, result.SigningDomain, result.Diagnostic, now);
+
+                await deliveries.AddDkimVerificationAsync(verificationRecord, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Failed to verify DKIM for message {MessageId}.", messageId.Value);
+        }
     }
 }

@@ -1,5 +1,6 @@
 using MailServer.Application.Abstractions.Dns;
 using MailServer.Application.Abstractions.Monitoring;
+using MailServer.Application.Abstractions.Platform;
 using MailServer.Application.Abstractions.Repositories;
 using MailServer.Application.Abstractions.Smtp;
 using MailServer.Application.Abstractions.Time;
@@ -8,6 +9,15 @@ using MailServer.Domain.Enums;
 using MailServer.Domain.ValueObjects;
 
 namespace MailServer.Outbound.Tests;
+
+internal sealed class FakeServerIdentity : IServerIdentityProvider
+{
+    public string Hostname => "test-client.example";
+
+    public string? PublicIpAddress => null;
+
+    public string ProductName => "Test";
+}
 
 /// <summary>
 /// An in-memory queue repository, for testing <c>OutboundDeliveryHostedService</c>'s decisions
@@ -278,6 +288,66 @@ internal sealed class FakeDeliveryRepository : IDeliveryRepository
     public Task<MailboxFolder?> GetFolderAsync(
         MailboxId mailboxId, FolderSpecialUse specialUse, CancellationToken cancellationToken) =>
         Task.FromResult<MailboxFolder?>(null);
+
+    public Task AddDkimVerificationAsync(DkimVerificationRecord record, CancellationToken cancellationToken) =>
+        Task.CompletedTask;
+}
+
+/// <summary>
+/// Reports every domain as unknown, so <c>OutboundSmtpClient</c>'s DKIM signing lookup always
+/// finds nothing and sends unsigned - exactly this test suite's existing behaviour, since none
+/// of its scenarios are about DKIM.
+/// </summary>
+internal sealed class FakeDomainRepository : IDomainRepository
+{
+    public Task<MailDomain?> GetByIdAsync(DomainId id, CancellationToken cancellationToken) =>
+        Task.FromResult<MailDomain?>(null);
+
+    public Task<MailDomain?> GetByNameAsync(DomainName name, CancellationToken cancellationToken) =>
+        Task.FromResult<MailDomain?>(null);
+
+    public Task<bool> ExistsAsync(DomainName name, CancellationToken cancellationToken) =>
+        Task.FromResult(false);
+
+    public Task<IReadOnlyList<MailDomain>> GetAllAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<MailDomain>>([]);
+
+    public Task<IReadOnlyList<MailDomain>> GetOperationalAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<MailDomain>>([]);
+
+    public Task AddAsync(MailDomain domain, CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public Task UpdateAsync(MailDomain domain, CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public Task RemoveAsync(DomainId id, CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public Task<int> CountMailboxesAsync(DomainId id, CancellationToken cancellationToken) => Task.FromResult(0);
+}
+
+/// <summary>Reports no active key for any domain, for the same reason as <see cref="FakeDomainRepository"/>.</summary>
+internal sealed class FakeDkimKeyRepository : IDkimKeyRepository
+{
+    public Task<DkimKey?> GetAsync(DkimKeyId id, CancellationToken cancellationToken) =>
+        Task.FromResult<DkimKey?>(null);
+
+    public Task<IReadOnlyList<DkimKey>> GetForDomainAsync(DomainId domainId, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<DkimKey>>([]);
+
+    public Task<DkimKey?> GetActiveForDomainAsync(DomainId domainId, CancellationToken cancellationToken) =>
+        Task.FromResult<DkimKey?>(null);
+
+    public Task<IReadOnlyList<DkimKey>> GetAllAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<DkimKey>>([]);
+
+    public Task AddAsync(DkimKey key, byte[] pkcs8PrivateKey, CancellationToken cancellationToken) =>
+        Task.CompletedTask;
+
+    public Task UpdateAsync(DkimKey key, CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public Task RemoveAsync(DkimKeyId id, CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public Task<byte[]?> GetPrivateKeyAsync(DkimKeyId id, CancellationToken cancellationToken) =>
+        Task.FromResult<byte[]?>(null);
 }
 
 internal sealed class FakeClock(DateTimeOffset now) : IClock

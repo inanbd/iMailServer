@@ -30,7 +30,7 @@ public sealed record DkimVerifiedSignature(
 /// implement) never prevents evaluating the others — see <see cref="DkimSignatureTags.TryParse"/>'s
 /// own remarks.
 /// </remarks>
-internal sealed class DkimMessageVerifier(IDkimPublicKeyResolver publicKeyResolver, ILogger<DkimMessageVerifier> logger)
+public sealed class DkimMessageVerifier(IDkimPublicKeyResolver publicKeyResolver, ILogger<DkimMessageVerifier> logger)
 {
     private const int BodyReadBufferSize = 64 * 1024;
 

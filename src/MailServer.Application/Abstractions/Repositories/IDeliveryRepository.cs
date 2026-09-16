@@ -55,4 +55,10 @@ public interface IDeliveryRepository
         MailboxId mailboxId,
         Domain.Enums.FolderSpecialUse specialUse,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Records the outcome of verifying one DKIM-Signature header found on a received message.
+    /// Called once per signature; a message with several signatures gets several rows.
+    /// </summary>
+    Task AddDkimVerificationAsync(DkimVerificationRecord record, CancellationToken cancellationToken);
 }

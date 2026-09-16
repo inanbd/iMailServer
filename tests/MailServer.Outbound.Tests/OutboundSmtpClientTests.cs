@@ -4,6 +4,7 @@ using MailServer.Domain.Enums;
 using MailServer.Domain.ValueObjects;
 using MailServer.Infrastructure.Certificates;
 using MailServer.Infrastructure.Configuration;
+using MailServer.Infrastructure.Dkim;
 using MailServer.Infrastructure.Smtp.Outbound;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -25,6 +26,10 @@ public sealed class OutboundSmtpClientTests : IAsyncDisposable
             _identity,
             _store,
             new CertificateChainValidator(NullLogger<CertificateChainValidator>.Instance),
+            new FakeDomainRepository(),
+            new FakeDkimKeyRepository(),
+            new DkimMessageSigner(),
+            new FakeClock(DateTimeOffset.UtcNow),
             Options.Create(new MailServerOptions
             {
                 Outbound = new OutboundOptions
@@ -223,13 +228,4 @@ public sealed class OutboundSmtpClientTests : IAsyncDisposable
     }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-
-    private sealed class FakeServerIdentity : IServerIdentityProvider
-    {
-        public string Hostname => "test-client.example";
-
-        public string? PublicIpAddress => null;
-
-        public string ProductName => "Test";
-    }
 }
