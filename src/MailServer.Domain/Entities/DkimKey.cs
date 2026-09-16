@@ -14,10 +14,9 @@ namespace MailServer.Domain.Entities;
 /// <see cref="Certificate"/> makes for TLS keys, for the same reason: a domain object carrying
 /// key bytes puts them into every object graph that touches this aggregate's metadata (an admin
 /// UI list, an audit record, a log line rendering it). <see cref="Id"/> is itself the lookup key
-/// the private-key store (an Application-layer abstraction, added alongside the RSA signer) uses
-/// to find the DPAPI-protected key material — there is exactly one key blob per
-/// <see cref="DkimKey"/>, so no separate location value object is needed the way
-/// <see cref="Certificate"/> needs one to distinguish several possible physical stores.
+/// the repository's private-key methods use to find the DPAPI-protected key material — there is
+/// exactly one key blob per <see cref="DkimKey"/>, so no separate location value object is needed
+/// the way <see cref="Certificate"/> needs one to distinguish several possible physical stores.
 /// </para>
 /// <para>
 /// <see cref="PublicKeyBase64"/> is not secret — it is the exact value this key's DNS TXT record

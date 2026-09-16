@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using MailServer.Domain.Enums;
+using MailServer.Domain.Mail;
 
 namespace MailServer.Domain.ValueObjects;
 
@@ -176,6 +177,114 @@ public sealed class DkimSignatureTags
         sb.Append("; b=").Append(SignatureValueBase64);
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Returns a copy of a received <c>DKIM-Signature</c> header field with its <c>b=</c> tag's
+    /// value removed, leaving every other byte — tag order, spacing, folding — exactly as
+    /// received.
+    /// </summary>
+    /// <remarks>
+    /// RFC 6376 §3.5: verifying a signature means canonicalizing this header field as it was
+    /// actually sent, with only the <c>b=</c> value blanked out. Recomposing the header from the
+    /// parsed <see cref="TryParse"/> result instead — via <see cref="Compose"/> — would use
+    /// whatever tag order and spacing this product's own composer happens to choose, which is
+    /// not necessarily what the original signer wrote; canonicalization collapses whitespace
+    /// differences but not a difference in tag order, so recomposing risks failing a perfectly
+    /// valid signature. This operates on the received bytes directly instead.
+    /// </remarks>
+    public static RawHeaderField BlankSignatureValue(RawHeaderField field)
+    {
+        byte[] raw = field.RawBytes.ToArray();
+
+        if (raw.Length < 2 || raw[^2] != (byte)'\r' || raw[^1] != (byte)'\n')
+        {
+            throw new ArgumentException(
+                "A raw header field produced by RawMessageHeaders always ends in CRLF.",
+                nameof(field));
+        }
+
+        int colon = Array.IndexOf(raw, (byte)':');
+
+        if (colon < 0)
+        {
+            throw new ArgumentException(
+                "A raw header field produced by RawMessageHeaders always contains a colon.",
+                nameof(field));
+        }
+
+        int valueStart = colon + 1;
+        int valueEnd = raw.Length - 2; // exclusive; excludes the final CRLF
+
+        List<byte> result = [.. raw[..valueStart]];
+        int i = valueStart;
+
+        while (i <= valueEnd)
+        {
+            int segEnd = Array.IndexOf(raw, (byte)';', i, valueEnd - i);
+
+            if (segEnd < 0)
+            {
+                segEnd = valueEnd;
+            }
+
+            AppendSegment(result, raw, i, segEnd);
+
+            if (segEnd < valueEnd)
+            {
+                result.Add((byte)';');
+            }
+
+            i = segEnd + 1;
+        }
+
+        result.AddRange(raw[^2..]);
+
+        return new RawHeaderField(field.Name, result.ToArray());
+    }
+
+    /// <summary>Appends one tag segment, truncated right after its <c>=</c> when it is the b= tag.</summary>
+    private static void AppendSegment(List<byte> result, byte[] raw, int start, int end)
+    {
+        int? equalsIndex = null;
+        int significantSeen = 0;
+        bool isBTag = false;
+
+        for (int j = start; j < end; j++)
+        {
+            byte b = raw[j];
+
+            if (b is (byte)'\r' or (byte)'\n' or (byte)' ' or (byte)'\t')
+            {
+                continue;
+            }
+
+            if (significantSeen == 0 && b == (byte)'b')
+            {
+                significantSeen = 1;
+                continue;
+            }
+
+            if (significantSeen == 1 && b == (byte)'=')
+            {
+                isBTag = true;
+                equalsIndex = j;
+                break;
+            }
+
+            // Any other significant character before '=' means this is some other tag
+            // (e.g. "bh=..."), not "b=" itself.
+            significantSeen = -1;
+            break;
+        }
+
+        if (isBTag && equalsIndex is { } eq)
+        {
+            result.AddRange(raw[start..(eq + 1)]);
+            return;
+        }
+
+        result.AddRange(raw[start..end]);
     }
 
     /// <summary>Parses an inbound <c>DKIM-Signature</c> header's value for verification.</summary>

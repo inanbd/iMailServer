@@ -1,6 +1,7 @@
 using MailServer.Application.Abstractions.Monitoring;
 using MailServer.Application.Abstractions.Acme;
 using MailServer.Application.Abstractions.Certificates;
+using MailServer.Application.Abstractions.Dkim;
 using MailServer.Application.Abstractions.Dns;
 using MailServer.Application.Abstractions.Persistence;
 using MailServer.Application.Abstractions.Platform;
@@ -15,6 +16,7 @@ using DnsClient;
 using MailServer.Infrastructure.Acme;
 using MailServer.Infrastructure.Certificates;
 using MailServer.Infrastructure.Configuration;
+using MailServer.Infrastructure.Dkim;
 using MailServer.Infrastructure.Dns;
 using MailServer.Infrastructure.Monitoring;
 using MailServer.Infrastructure.Smtp.Outbound;
@@ -226,6 +228,17 @@ public static class DependencyInjection
         services.TryAddSingleton<IDnsResolver, DnsMxResolver>();
         services.TryAddScoped<IOutboundDeliveryClient, OutboundSmtpClient>();
         services.TryAddScoped<IDsnComposer, PlainTextDsnComposer>();
+
+        // ---- DKIM (Milestone 9) -------------------------------------------------------------
+        services.TryAddScoped<IDkimKeyRepository, DkimKeyRepository>();
+        services.TryAddScoped<DkimKeyGenerator>();
+        services.TryAddScoped<DkimMessageSigner>();
+        services.TryAddScoped<DkimMessageVerifier>();
+
+        // Singleton, mirroring IMxDnsClient/IDnsResolver above: a stateless adapter over the
+        // same ILookupClient singleton, so no reason to rebuild it per scope.
+        services.TryAddSingleton<IDkimDnsClient, LookupClientDkimAdapter>();
+        services.TryAddSingleton<IDkimPublicKeyResolver, DnsDkimPublicKeyResolver>();
 
         return services;
     }
