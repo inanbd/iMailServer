@@ -2315,6 +2315,48 @@ detection treats any line starting with `*` as a comment, which could hide a gen
 in `unsafe` pointer-dereference code; this codebase contains no `unsafe` code anywhere, so the
 gap is currently inert.
 
+### A9.8 — A second adversarial review, after A9.7's fixes had already landed, found a real DMARC bypass A9.7 did not catch in the same function it had just fixed
+
+A9.7's `FromHeaderDomain` fix closed the two-real-mailboxes ambiguity. It did not close a
+different way to fool the same last-`<...>`-pair heuristic: an RFC 5322 comment
+(`(...)`) containing its own `<...>` pair. `From: victim@good.example (name
+<attacker@evil.example>)` is one single, valid RFC 5322 mailbox — a comment carries no address
+meaning — but `ExtractAddrSpec` found the bracket pair *inside* the comment and returned the
+attacker's domain instead, exactly the false alignment pass A9.7 believed it had eliminated.
+`FromHeaderDomain` now refuses whenever a comment is present, the same safe-direction trade-off
+as the mailbox-count check right next to it. Fixed and covered by
+`FromHeaderDomainTests`.
+
+Four further issues, none rising to the same severity, were found and fixed in the same pass:
+
+| Issue | Where | Consequence before the fix |
+|---|---|---|
+| The `mx` mechanism's per-host address lookups never charged the 2-void-lookup budget, only its own top-level MX query did | `SpfEvaluator.EvaluateMxAsync` | A single `mx` mechanism could hide up to ten void DNS lookups — bounded query amplification exempt from the limit RFC 7208 §4.6.4 defines specifically to bound this |
+| DKIM verification never checked a signature's own `x=` expiry | `DkimMessageVerifier.VerifyOneAsync` | A captured, legitimately-signed message could be replayed indefinitely and still verify — the exact "fallback protection... in the event of key compromise" RFC 6376 §3.5 describes `x=` as providing, provided by nothing |
+| No minimum key-size check on a DNS-published DKIM public key | `DkimMessageVerifier.VerifyOneAsync` | A legacy short (e.g. 512/768/1024-bit), potentially factored key would be trusted exactly as much as a 2048-bit one |
+| An attacker-controlled DKIM tag-parse error, embedded verbatim and unbounded, could exceed the `NVARCHAR(1024)` SQL Server declares for `Diagnostic` columns (SQLite's unbounded `TEXT` masks this) | `DeliveryRepository.Add{Dkim,Dmarc}VerificationAsync` | The resulting INSERT failure would be caught by `LocalDeliveryService`'s deliberate "fails open" handler, silently skipping DMARC enforcement for the whole message — a second, independent route to the same class of bug A9.6 fixed |
+
+A fifth, lower-severity issue — `DmarcRecord.TryParse` let a later duplicate tag silently
+overwrite an earlier one (RFC 7489 borrows RFC 6376 §3.2's tag-list syntax, under which a
+repeated tag invalidates the whole record) rather than rejecting the record outright — is fixed
+the same way `DkimSignatureTags.TryParse` already handles the identical syntax. Not
+attacker-exploitable against a third party (a DMARC record is published by the domain owner at
+their own name), only capable of misreading a domain's own malformed record.
+
+All six are covered by new regression tests. Three findings were left as documented,
+low-priority gaps rather than fixed, matching A9.7's own precedent for a safe-direction or
+currently-inert issue: `DkimKeyRepository.GetActiveForDomainAsync` uses
+`QuerySingleOrDefaultAsync` and would throw if two keys were ever simultaneously `Active` for
+one domain — currently unreachable, since (per the correction to `docs/Standards.md`'s DKIM row
+in this same pass) nothing outside a test calls `DkimKey.Activate` at all yet; `k=`/`s=`/`t=` on
+a DNS-published key are parsed as literal text but never cross-checked against the signature
+that used it, both RFC 6376 §3.6.1 "SHOULD"s rather than "MUST"s; and `IDkimKeyRepository.AddAsync`'s
+"atomically" claim is not backed by a database transaction, which for the same reason is
+currently inert rather than exploitable. Also fixed in this pass but not a defect in existing
+code: `docs/Standards.md`'s DKIM row previously said nothing outside a test calls
+`DkimKeyRepository` — false for the repository (`OutboundSmtpClient` calls it on every real
+outbound delivery), true only for `DkimKeyGenerator`.
+
 ---
 
-*Document version 1.8 — baseline for Milestone 1, with the Milestone 2–9 addenda.*
+*Document version 1.9 — baseline for Milestone 1, with the Milestone 2–9 addenda.*

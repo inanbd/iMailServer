@@ -9,7 +9,7 @@ diagnostics — not an SMTP sending utility.
 > **Status: Milestone 9 of 13 complete.** The foundation, security, certificates, ACME, mailbox
 > administration, SMTP inbound and submission, outbound delivery, and now mail authentication —
 > DKIM signing/verification, SPF, DMARC alignment and enforcement, ARC groundwork — are built,
-> compile with warnings as errors, and are covered by 3,409 passing tests. This server can
+> compile with warnings as errors, and are covered by 3,416 passing tests. This server can
 > receive mail from the Internet, accept authenticated submission from a mail client, relay it
 > onward to another server's MX, and evaluate/enforce SPF+DKIM+DMARC on the way in; it does not
 > yet offer IMAP access, and two real Milestone 9 gaps are worth knowing before relying on this:
@@ -206,15 +206,16 @@ src/
 tests/
   MailServer.Domain.Tests/           # 268 tests
   MailServer.Application.Tests/      #  51 tests
-  MailServer.Infrastructure.Tests/   #  71 tests
+  MailServer.Infrastructure.Tests/   #  78 tests
   MailServer.Ipc.Tests/              # 138 tests (end to end over a real pipe, incl. session enforcement)
   MailServer.Persistence.Tests/      #  56 tests (against real SQLite)
-  MailServer.SecurityTests/          # 779 tests (real Argon2, real SQLite, no-bypass source scan)
+  MailServer.SecurityTests/          # 1,826 tests (real Argon2, real SQLite, no-bypass source scan)
   MailServer.Certificates.Tests/     #  51 tests (real certificate generation and hot reload)
   MailServer.Acme.Tests/             #  37 tests (issuance against a fake CA, DNS parsing, limits)
   MailServer.Mailboxes.Tests/        #  42 tests (quota enforcement, aliases, full CRUD)
-  MailServer.Smtp.Tests/             # 573 tests (wire-level: grammar, dot-stuffing, STARTTLS, open-relay matrix)
-  MailServer.Outbound.Tests/         #  18 tests (delivery client and queue worker against a fake remote MX)
+  MailServer.Smtp.Tests/             # 579 tests (wire-level: grammar, dot-stuffing, STARTTLS, open-relay matrix)
+  MailServer.Outbound.Tests/         #  21 tests (delivery client and queue worker against a fake remote MX)
+  MailServer.Authentication.Tests/   # 269 tests (DKIM/SPF/DMARC/ARC — RFC vectors plus DI-wired delivery)
 ```
 
 Projects for milestones 4–13 are created **in** those milestones. A solution full of empty

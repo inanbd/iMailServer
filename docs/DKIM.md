@@ -62,12 +62,17 @@ signature stops verifying until new keys propagate.
 Every signature on a message is verified; a message may legitimately carry several. Only
 `rsa-sha256` with `relaxed/relaxed` canonicalisation is accepted — anything else (`simple`
 canonicalisation, `rsa-sha1`, an unrecognised algorithm) is a permanent verification failure for
-that signature, never treated as a pass. The result feeds DMARC alignment: DKIM passes for DMARC
-only if the `d=` domain aligns with the `From` header domain, extracted by
+that signature, never treated as a pass. **A key below 2048 bits is rejected the same way**,
+whatever the DNS record actually publishes — a receiver's verifier trusts nothing about a key's
+strength just because a sender's DNS record claims it. The result feeds DMARC alignment: DKIM
+passes for DMARC only if the `d=` domain aligns with the `From` header domain, extracted by
 `FromHeaderDomain` — which refuses to name a domain at all (not "picks one") when the `From:`
-field names more than one mailbox or the message carries more than one `From:` field, per RFC
-7489 §6.6.1. A malformed `t=`/`x=` timestamp outside the representable date range fails only
-that one signature, not the whole message.
+field names more than one mailbox, the message carries more than one `From:` field, or the field
+contains an RFC 5322 comment (`(...)`), per RFC 7489 §6.6.1. A malformed `t=`/`x=` timestamp
+outside the representable date range fails only that one signature, not the whole message.
+**A signature past its own `x=` expiry fails verification even if otherwise valid** — RFC 6376
+§3.5 describes `x=` as a fallback for key compromise, and a verifier that parses the tag but
+never checks it provides none of that protection.
 
 ## The canonicalisation trap
 
