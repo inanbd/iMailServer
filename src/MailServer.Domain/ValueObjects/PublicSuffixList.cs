@@ -27,7 +27,13 @@ namespace MailServer.Domain.ValueObjects;
 /// </remarks>
 public sealed class PublicSuffixList
 {
-    private static readonly IdnMapping Idn = new();
+    // Same options as DomainName's own mapping, so a Unicode PSL rule normalises to exactly the
+    // ASCII form DomainName.Parse would produce for the same text.
+    private static readonly IdnMapping Idn = new()
+    {
+        UseStd3AsciiRules = true,
+        AllowUnassigned = false,
+    };
 
     private readonly HashSet<string> _plainRules;
     private readonly HashSet<string> _wildcardConcreteSuffixes;
@@ -85,15 +91,21 @@ public sealed class PublicSuffixList
 
             if (line.StartsWith('!'))
             {
-                exceptionRules.Add(NormalizeRule(line[1..]));
+                if (TryNormalizeRule(line[1..], out string exceptionRule))
+                {
+                    exceptionRules.Add(exceptionRule);
+                }
             }
             else if (line.StartsWith("*.", StringComparison.Ordinal))
             {
-                wildcardConcreteSuffixes.Add(NormalizeRule(line[2..]));
+                if (TryNormalizeRule(line[2..], out string wildcardSuffix))
+                {
+                    wildcardConcreteSuffixes.Add(wildcardSuffix);
+                }
             }
-            else
+            else if (TryNormalizeRule(line, out string plainRule))
             {
-                plainRules.Add(NormalizeRule(line));
+                plainRules.Add(plainRule);
             }
         }
 
@@ -166,15 +178,37 @@ public sealed class PublicSuffixList
         return 1;
     }
 
-    private static string NormalizeRule(string rule)
+    /// <summary>
+    /// Normalises one rule's text to the same lower-case ASCII form <see cref="DomainName"/>
+    /// would produce. Returns false, dropping the rule, for the rare line IdnMapping rejects
+    /// outright — a rule this product cannot canonicalise is one it can never match against a
+    /// (successfully parsed) <see cref="DomainName"/> anyway, so silently omitting it is
+    /// equivalent in effect to matching it and always failing, without risking the entire
+    /// snapshot on one unparseable line.
+    /// </summary>
+    private static bool TryNormalizeRule(string rule, out string normalized)
     {
         string trimmed = rule.Trim();
 
         // The list mixes ASCII/punycode and Unicode forms for internationalised TLDs; domains
         // this product compares against are always in DomainName's ASCII form, so every rule is
         // normalised to match at load time rather than at every lookup.
-        string ascii = IsAscii(trimmed) ? trimmed : Idn.GetAscii(trimmed);
-        return ascii.ToLowerInvariant();
+        if (IsAscii(trimmed))
+        {
+            normalized = trimmed.ToLowerInvariant();
+            return true;
+        }
+
+        try
+        {
+            normalized = Idn.GetAscii(trimmed).ToLowerInvariant();
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            normalized = string.Empty;
+            return false;
+        }
     }
 
     private static bool IsAscii(string value)
