@@ -9,6 +9,17 @@ namespace MailServer.Domain.Smtp;
 /// <param name="Decision">Local delivery or onward relay. Recorded so the decision is auditable later.</param>
 public sealed record AcceptedRecipient(EmailAddress Address, RelayDecision Decision);
 
+/// <summary>The result of evaluating SPF for this transaction's envelope sender.</summary>
+/// <param name="Result">RFC 7208's outcome.</param>
+/// <param name="CheckedDomain">
+/// The domain actually evaluated — the <c>MAIL FROM</c> domain, or (per <c>docs/SPF.md</c>) the
+/// <c>HELO</c>/<c>EHLO</c> name when the reverse path is null. Null only when there was no
+/// domain to check at all (a null reverse path and no greeting name, which the protocol state
+/// machine should never allow this far).
+/// </param>
+/// <param name="Diagnostic">Human-readable detail, for a future Authentication-Results header.</param>
+public sealed record SpfEvaluationOutcome(SpfResult Result, DomainName? CheckedDomain, string? Diagnostic);
+
 /// <summary>
 /// Everything an SMTP session knows, and the two places it forgets it.
 /// </summary>
@@ -124,6 +135,14 @@ public sealed class SmtpSessionContext
     /// <summary>Recipients accepted so far.</summary>
     public IReadOnlyList<AcceptedRecipient> Recipients => _recipients;
 
+    /// <summary>
+    /// This transaction's SPF result, once evaluated. Null before evaluation and on any listener
+    /// where SPF is not evaluated at all (SPF's premise — does the sending IP match the domain's
+    /// published record — is meaningless for an authenticated <c>Submission</c> client, whose IP
+    /// can legitimately be anywhere).
+    /// </summary>
+    public SpfEvaluationOutcome? SpfOutcome { get; private set; }
+
     // ---- Transitions -------------------------------------------------------------------------
 
     /// <summary>Records a successful EHLO or HELO.</summary>
@@ -223,6 +242,23 @@ public sealed class SmtpSessionContext
         _recipients = [];
     }
 
+    /// <summary>Records this transaction's SPF result, for the DMARC step to read later.</summary>
+    /// <remarks>
+    /// Deliberately does not gate anything itself: SPF's own §2.6 result is not the enforcement
+    /// point — DMARC alignment is — so this is bookkeeping, not a decision.
+    /// </remarks>
+    public void RecordSpfOutcome(SpfEvaluationOutcome outcome)
+    {
+        ArgumentNullException.ThrowIfNull(outcome);
+
+        if (!HasTransaction)
+        {
+            throw new InvalidOperationException("There is no open transaction to record an SPF outcome for.");
+        }
+
+        SpfOutcome = outcome;
+    }
+
     /// <summary>Adds an accepted recipient.</summary>
     /// <remarks>
     /// Only ever called for a recipient that was actually accepted. A rejected recipient must
@@ -293,6 +329,7 @@ public sealed class SmtpSessionContext
         HasTransaction = false;
         ReversePath = null;
         DeclaredMessageSize = null;
+        SpfOutcome = null;
         _recipients = [];
     }
 }

@@ -3,6 +3,7 @@ using MailServer.Domain.Enums;
 using MailServer.Domain.Policies;
 using MailServer.Domain.Smtp;
 using MailServer.Domain.ValueObjects;
+using MailServer.Infrastructure.Spf;
 using Microsoft.Extensions.Logging;
 
 namespace MailServer.Infrastructure.Smtp;
@@ -87,6 +88,7 @@ public sealed class SmtpCommandProcessor
     private readonly IMailboxAuthenticator _authenticator;
     private readonly SubmissionPolicy _submissionPolicy;
     private readonly ISubmissionRateLimiter? _rateLimiter;
+    private readonly SpfEvaluator? _spfEvaluator;
 
     /// <summary>The mechanism mid-exchange, or null when no AUTH is in flight.</summary>
     /// <remarks>
@@ -103,7 +105,8 @@ public sealed class SmtpCommandProcessor
         ILogger logger,
         IMailboxAuthenticator? authenticator = null,
         SubmissionPolicy? submissionPolicy = null,
-        ISubmissionRateLimiter? rateLimiter = null)
+        ISubmissionRateLimiter? rateLimiter = null,
+        SpfEvaluator? spfEvaluator = null)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(options);
@@ -127,6 +130,11 @@ public sealed class SmtpCommandProcessor
         // submitted by anyone and has no mailbox to charge.
         _submissionPolicy = submissionPolicy ?? new SubmissionPolicy();
         _rateLimiter = rateLimiter;
+
+        // Null is a legitimate configuration, not a missing dependency: SPF is only ever
+        // evaluated for SmtpListenerRole.InboundMta (see MailFromAsync), so a processor built for
+        // Submission never needs one.
+        _spfEvaluator = spfEvaluator;
     }
 
     /// <summary>The session this processor drives.</summary>
@@ -495,9 +503,68 @@ public sealed class SmtpCommandProcessor
             }
         }
 
+        SpfEvaluationOutcome? spfOutcome = null;
+
+        if (_session.Role == SmtpListenerRole.InboundMta && _spfEvaluator is not null)
+        {
+            (SmtpCommandResult? spfRefusal, spfOutcome) = await EvaluateSpfAsync(reversePath, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (spfRefusal is not null)
+            {
+                return spfRefusal;
+            }
+        }
+
         _session.BeginTransaction(reversePath, declaredSize);
 
+        if (spfOutcome is not null)
+        {
+            _session.RecordSpfOutcome(spfOutcome);
+        }
+
         return new SmtpCommandResult(SmtpReplies.Ok("Sender accepted"));
+    }
+
+    /// <summary>
+    /// Evaluates SPF for the sender's domain (the <c>MAIL FROM</c> domain, or the greeting name
+    /// when the reverse path is null, per <c>docs/SPF.md</c>).
+    /// </summary>
+    /// <remarks>
+    /// Only <see cref="SpfResult.TempError"/> refuses the command directly (the first tuple
+    /// element); every other result (Pass, Fail, SoftFail, Neutral, None, PermError) is returned
+    /// as an outcome for the caller to record once its transaction opens —
+    /// <see cref="SmtpSessionContext.RecordSpfOutcome"/> requires one to already exist, and this
+    /// method runs before <c>BeginTransaction</c> so it cannot record the outcome itself. SPF's
+    /// own result is never enforced here beyond the transient case; DMARC alignment is what acts
+    /// on Fail/SoftFail/Neutral/PermError.
+    /// </remarks>
+    private async ValueTask<(SmtpCommandResult? Refusal, SpfEvaluationOutcome? Outcome)> EvaluateSpfAsync(
+        EmailAddress? reversePath, CancellationToken cancellationToken)
+    {
+        DomainName? checkedDomain = reversePath?.Domain;
+
+        if (checkedDomain is null && _session.GreetedName is not null)
+        {
+            DomainName.TryParse(_session.GreetedName, out checkedDomain);
+        }
+
+        if (checkedDomain is null)
+        {
+            // Null reverse path and no usable greeting name: nothing to check SPF against.
+            return (null, null);
+        }
+
+        SpfEvaluationResult result = await _spfEvaluator!
+            .EvaluateAsync(checkedDomain, _session.RemoteAddress, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result.Result == SpfResult.TempError)
+        {
+            return (new SmtpCommandResult(SmtpReplies.SpfTemporaryError()), null);
+        }
+
+        return (null, new SpfEvaluationOutcome(result.Result, checkedDomain, result.Diagnostic));
     }
 
     /// <summary>

@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using MailServer.Application.Abstractions.Certificates;
+using MailServer.Application.Abstractions.Dns;
 using MailServer.Application.Abstractions.Security;
 using MailServer.Application.Abstractions.Smtp;
 using MailServer.Domain.Enums;
@@ -11,6 +12,7 @@ using MailServer.Domain.Policies;
 using MailServer.Domain.Smtp;
 using MailServer.Domain.ValueObjects;
 using MailServer.Infrastructure.Smtp;
+using MailServer.Infrastructure.Spf;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -199,6 +201,9 @@ public sealed class SmtpWireTests : IAsyncLifetime
         // listener does it - a bug this project shipped and then found by running the server.
         services.AddSingleton(_recorder);
         services.AddSingleton<ISecurityEventRecorder>(sp => sp.GetRequiredService<CountingSecurityEventRecorder>());
+        services.AddSingleton<ISpfTxtResolver, NoOpSpfTxtResolver>();
+        services.AddSingleton<IDnsResolver, NoOpDnsResolver>();
+        services.AddSingleton<SpfEvaluator>();
         services.AddScoped<SmtpDataReceiver>();
         services.AddScoped<SmtpConnectionHandler>();
 

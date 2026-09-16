@@ -223,6 +223,19 @@ public static class SmtpReplies
     public static SmtpReply SubmissionRateExceeded(int limit, TimeSpan window) =>
         new(451, "4.7.1", $"Submission rate limit reached ({limit} messages per {window.TotalHours:0.#} hour(s)); try again later");
 
+    /// <summary>
+    /// 451 4.4.3 — a DNS failure while evaluating SPF for the sender's domain.
+    /// </summary>
+    /// <remarks>
+    /// <b>Transient, by RFC 7208 §8.6's own recommendation.</b> A <c>temperror</c> means
+    /// evaluation could not complete, not that it completed and failed — accepting the message
+    /// anyway would skip the check entirely, and rejecting it permanently would punish a sender
+    /// for this server's resolver having a bad moment. A retry a few minutes later, when the
+    /// lookup most likely succeeds, is the only response that treats both sides fairly.
+    /// </remarks>
+    public static SmtpReply SpfTemporaryError() =>
+        new(451, "4.4.3", "Temporary error evaluating SPF for the sender's domain; please try again later");
+
     public static SmtpReply SyntaxError(string detail) => new(501, "5.5.4", detail);
 
     public static SmtpReply CommandNotRecognised(string command) =>

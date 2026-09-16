@@ -8,6 +8,7 @@ using MailServer.Domain.Enums;
 using MailServer.Domain.Policies;
 using MailServer.Domain.Smtp;
 using MailServer.Domain.ValueObjects;
+using MailServer.Infrastructure.Spf;
 using Microsoft.Extensions.Logging;
 
 namespace MailServer.Infrastructure.Smtp;
@@ -54,6 +55,7 @@ public sealed class SmtpConnectionHandler(
     IMailboxAuthenticator authenticator,
     SubmissionPolicy submissionPolicy,
     ISubmissionRateLimiter rateLimiter,
+    SpfEvaluator spfEvaluator,
     ILogger<SmtpConnectionHandler> logger)
 {
     /// <summary>Handles one connection to completion.</summary>
@@ -104,7 +106,8 @@ public sealed class SmtpConnectionHandler(
                 logger,
                 authenticator,
                 submissionPolicy,
-                rateLimiter);
+                rateLimiter,
+                spfEvaluator);
 
             SmtpLineReader reader = new(stream, options.MaxLineOctets);
 
