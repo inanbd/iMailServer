@@ -242,8 +242,8 @@ public static class DependencyInjection
         services.TryAddSingleton<IDkimPublicKeyResolver, DnsDkimPublicKeyResolver>();
 
         // ---- SPF (Milestone 9) --------------------------------------------------------------
-        services.TryAddSingleton<ISpfDnsClient, LookupClientSpfAdapter>();
-        services.TryAddSingleton<ISpfTxtResolver, DnsSpfTxtResolver>();
+        services.TryAddSingleton<ITxtDnsClient, LookupClientTxtAdapter>();
+        services.TryAddSingleton<ITxtRecordResolver, DnsTxtRecordResolver>();
         services.TryAddScoped<SpfEvaluator>();
 
         return services;

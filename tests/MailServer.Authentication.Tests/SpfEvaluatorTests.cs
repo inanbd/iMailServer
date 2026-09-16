@@ -293,20 +293,20 @@ public sealed class SpfEvaluatorTests
 
     // ---- Fakes ------------------------------------------------------------------------------
 
-    private sealed class FakeSpfTxtResolver : ISpfTxtResolver
+    private sealed class FakeSpfTxtResolver : ITxtRecordResolver
     {
-        private readonly Dictionary<string, SpfTxtLookupResult> _results = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, TxtLookupResult> _results = new(StringComparer.OrdinalIgnoreCase);
 
         public void SetRecord(string domain, string record) => SetRawRecords(domain, [record]);
 
         public void SetRawRecords(string domain, IReadOnlyList<string> records) =>
-            _results[domain] = SpfTxtLookupResult.Success(records);
+            _results[domain] = TxtLookupResult.Success(records);
 
         public void SetTemporaryFailure(string domain) =>
-            _results[domain] = SpfTxtLookupResult.Temporary("simulated failure");
+            _results[domain] = TxtLookupResult.Temporary("simulated failure");
 
-        public Task<SpfTxtLookupResult> GetTxtRecordsAsync(string domain, CancellationToken cancellationToken) =>
-            Task.FromResult(_results.GetValueOrDefault(domain, SpfTxtLookupResult.Success([])));
+        public Task<TxtLookupResult> GetTxtRecordsAsync(string domain, CancellationToken cancellationToken) =>
+            Task.FromResult(_results.GetValueOrDefault(domain, TxtLookupResult.Success([])));
     }
 
     private sealed class FakeDnsResolver : IDnsResolver

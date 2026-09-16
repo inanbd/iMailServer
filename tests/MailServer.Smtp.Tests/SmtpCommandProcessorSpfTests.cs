@@ -21,18 +21,18 @@ public sealed class SmtpCommandProcessorSpfTests
 
     private readonly FakeSmtpDirectory _directory = new();
 
-    private sealed class FakeSpfTxtResolver : ISpfTxtResolver
+    private sealed class FakeSpfTxtResolver : ITxtRecordResolver
     {
-        private readonly Dictionary<string, SpfTxtLookupResult> _results = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, TxtLookupResult> _results = new(StringComparer.OrdinalIgnoreCase);
 
         public void SetRecord(string domain, string record) =>
-            _results[domain] = SpfTxtLookupResult.Success([record]);
+            _results[domain] = TxtLookupResult.Success([record]);
 
         public void SetTemporaryFailure(string domain) =>
-            _results[domain] = SpfTxtLookupResult.Temporary("simulated failure");
+            _results[domain] = TxtLookupResult.Temporary("simulated failure");
 
-        public Task<SpfTxtLookupResult> GetTxtRecordsAsync(string domain, CancellationToken cancellationToken) =>
-            Task.FromResult(_results.GetValueOrDefault(domain, SpfTxtLookupResult.Success([])));
+        public Task<TxtLookupResult> GetTxtRecordsAsync(string domain, CancellationToken cancellationToken) =>
+            Task.FromResult(_results.GetValueOrDefault(domain, TxtLookupResult.Success([])));
     }
 
     private (SmtpCommandProcessor Processor, FakeSpfTxtResolver Txt) CreateProcessor(

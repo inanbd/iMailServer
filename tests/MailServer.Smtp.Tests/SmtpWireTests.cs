@@ -201,7 +201,7 @@ public sealed class SmtpWireTests : IAsyncLifetime
         // listener does it - a bug this project shipped and then found by running the server.
         services.AddSingleton(_recorder);
         services.AddSingleton<ISecurityEventRecorder>(sp => sp.GetRequiredService<CountingSecurityEventRecorder>());
-        services.AddSingleton<ISpfTxtResolver, NoOpSpfTxtResolver>();
+        services.AddSingleton<ITxtRecordResolver, NoOpTxtRecordResolver>();
         services.AddSingleton<IDnsResolver, NoOpDnsResolver>();
         services.AddSingleton<SpfEvaluator>();
         services.AddScoped<SmtpDataReceiver>();

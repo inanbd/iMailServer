@@ -72,7 +72,7 @@ public sealed class SmtpSubmissionWireTests : IAsyncLifetime
         services.AddSingleton<IMailboxAuthenticator>(
             new RecordingAuthenticator(_authenticator, _recorder));
 
-        services.AddSingleton<ISpfTxtResolver, NoOpSpfTxtResolver>();
+        services.AddSingleton<ITxtRecordResolver, NoOpTxtRecordResolver>();
         services.AddSingleton<IDnsResolver, NoOpDnsResolver>();
         services.AddSingleton<SpfEvaluator>();
 

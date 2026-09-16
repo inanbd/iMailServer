@@ -30,7 +30,7 @@ public sealed record SpfEvaluationResult(SpfResult Result, string? Diagnostic);
 /// answer.
 /// </para>
 /// </remarks>
-public sealed class SpfEvaluator(ISpfTxtResolver txtResolver, IDnsResolver dnsResolver, ILogger<SpfEvaluator> logger)
+public sealed class SpfEvaluator(ITxtRecordResolver txtResolver, IDnsResolver dnsResolver, ILogger<SpfEvaluator> logger)
 {
     /// <summary>RFC 7208 §4.6.4: at most 10 DNS-querying mechanisms/modifiers.</summary>
     private const int MaxDnsLookups = 10;
@@ -96,7 +96,7 @@ public sealed class SpfEvaluator(ISpfTxtResolver txtResolver, IDnsResolver dnsRe
     private async Task<SpfEvaluationResult> EvaluateDomainAsync(
         string domain, IpAddressValue clientIp, Budget budget, CancellationToken cancellationToken)
     {
-        SpfTxtLookupResult txtResult = await txtResolver.GetTxtRecordsAsync(domain, cancellationToken)
+        TxtLookupResult txtResult = await txtResolver.GetTxtRecordsAsync(domain, cancellationToken)
             .ConfigureAwait(false);
 
         if (txtResult.Status == DnsLookupStatus.Temporary)
