@@ -110,7 +110,8 @@ public sealed class OutboundDkimSigningTests
             .ShouldBeTrue(parseError);
 
         var resolver = new FixedPublicKeyResolver(publicKeyBase64);
-        var verifier = new DkimMessageVerifier(resolver, NullLogger<DkimMessageVerifier>.Instance);
+        var verifier = new DkimMessageVerifier(
+            resolver, new FakeClock(DateTimeOffset.UtcNow), NullLogger<DkimMessageVerifier>.Instance);
 
         using var bodyStream = new MemoryStream(buffer[headers!.HeaderBlockLength..]);
         IReadOnlyList<DkimVerifiedSignature> verified = await verifier.VerifyAsync(

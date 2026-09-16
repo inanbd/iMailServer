@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using MailServer.Application.Abstractions.Certificates;
@@ -383,14 +384,27 @@ internal sealed class OutboundSmtpClient(
 
             content.Seek(headers.HeaderBlockLength, SeekOrigin.Begin);
 
-            DkimSignatureTags tags = await dkimSigner.SignAsync(
-                headers,
-                content,
-                fromDomain!,
-                activeKey.Selector,
-                privateKey,
-                clock.UtcNow,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+            DkimSignatureTags tags;
+
+            try
+            {
+                tags = await dkimSigner.SignAsync(
+                    headers,
+                    content,
+                    fromDomain!,
+                    activeKey.Selector,
+                    privateKey,
+                    clock.UtcNow,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                // The decrypted private key came from ISecretProtector.Unprotect purely to be
+                // handed to RSA.ImportPkcs8PrivateKey for this one signature; unlike a SASL
+                // password (docs/Standards.md's "held in a clearable buffer... overwritten
+                // immediately afterwards"), nothing here was clearing this copy afterwards.
+                CryptographicOperations.ZeroMemory(privateKey);
+            }
 
             return Encoding.ASCII.GetBytes($"DKIM-Signature: {tags.Compose()}\r\n");
         }

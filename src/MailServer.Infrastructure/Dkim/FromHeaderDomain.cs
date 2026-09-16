@@ -47,6 +47,11 @@ internal static class FromHeaderDomain
 
         string value = ExtractHeaderValueText(fromFields[0]);
 
+        if (HasUnhandledComment(value))
+        {
+            return false;
+        }
+
         if (HasMoreThanOneMailbox(value))
         {
             return false;
@@ -62,6 +67,26 @@ internal static class FromHeaderDomain
         domain = address.Domain;
         return true;
     }
+
+    /// <summary>
+    /// A conservative signal that a <c>From:</c> value contains an RFC 5322 CFWS comment
+    /// (parenthesized text), which neither this method nor <see cref="ExtractAddrSpec"/> tracks.
+    /// </summary>
+    /// <remarks>
+    /// A comment is legal almost anywhere in a mailbox and carries no address meaning: <c>From:
+    /// victim@good.example (name &lt;attacker@evil.example&gt;)</c> is one single, valid RFC 5322
+    /// mailbox — <c>victim@good.example</c> — whose trailing comment is not part of the address.
+    /// But <see cref="ExtractAddrSpec"/>'s last-<c>&lt;...&gt;</c>-pair heuristic does not know
+    /// that: it would find the bracket pair <i>inside</i> the comment and return the attacker's
+    /// address instead, handing DMARC alignment a domain the sender never actually used and
+    /// letting an attacker who controls that domain's own SPF/DKIM pass DMARC while a client
+    /// displays the victim's address. Refusing whenever a comment is present is the same
+    /// safe-direction trade-off this type already makes for a comma inside a quoted string (see
+    /// <see cref="HasMoreThanOneMailbox"/>): it can only skip the alignment check for an unusual
+    /// but legitimate message, never turn an attacker's address of their own choosing into a
+    /// false alignment pass.
+    /// </remarks>
+    private static bool HasUnhandledComment(string headerValue) => headerValue.Contains('(');
 
     /// <summary>
     /// A conservative, cheap signal that a <c>From:</c> value names more than one mailbox: more

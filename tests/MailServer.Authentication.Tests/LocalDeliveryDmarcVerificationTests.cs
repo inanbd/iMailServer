@@ -184,6 +184,18 @@ public sealed class LocalDeliveryDmarcVerificationTests : IAsyncLifetime
         return await store.ExistsAsync(messageId, CancellationToken.None);
     }
 
+    private async Task<string?> QueryDkimDiagnosticAsync(StoredMessageId messageId)
+    {
+        await using AsyncServiceScope scope = _services.CreateAsyncScope();
+        IDbConnectionFactory connectionFactory = scope.ServiceProvider.GetRequiredService<IDbConnectionFactory>();
+
+        await using System.Data.Common.DbConnection connection =
+            await connectionFactory.OpenConnectionAsync(CancellationToken.None);
+
+        return await Dapper.SqlMapper.QuerySingleAsync<string?>(
+            connection, "SELECT Diagnostic FROM DkimVerificationResults WHERE MessageId = @Id", new { Id = messageId.Value });
+    }
+
     [Fact]
     public async Task A_message_failing_alignment_under_p_reject_is_rejected_and_delivers_to_nobody()
     {
@@ -295,5 +307,49 @@ public sealed class LocalDeliveryDmarcVerificationTests : IAsyncLifetime
 
         result.Rejection.ShouldBeNull();
         (await QueryDmarcResultAsync(messageId)).ShouldBeNull();
+    }
+
+    /// <summary>
+    /// <see cref="DkimSignatureTags.TryParse"/> echoes an unbounded, attacker-controlled tag
+    /// segment verbatim into its error message when a segment has no <c>=</c> separator - trivial
+    /// to trigger with a <c>DKIM-Signature</c> value containing no <c>;</c> at all. That flows,
+    /// unmodified, into <c>DkimVerificationResults.Diagnostic</c>, which SQL Server declares as
+    /// <c>NVARCHAR(1024)</c>; an insert that violates that would throw, and
+    /// <see cref="MailServer.Infrastructure.Smtp.LocalDeliveryService"/>'s "fails open" handler
+    /// would silently turn that into "DMARC does not apply" for the whole message - skipping
+    /// enforcement of a <c>p=reject</c> policy that should have rejected it. SQLite's TEXT column
+    /// has no such limit, so this test cannot reproduce the throw itself, but it does prove the
+    /// fix (truncating before insert) rather than only asserting behaviour the bug never disturbs
+    /// on this provider.
+    /// </summary>
+    [Fact]
+    public async Task An_oversized_dkim_diagnostic_is_truncated_rather_than_stored_verbatim()
+    {
+        _txtResolver.SetRecord("_dmarc.example.com", "v=DMARC1; p=reject");
+
+        // No ';' anywhere in the value, so DkimSignatureTags.TryParse treats the whole thing as
+        // one tag segment with no '=' - its error message embeds this verbatim.
+        string malformedSignatureValue = new string('x', 2000);
+
+        byte[] content = Encoding.ASCII.GetBytes(
+            $"From: alice@example.com\r\n" +
+            $"To: bob@destination.example\r\n" +
+            $"Subject: Hi\r\n" +
+            $"DKIM-Signature: {malformedSignatureValue}\r\n" +
+            "\r\n" +
+            "Hello.\r\n");
+
+        StoredMessageId messageId = await StoreAsync(content);
+
+        DeliveryResult result = await DeliverAsync(
+            messageId, content, new SpfEvaluationOutcome(SpfResult.Fail, DomainName.Parse("example.com"), null));
+
+        // The malformed signature can never align, so DKIM contributes nothing and this message
+        // still fails DMARC on SPF alone - enforcement must not have been skipped.
+        result.Rejection.ShouldNotBeNull();
+
+        string? diagnostic = await QueryDkimDiagnosticAsync(messageId);
+        diagnostic.ShouldNotBeNull();
+        diagnostic.Length.ShouldBeLessThanOrEqualTo(1024);
     }
 }

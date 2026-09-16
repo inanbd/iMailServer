@@ -2,6 +2,8 @@ using System.Security.Cryptography;
 using System.Text;
 using MailServer.Application.Abstractions.Dkim;
 using MailServer.Application.Abstractions.Dns;
+using MailServer.Application.Abstractions.Time;
+using MailServer.Domain.Entities;
 using MailServer.Domain.Enums;
 using MailServer.Domain.Mail;
 using MailServer.Domain.ValueObjects;
@@ -30,7 +32,8 @@ public sealed record DkimVerifiedSignature(
 /// implement) never prevents evaluating the others — see <see cref="DkimSignatureTags.TryParse"/>'s
 /// own remarks.
 /// </remarks>
-public sealed class DkimMessageVerifier(IDkimPublicKeyResolver publicKeyResolver, ILogger<DkimMessageVerifier> logger)
+public sealed class DkimMessageVerifier(
+    IDkimPublicKeyResolver publicKeyResolver, IClock clock, ILogger<DkimMessageVerifier> logger)
 {
     private const int BodyReadBufferSize = 64 * 1024;
 
@@ -117,6 +120,16 @@ public sealed class DkimMessageVerifier(IDkimPublicKeyResolver publicKeyResolver
             return new DkimVerifiedSignature(DkimVerificationResult.Fail, tags.SigningDomain, "body hash mismatch.");
         }
 
+        // RFC 6376 §3.5's x= is a fallback for key compromise: a signature is only as good as
+        // its stated validity window. Without this check, a captured, legitimately-signed old
+        // message could be replayed indefinitely and would still verify, for as long as the
+        // origin's key has not since rotated.
+        if (tags.ExpiresUtc is { } expires && clock.UtcNow > expires)
+        {
+            return new DkimVerifiedSignature(
+                DkimVerificationResult.Fail, tags.SigningDomain, $"signature expired at {expires:O}.");
+        }
+
         DkimPublicKeyLookupResult keyLookup = await publicKeyResolver
             .ResolveAsync(tags.Selector, tags.SigningDomain, cancellationToken)
             .ConfigureAwait(false);
@@ -145,6 +158,19 @@ public sealed class DkimMessageVerifier(IDkimPublicKeyResolver publicKeyResolver
         {
             using RSA rsa = RSA.Create();
             rsa.ImportSubjectPublicKeyInfo(Convert.FromBase64String(keyLookup.Record.PublicKeyBase64), out _);
+
+            // DkimKey.Generate enforces this floor for keys this product creates, but a DNS TXT
+            // record is someone else's key, published under someone else's control - including,
+            // for an old selector, a legacy short key that may since have been factored. Nothing
+            // about RFC 6376 requires trusting whatever key size a record happens to publish.
+            if (rsa.KeySize < DkimKey.MinimumRsaKeyLengthBits)
+            {
+                return new DkimVerifiedSignature(
+                    DkimVerificationResult.PermError,
+                    tags.SigningDomain,
+                    $"the selector's key is {rsa.KeySize} bits, below the " +
+                    $"{DkimKey.MinimumRsaKeyLengthBits}-bit minimum this product accepts.");
+            }
 
             verified = rsa.VerifyData(
                 dataToVerify,

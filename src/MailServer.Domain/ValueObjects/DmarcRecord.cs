@@ -89,11 +89,22 @@ public sealed class DmarcRecord
         AlignmentMode dkimAlignment = AlignmentMode.Relaxed;
         AlignmentMode spfAlignment = AlignmentMode.Relaxed;
 
+        // RFC 7489 borrows RFC 6376 §3.2's tag-list syntax, under which a tag name occurring
+        // more than once makes the entire record invalid - never "last one wins" (see
+        // DkimSignatureTags.TryParse's identical rule for the same syntax).
+        HashSet<string> seenTags = new(StringComparer.OrdinalIgnoreCase) { firstName };
+
         for (int i = 1; i < tagSpecs.Length; i++)
         {
             if (!TryParseTag(tagSpecs[i], out string name, out string value))
             {
                 error = $"'{tagSpecs[i]}' is not a valid tag-spec.";
+                return false;
+            }
+
+            if (!seenTags.Add(name))
+            {
+                error = $"tag '{name}' appears more than once.";
                 return false;
             }
 

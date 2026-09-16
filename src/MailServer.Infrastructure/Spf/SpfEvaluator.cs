@@ -308,6 +308,17 @@ public sealed class SpfEvaluator(ITxtRecordResolver txtResolver, IDnsResolver dn
                 return MatchOutcome.Error(SpfResult.TempError, addresses.Diagnostic);
             }
 
+            // Each MX host resolved with no A/AAAA record is exactly as void as the top-level
+            // lookup above, or the "a" mechanism's own address lookup - RFC 7208 §4.6.4 bounds
+            // how many of these one MAIL FROM may cause regardless of which mechanism triggers
+            // them. Without this, a single "mx" mechanism could hide up to ten void lookups
+            // behind the ".Take(10)" above, exempt from the 2-void-lookup limit the rest of this
+            // evaluator enforces.
+            if (addresses.Addresses.Count == 0 && !TryChargeVoidLookup(budget, out SpfEvaluationResult? voidError))
+            {
+                return MatchOutcome.Error(voidError!.Result, voidError.Diagnostic);
+            }
+
             if (MatchesAny(addresses.Addresses, clientIp, directive.Ip4PrefixLength, directive.Ip6PrefixLength))
             {
                 return MatchOutcome.Matched;

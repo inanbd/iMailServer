@@ -243,6 +243,26 @@ public sealed class SpfEvaluatorTests
     }
 
     [Fact]
+    public async Task An_mx_mechanism_charges_a_void_lookup_for_each_host_with_no_address_record()
+    {
+        var txt = new FakeSpfTxtResolver();
+        txt.SetRecord("example.com", "v=spf1 mx -all");
+
+        var dns = new FakeDnsResolver();
+
+        // One "mx" mechanism, spending a single main-budget slot, whose three MX hosts each
+        // have no A/AAAA record - three void lookups from resolving them, none of which
+        // SetAddresses below gives an address to.
+        dns.SetMx("example.com", "void1.example", "void2.example", "void3.example");
+
+        SpfEvaluationResult result = await CreateEvaluator(txt, dns)
+            .EvaluateAsync(Domain("example.com"), Ip("203.0.113.10"), CancellationToken.None);
+
+        result.Result.ShouldBe(SpfResult.PermError);
+        result.Diagnostic.ShouldNotBeNull().ShouldContain("void");
+    }
+
+    [Fact]
     public async Task A_temporary_dns_failure_on_the_top_level_record_is_TempError()
     {
         var txt = new FakeSpfTxtResolver();

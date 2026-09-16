@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using MailServer.Application.Abstractions.Dkim;
 using MailServer.Application.Abstractions.Dns;
+using MailServer.Application.Abstractions.Time;
 using MailServer.Domain.Enums;
 using MailServer.Domain.Mail;
 using MailServer.Domain.ValueObjects;
@@ -42,9 +43,9 @@ public sealed class DkimMessageSignerVerifierTests
         return (headers!, buffer[headers!.HeaderBlockLength..]);
     }
 
-    private static (byte[] Pkcs8PrivateKey, string PublicKeyBase64) GenerateKeyPair()
+    private static (byte[] Pkcs8PrivateKey, string PublicKeyBase64) GenerateKeyPair(int keySizeBits = 2048)
     {
-        using RSA rsa = RSA.Create(2048);
+        using RSA rsa = RSA.Create(keySizeBits);
         return (rsa.ExportPkcs8PrivateKey(), Convert.ToBase64String(rsa.ExportSubjectPublicKeyInfo()));
     }
 
@@ -57,6 +58,13 @@ public sealed class DkimMessageSignerVerifierTests
         public Task<DkimPublicKeyLookupResult> ResolveAsync(
             DkimSelector selector, DomainName signingDomain, CancellationToken cancellationToken) =>
             Task.FromResult(respond(selector, signingDomain));
+    }
+
+    private sealed class FakeClock(DateTimeOffset now) : IClock
+    {
+        public DateTimeOffset UtcNow => now;
+        public long GetTimestamp() => 0;
+        public TimeSpan GetElapsedTime(long startingTimestamp) => TimeSpan.Zero;
     }
 
     private static IDkimPublicKeyResolver ResolverReturning(string publicKeyBase64) =>
@@ -90,7 +98,7 @@ public sealed class DkimMessageSignerVerifierTests
         byte[] signedMessage, IDkimPublicKeyResolver resolver)
     {
         (RawMessageHeaders headers, byte[] body) = ParseSample(Encoding.ASCII.GetString(signedMessage));
-        var verifier = new DkimMessageVerifier(resolver, NullLogger<DkimMessageVerifier>.Instance);
+        var verifier = new DkimMessageVerifier(resolver, new FakeClock(Now), NullLogger<DkimMessageVerifier>.Instance);
         using var bodyStream = new MemoryStream(body);
 
         return await verifier.VerifyAsync(headers, bodyStream, CancellationToken.None);
@@ -113,12 +121,58 @@ public sealed class DkimMessageSignerVerifierTests
         results[0].SigningDomain.ShouldBe(SigningDomain);
     }
 
+    /// <summary>
+    /// Injects an <c>x=</c> tag into an otherwise-real signature value. This product's own
+    /// signer never sets <c>x=</c> (<see cref="DkimSignatureTags.CreateForSigning"/> always
+    /// passes <c>expiresUtc: null</c>), so there is no way to produce a genuinely,
+    /// cryptographically signed message carrying one - the only way to exercise expiry
+    /// enforcement is to add the tag after the fact. The body hash (<c>bh=</c>) is untouched, so
+    /// the check under test - which runs before the DNS key lookup and RSA verification, both of
+    /// which a tampered <c>b=</c> would otherwise legitimately fail anyway - is what actually
+    /// produces the result this test asserts on, not a coincidental signature mismatch.
+    /// </summary>
+    private static string WithExpiry(string signatureValue, DateTimeOffset expires) =>
+        signatureValue.Replace("; h=", $"; x={expires.ToUnixTimeSeconds()}; h=", StringComparison.Ordinal);
+
+    [Fact]
+    public async Task A_signature_past_its_x_tag_fails_verification_even_though_otherwise_valid()
+    {
+        (RawMessageHeaders headers, byte[] body) = ParseSample(SampleMessage);
+        (byte[] privateKey, string publicKeyBase64) = GenerateKeyPair();
+
+        byte[] signatureValue = await SignAsync(headers, body, privateKey);
+        string expired = WithExpiry(Encoding.ASCII.GetString(signatureValue), Now - TimeSpan.FromSeconds(1));
+        byte[] signedMessage = BuildSignedMessage(expired, SampleMessage);
+
+        IReadOnlyList<DkimVerifiedSignature> results = await VerifyAsync(
+            signedMessage, ResolverReturning(publicKeyBase64));
+
+        results[0].Result.ShouldBe(DkimVerificationResult.Fail);
+        results[0].Diagnostic.ShouldNotBeNull().ShouldContain("expired");
+    }
+
+    [Fact]
+    public async Task A_signature_from_a_key_below_the_minimum_size_is_rejected_even_if_otherwise_valid()
+    {
+        (RawMessageHeaders headers, byte[] body) = ParseSample(SampleMessage);
+        (byte[] privateKey, string publicKeyBase64) = GenerateKeyPair(keySizeBits: 1024);
+
+        byte[] signatureValue = await SignAsync(headers, body, privateKey);
+        byte[] signedMessage = BuildSignedMessage(Encoding.ASCII.GetString(signatureValue), SampleMessage);
+
+        IReadOnlyList<DkimVerifiedSignature> results = await VerifyAsync(
+            signedMessage, ResolverReturning(publicKeyBase64));
+
+        results[0].Result.ShouldBe(DkimVerificationResult.PermError);
+        results[0].Diagnostic.ShouldNotBeNull().ShouldContain("1024");
+    }
+
     [Fact]
     public async Task A_message_with_no_signature_reports_None()
     {
         (RawMessageHeaders headers, byte[] body) = ParseSample(SampleMessage);
         var verifier = new DkimMessageVerifier(
-            ResolverReturning("unused"), NullLogger<DkimMessageVerifier>.Instance);
+            ResolverReturning("unused"), new FakeClock(Now), NullLogger<DkimMessageVerifier>.Instance);
 
         using var bodyStream = new MemoryStream(body);
         IReadOnlyList<DkimVerifiedSignature> results = await verifier.VerifyAsync(headers, bodyStream, CancellationToken.None);
@@ -283,7 +337,7 @@ public sealed class DkimMessageSignerVerifierTests
 
         (RawMessageHeaders combinedHeaders, byte[] combinedBody) = ParseSample(message);
         var verifier = new DkimMessageVerifier(
-            ResolverReturning(goodPublicKeyBase64), NullLogger<DkimMessageVerifier>.Instance);
+            ResolverReturning(goodPublicKeyBase64), new FakeClock(Now), NullLogger<DkimMessageVerifier>.Instance);
 
         using var bodyStream = new MemoryStream(combinedBody);
         IReadOnlyList<DkimVerifiedSignature> results = await verifier.VerifyAsync(

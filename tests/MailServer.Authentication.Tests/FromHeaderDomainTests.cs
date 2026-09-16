@@ -59,6 +59,33 @@ public class FromHeaderDomainTests
     }
 
     [Fact]
+    public void Refuses_a_from_field_whose_comment_hides_a_bracketed_address()
+    {
+        // The exploit shape a prior adversarial review missed: one single, valid RFC 5322
+        // mailbox (a comment carries no address meaning), but the last-<...>-pair heuristic
+        // would find the bracket pair inside the comment and return the attacker's domain
+        // instead of the real, unbracketed one - a false DMARC alignment pass for a domain the
+        // sender never actually used.
+        bool ok = FromHeaderDomain.TryExtract(
+            Headers("From: victim@good.example (name <attacker@evil.example>)"),
+            out DomainName? domain);
+
+        ok.ShouldBeFalse();
+        domain.ShouldBeNull();
+    }
+
+    [Fact]
+    public void Refuses_a_from_field_with_a_comment_even_without_a_bracket_inside_it()
+    {
+        bool ok = FromHeaderDomain.TryExtract(
+            Headers("From: alice@example.com (this is Alice)"),
+            out DomainName? domain);
+
+        ok.ShouldBeFalse();
+        domain.ShouldBeNull();
+    }
+
+    [Fact]
     public void Refuses_more_than_one_from_header_field()
     {
         bool ok = FromHeaderDomain.TryExtract(

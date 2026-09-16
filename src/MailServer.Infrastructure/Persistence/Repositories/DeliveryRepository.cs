@@ -46,6 +46,22 @@ internal sealed class DeliveryRepository(
         FROM    MailboxFolders
         """;
 
+    /// <summary>
+    /// The exact length <c>DkimVerificationResults.Diagnostic</c> and
+    /// <c>DmarcVerificationResults.Diagnostic</c> are declared as on SQL Server (see the
+    /// 0010/0011 migrations). SQLite's TEXT column has no such limit, but a diagnostic string
+    /// can originate from attacker-controlled input echoed verbatim (e.g. a raw DKIM tag-list
+    /// segment from <c>DkimSignatureTags.TryParse</c>'s own error message) and must never be
+    /// allowed to grow past what the stricter provider accepts: a length-triggered INSERT
+    /// failure here is caught by <see cref="Smtp.LocalDeliveryService"/>'s "fails open" handler,
+    /// which would silently skip DMARC enforcement for the whole message, not merely fail to
+    /// log a diagnostic.
+    /// </summary>
+    private const int MaxDiagnosticLength = 1024;
+
+    private static string? TruncateDiagnostic(string? diagnostic) =>
+        diagnostic is { Length: > MaxDiagnosticLength } ? diagnostic[..MaxDiagnosticLength] : diagnostic;
+
     public Task AddMessageAsync(MessageRecord message, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -254,7 +270,7 @@ internal sealed class DeliveryRepository(
                     record.SignatureIndex,
                     Result = (int)record.Result,
                     SigningDomain = record.SigningDomain?.Value,
-                    record.Diagnostic,
+                    Diagnostic = TruncateDiagnostic(record.Diagnostic),
                     record.CreatedUtc,
                 },
                 ct)).ConfigureAwait(false);
@@ -298,7 +314,7 @@ internal sealed class DeliveryRepository(
                     AlignedMechanisms = (int)record.AlignedMechanisms,
                     FromDomain = record.FromDomain?.Value,
                     PolicyDomain = record.PolicyDomain?.Value,
-                    record.Diagnostic,
+                    Diagnostic = TruncateDiagnostic(record.Diagnostic),
                     record.CreatedUtc,
                 },
                 ct)).ConfigureAwait(false);

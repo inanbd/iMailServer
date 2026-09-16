@@ -155,6 +155,19 @@ public class DmarcRecordTests
     }
 
     [Fact]
+    public void Rejects_a_record_with_a_duplicate_tag_rather_than_letting_the_later_one_win()
+    {
+        // RFC 6376 §3.2's tag-list syntax (which RFC 7489 borrows) makes a repeated tag name
+        // invalidate the whole record - this must not silently resolve to p=none via
+        // last-write-wins over the record's own, presumably intended, p=reject.
+        DmarcRecord.TryParse("v=DMARC1; p=reject; p=none", out DmarcRecord? record, out string? error)
+            .ShouldBeFalse();
+
+        record.ShouldBeNull();
+        error.ShouldNotBeNull();
+    }
+
+    [Fact]
     public void Parses_the_full_example_record_from_the_dmarc_documentation()
     {
         DmarcRecord.TryParse(
