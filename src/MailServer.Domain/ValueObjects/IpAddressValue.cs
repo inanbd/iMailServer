@@ -43,6 +43,52 @@ public sealed class IpAddressValue : IEquatable<IpAddressValue>
     /// <summary>Returns a copy of the underlying address.</summary>
     public IPAddress ToIpAddress() => _address;
 
+    /// <summary>
+    /// True when this address falls within <paramref name="network"/>/<paramref name="prefixLength"/>.
+    /// </summary>
+    /// <remarks>
+    /// Used by SPF's <c>ip4</c>/<c>ip6</c> mechanisms and by matching a resolved <c>a</c>/<c>mx</c>
+    /// address against the connecting client. Cross-family comparisons (an IPv4 candidate against
+    /// an IPv6 network or vice versa) are never a match — SPF's own grammar keeps <c>ip4</c> and
+    /// <c>ip6</c> mechanisms address-family-specific, so silently coercing one into the other
+    /// would be inventing a match the record never asked for.
+    /// </remarks>
+    public bool IsInSubnet(IpAddressValue network, int prefixLength)
+    {
+        ArgumentNullException.ThrowIfNull(network);
+
+        if (_address.AddressFamily != network._address.AddressFamily)
+        {
+            return false;
+        }
+
+        byte[] candidateBytes = _address.GetAddressBytes();
+        byte[] networkBytes = network._address.GetAddressBytes();
+
+        ArgumentOutOfRangeException.ThrowIfNegative(prefixLength);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(prefixLength, candidateBytes.Length * 8);
+
+        int fullBytes = prefixLength / 8;
+        int remainingBits = prefixLength % 8;
+
+        for (int i = 0; i < fullBytes; i++)
+        {
+            if (candidateBytes[i] != networkBytes[i])
+            {
+                return false;
+            }
+        }
+
+        if (remainingBits == 0)
+        {
+            return true;
+        }
+
+        int mask = 0xFF << (8 - remainingBits) & 0xFF;
+
+        return (candidateBytes[fullBytes] & mask) == (networkBytes[fullBytes] & mask);
+    }
+
     public static IpAddressValue From(IPAddress address)
     {
         ArgumentNullException.ThrowIfNull(address);

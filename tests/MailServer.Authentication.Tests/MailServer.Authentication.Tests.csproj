@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Milestone 9: DKIM/SPF/DMARC/ARC. Starts with the Domain-layer canonicalization primitives
+    (RFC 6376 relaxed header/body canonicalization) and grows to cover the DkimKey aggregate,
+    SPF evaluation, DMARC alignment, and the fake-DNS-backed evaluator tests, mirroring how
+    MailServer.Outbound.Tests grew across Milestone 8.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>MailServer.Authentication.Tests</RootNamespace>
+    <AssemblyName>MailServer.Authentication.Tests</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MailServer.Domain\MailServer.Domain.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Shouldly" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Using Include="Shouldly" />
+  </ItemGroup>
+
+</Project>

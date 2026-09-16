@@ -32,6 +32,12 @@ public sealed class ArchitectureTests
         "System.Runtime.InteropServices",
         "System.Text.RegularExpressions",
         "netstandard",
+
+        // Milestone 9: DkimBodyCanonicalizer streams RFC 6376 relaxed body canonicalization
+        // straight into an IncrementalHash (SHA-256). This is a BCL hashing primitive, not a
+        // third-party or infrastructure dependency - the same justification SelfSignedCertificateGenerator
+        // already relies on for RSA key generation elsewhere in this codebase.
+        "System.Security.Cryptography",
     ];
 
     private static readonly string[] ForbiddenInDomain =
