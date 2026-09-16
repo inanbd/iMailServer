@@ -490,6 +490,33 @@ public sealed class LimitsOptions
     [Range(512, 65_536)]
     public int MaxSmtpLineBytes { get; set; } = 4_096;
 
+    /// <summary>
+    /// Longest IMAP command line accepted, excluding the terminator.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Deliberately far larger than <see cref="MaxSmtpLineBytes"/>. RFC 2683 §3.2.1.5 asks a
+    /// server to allow "a command line of at least 8000 octets", against a client that should
+    /// keep to about 1000 — the headroom exists because one IMAP command can legitimately carry
+    /// a long argument that SMTP has no equivalent of.
+    /// </para>
+    /// <para>
+    /// A sequence set is that argument. <see cref="Domain.Imap.ImapSequenceSet.MaxSegments"/>
+    /// accepts ten thousand comma-separated segments, which cannot fit in four kilobytes; a
+    /// client that enumerates messages individually rather than as a range — the exact case
+    /// RFC 2683 §3.2.1.5 is written about — would otherwise hit the line limit long before the
+    /// segment limit, and be refused for a command that was within every documented bound.
+    /// </para>
+    /// <para>
+    /// This bounds command text only. A literal's octets are not part of the line and are
+    /// governed by their own, much larger cap, decided where the literal is actually read —
+    /// see <see cref="Domain.Imap.ImapLiteralSpecifier"/> on why a claimed byte count and the
+    /// limit on it belong in different places.
+    /// </para>
+    /// </remarks>
+    [Range(8_000, 262_144)]
+    public int MaxImapLineBytes { get; set; } = 16_384;
+
     [Range(4_096, 4 * 1024 * 1024)]
     public int MaxHeaderBytes { get; set; } = 256 * 1024;
 

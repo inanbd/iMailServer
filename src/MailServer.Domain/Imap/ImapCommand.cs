@@ -142,6 +142,20 @@ public sealed record ImapCommand(string Tag, ImapVerb Verb, bool IsUid, string A
     public static bool SupportsUidPrefix(ImapVerb verb) =>
         verb is ImapVerb.Copy or ImapVerb.Fetch or ImapVerb.Store or ImapVerb.Search or ImapVerb.Move;
 
+    /// <summary>Whether <paramref name="tag"/> is one this server will accept and echo.</summary>
+    /// <remarks>
+    /// Public so that composing a response can assert the same rule the parser enforced, rather
+    /// than trusting that every tag reaching the writer came through <see cref="TryParse"/>. See
+    /// <see cref="ImapResponse.Tagged"/>, which refuses rather than sanitises: the hostile bytes
+    /// then never enter the output stream at all, not even in reduced form.
+    /// </remarks>
+    public static bool IsValidTag(string tag)
+    {
+        ArgumentNullException.ThrowIfNull(tag);
+
+        return ValidateTag(tag) == ImapTagFailure.None;
+    }
+
     /// <summary>Parses a command line.</summary>
     /// <remarks>
     /// <para>

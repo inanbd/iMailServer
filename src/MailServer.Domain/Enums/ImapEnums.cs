@@ -1,5 +1,35 @@
 namespace MailServer.Domain.Enums;
 
+/// <summary>Which IMAP listener a connection arrived on.</summary>
+/// <remarks>
+/// The IMAP counterpart of <see cref="SmtpListenerRole"/>, and it exists for the same reason:
+/// what may be offered to a connection depends on how that connection was made, and a decision
+/// that depends on the port must not be re-derived from a socket somewhere deep in a handler.
+/// Two values rather than SMTP's three, because IMAP has no equivalent of port 25's
+/// "anonymous peers deliver mail here" role — every IMAP connection is a mailbox owner
+/// reaching their own mail, so the only question is whether TLS started before the greeting.
+/// </remarks>
+public enum ImapListenerRole
+{
+    /// <summary>Port 143. Cleartext on connect; TLS is reached through <c>STARTTLS</c>.</summary>
+    /// <remarks>
+    /// RFC 2595 §3.2 requires a server implementing <c>STARTTLS</c> to advertise
+    /// <c>LOGINDISABLED</c> on an unencrypted connection, and RFC 3501 §6.2.3 requires a
+    /// configuration in which <c>LOGIN</c> is then actually refused. Both are how this listener
+    /// avoids being a place where a password crosses the network in the clear.
+    /// </remarks>
+    Cleartext = 0,
+
+    /// <summary>Port 993. TLS from the first byte, before the greeting.</summary>
+    /// <remarks>
+    /// RFC 8314 §3 prefers this over <c>STARTTLS</c> on 143: there is no cleartext phase for a
+    /// stripping attacker to interfere with, because the handshake precedes the protocol
+    /// entirely. <c>STARTTLS</c> is never legal here — there is no honest moment on 993 when it
+    /// would be.
+    /// </remarks>
+    ImplicitTls = 1,
+}
+
 /// <summary>Where an IMAP session has got to. RFC 3501 §3.</summary>
 /// <remarks>
 /// Three real states plus logout, in the same shape as <see cref="SmtpSessionState"/>: a command
