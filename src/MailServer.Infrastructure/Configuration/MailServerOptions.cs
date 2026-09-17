@@ -49,7 +49,71 @@ public sealed class MailServerOptions
 
     public SmtpOptions Smtp { get; set; } = new();
 
+    public ImapOptions Imap { get; set; } = new();
+
     public OutboundOptions Outbound { get; set; } = new();
+}
+
+/// <summary>The IMAP listeners.</summary>
+/// <remarks>
+/// <para>
+/// Both listeners are <b>disabled by default</b>, and that is the same decision
+/// <see cref="SmtpOptions"/> makes for submission: a port nobody asked for is a port nobody is
+/// watching. Mailbox access is the one service on this server that reaches a user's entire mail
+/// history, so it opens when an operator says so.
+/// </para>
+/// <para>
+/// Port 993 is the one to enable. RFC 8314 §3 prefers implicit TLS over <c>STARTTLS</c> for
+/// exactly the reason this server is careful about the upgrade: there is no cleartext phase for
+/// a stripping attacker to interfere with, because the handshake precedes the protocol
+/// entirely. Port 143 exists for clients that cannot do that, and it refuses <c>LOGIN</c> until
+/// TLS is negotiated.
+/// </para>
+/// </remarks>
+public sealed class ImapOptions
+{
+    /// <summary>Port 143. Cleartext on connect; TLS is reached through <c>STARTTLS</c>.</summary>
+    public ImapListenerOptions Cleartext { get; set; } = new() { Port = 143, Enabled = false };
+
+    /// <summary>Port 993. TLS from the first byte, before the greeting.</summary>
+    public ImapListenerOptions ImplicitTls { get; set; } = new() { Port = 993, Enabled = false };
+
+    /// <summary>
+    /// Whether <c>LOGIN</c> and <c>AUTHENTICATE</c> are offered.
+    /// </summary>
+    /// <remarks>
+    /// The flag that keeps the capability listing honest: false advertises
+    /// <c>LOGINDISABLED</c> and refuses both commands, which is the truthful pairing while
+    /// mailbox access is still being built. Turning it on without the commands behind it would
+    /// advertise an authentication this server cannot complete.
+    /// </remarks>
+    public bool EnableAuthentication { get; set; }
+}
+
+/// <summary>One IMAP listener's endpoint.</summary>
+/// <remarks>
+/// The same three members as <see cref="SmtpListenerOptions"/>, and deliberately not the same
+/// type. A configuration class is a published schema: sharing one between two protocols' sections
+/// would mean that adding a setting for one silently adds it to the other, and that narrowing a
+/// validation range for one narrows it for both. The duplication is three properties; the
+/// coupling it avoids is every future change to either.
+/// </remarks>
+public sealed class ImapListenerOptions
+{
+    public bool Enabled { get; set; }
+
+    [Range(1, 65_535)]
+    public int Port { get; set; }
+
+    /// <summary>
+    /// Addresses to bind. Empty means every interface.
+    /// </summary>
+    /// <remarks>
+    /// Listed explicitly rather than assumed, so an operator who wants mailbox access reachable
+    /// only from an internal interface can say so instead of relying on a firewall to undo a
+    /// default.
+    /// </remarks>
+    public IList<string> BindAddresses { get; set; } = [];
 }
 
 /// <summary>The outbound queue and delivery client.</summary>

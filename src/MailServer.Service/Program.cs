@@ -151,6 +151,7 @@ public static class Program
         // exist and the TLS provider holds a certificate. A listener that started before any of
         // those would accept connections it could not complete.
         builder.Services.AddHostedService<SmtpListenerService>();
+        builder.Services.AddHostedService<ImapListenerService>();
 
         return builder.Build();
     }

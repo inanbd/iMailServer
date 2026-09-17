@@ -191,6 +191,10 @@ public static class DependencyInjection
         services.TryAddScoped<ILocalDeliveryService, LocalDeliveryService>();
         services.TryAddScoped<SmtpDataReceiver>();
         services.TryAddScoped<SmtpConnectionHandler>();
+
+        // Scoped for the same reason the SMTP one is: its dependencies reach repositories, and a
+        // handler shared across concurrent sessions would share their database connection.
+        services.TryAddScoped<Imap.ImapConnectionHandler>();
         services.TryAddScoped<ISmtpDirectory, SmtpDirectory>();
         services.TryAddScoped<IMailboxAuthenticator, MailboxAuthenticator>();
         services.TryAddScoped<ISubmissionRateLimiter, SubmissionRateLimiter>();
