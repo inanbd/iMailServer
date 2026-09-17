@@ -1,0 +1,618 @@
+using System.Net;
+using System.Net.Security;
+using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using MailServer.Application.Abstractions.Certificates;
+using MailServer.Domain.Enums;
+using MailServer.Domain.ValueObjects;
+using MailServer.Infrastructure.Imap;
+using Microsoft.Extensions.Logging.Abstractions;
+
+namespace MailServer.Imap.Tests;
+
+/// <summary>A TLS provider holding one self-signed certificate, for the handshake tests.</summary>
+internal sealed class ImapTestCertificateProvider : ITlsCertificateProvider, IDisposable
+{
+    private readonly X509Certificate2 _certificate;
+
+    public ImapTestCertificateProvider()
+    {
+        using RSA key = RSA.Create(2048);
+
+        CertificateRequest request = new(
+            "CN=mail.example.com",
+            key,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
+
+        SubjectAlternativeNameBuilder names = new();
+        names.AddDnsName("mail.example.com");
+        request.CertificateExtensions.Add(names.Build());
+
+        using X509Certificate2 generated = request.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddDays(-1),
+            DateTimeOffset.UtcNow.AddDays(30));
+
+        // Round-tripped through PKCS#12 so the private key is usable by SslStream on every
+        // platform; a certificate created in memory is not always bound to its key otherwise.
+        _certificate = X509CertificateLoader.LoadPkcs12(
+            generated.Export(X509ContentType.Pkcs12),
+            password: null);
+    }
+
+    public IReadOnlyCollection<DomainName> ConfiguredHostnames => [DomainName.Parse("mail.example.com")];
+
+    public bool IsReady => true;
+
+    public X509Certificate2? Select(string? hostname, CertificatePurpose purpose) => _certificate;
+
+    public Task ReloadAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public void Dispose() => _certificate.Dispose();
+}
+
+/// <summary>A provider with no certificate, for the handshake this server must refuse to attempt.</summary>
+internal sealed class EmptyCertificateProvider : ITlsCertificateProvider
+{
+    public IReadOnlyCollection<DomainName> ConfiguredHostnames => [];
+
+    public bool IsReady => false;
+
+    public X509Certificate2? Select(string? hostname, CertificatePurpose purpose) => null;
+
+    public Task ReloadAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+}
+
+/// <summary>
+/// The IMAP connection handler driven over a real loopback socket.
+/// </summary>
+/// <remarks>
+/// A socket rather than a memory stream, because the two sequences this class is uniquely
+/// responsible for — the <c>STARTTLS</c> upgrade and the idle timeouts — are exactly the ones a
+/// fake stream cannot exercise honestly. A real <see cref="SslStream"/> handshake either happens
+/// or it does not.
+/// </remarks>
+public sealed class ImapWireTests : IDisposable
+{
+    private readonly ImapTestCertificateProvider _certificates = new();
+
+    public void Dispose() => _certificates.Dispose();
+
+    private static ImapConnectionOptions Options(
+        ImapListenerRole role = ImapListenerRole.Cleartext,
+        bool authAvailable = true,
+        int maxLineOctets = 8_000,
+        int preAuthSeconds = 30) =>
+        new(
+            role,
+            new ImapProcessorOptions("AetherMail", role, authAvailable, MaxAuthenticationAttempts: 3),
+            maxLineOctets,
+            TimeSpan.FromSeconds(preAuthSeconds),
+            TimeSpan.FromSeconds(60),
+
+            // Both IMAP listeners present the same certificate: MailboxAccess is the purpose
+            // for 143 and 993 alike, since a STARTTLS upgrade on 143 ends up serving exactly
+            // what 993 serves from the first octet.
+            CertificatePurpose.MailboxAccess);
+
+    /// <summary>Accepts one connection, hands it to the handler, and returns the client end.</summary>
+    private async Task<(TcpClient Client, Task Served)> ConnectAsync(
+        ImapConnectionOptions options,
+        ITlsCertificateProvider? certificates = null,
+        CancellationToken cancellationToken = default)
+    {
+        TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+
+        ValueTask<TcpClient> accepting = listener.AcceptTcpClientAsync(cancellationToken);
+
+        TcpClient client = new();
+        await client.ConnectAsync(IPAddress.Loopback, port, cancellationToken);
+
+        TcpClient accepted = await accepting;
+        listener.Stop();
+
+        ImapConnectionHandler handler = new(
+            certificates ?? _certificates,
+            new ScriptedImapAuthenticator(),
+            NullLogger<ImapConnectionHandler>.Instance);
+
+        Task served = Task.Run(
+            async () =>
+            {
+                using TcpClient server = accepted;
+                await using NetworkStream transport = server.GetStream();
+
+                await handler.HandleAsync(
+                    transport,
+                    IpAddressValue.Parse("127.0.0.1"),
+                    options,
+                    DateTimeOffset.UtcNow,
+                    cancellationToken);
+            },
+            cancellationToken);
+
+        return (client, served);
+    }
+
+    /// <summary>Reads one CRLF-terminated line.</summary>
+    private static async Task<string> ReadLineAsync(Stream stream)
+    {
+        StringBuilder line = new();
+        byte[] one = new byte[1];
+
+        while (true)
+        {
+            int read = await stream.ReadAsync(one, CancellationToken.None);
+
+            if (read == 0)
+            {
+                return line.ToString();
+            }
+
+            if (one[0] == (byte)'\n')
+            {
+                return line.ToString().TrimEnd('\r');
+            }
+
+            line.Append((char)one[0]);
+        }
+    }
+
+    private static async Task WriteLineAsync(Stream stream, string line)
+    {
+        byte[] octets = Encoding.ASCII.GetBytes(line + "\r\n");
+
+        await stream.WriteAsync(octets, CancellationToken.None);
+        await stream.FlushAsync(CancellationToken.None);
+    }
+
+    /// <summary>Reads until a line beginning with <paramref name="tag"/> arrives, or the peer closes.</summary>
+    private static async Task<List<string>> ReadUntilTaggedAsync(Stream stream, string tag)
+    {
+        List<string> lines = [];
+
+        while (true)
+        {
+            string line = await ReadLineAsync(stream);
+
+            if (line.Length == 0)
+            {
+                return lines;
+            }
+
+            lines.Add(line);
+
+            if (line.StartsWith(tag + " ", StringComparison.Ordinal))
+            {
+                return lines;
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The greeting and a whole conversation.
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task A_connection_is_greeted_with_an_untagged_ok()
+    {
+        (TcpClient client, Task served) = await ConnectAsync(Options());
+
+        using (client)
+        {
+            NetworkStream stream = client.GetStream();
+
+            string greeting = await ReadLineAsync(stream);
+
+            greeting.ShouldStartWith("* OK [CAPABILITY IMAP4rev1");
+            greeting.ShouldContain("LOGINDISABLED");
+            greeting.ShouldContain("STARTTLS");
+
+            await WriteLineAsync(stream, "a1 LOGOUT");
+            await ReadUntilTaggedAsync(stream, "a1");
+        }
+
+        await served;
+    }
+
+    [Fact]
+    public async Task A_client_can_hold_a_whole_conversation()
+    {
+        (TcpClient client, Task served) = await ConnectAsync(Options());
+
+        using (client)
+        {
+            NetworkStream stream = client.GetStream();
+
+            await ReadLineAsync(stream);
+
+            await WriteLineAsync(stream, "a1 CAPABILITY");
+            List<string> capability = await ReadUntilTaggedAsync(stream, "a1");
+
+            capability[0].ShouldStartWith("* CAPABILITY IMAP4rev1");
+            capability[^1].ShouldBe("a1 OK CAPABILITY completed");
+
+            await WriteLineAsync(stream, "a2 NOOP");
+            (await ReadLineAsync(stream)).ShouldBe("a2 OK NOOP completed");
+
+            await WriteLineAsync(stream, "a3 FROBNICATE");
+            (await ReadLineAsync(stream)).ShouldBe("a3 BAD Unrecognised command");
+
+            await WriteLineAsync(stream, "a4 LOGOUT");
+            List<string> logout = await ReadUntilTaggedAsync(stream, "a4");
+
+            logout[0].ShouldStartWith("* BYE ");
+            logout[^1].ShouldBe("a4 OK LOGOUT completed");
+        }
+
+        await served;
+    }
+
+    [Fact]
+    public async Task Logout_closes_the_connection()
+    {
+        (TcpClient client, Task served) = await ConnectAsync(Options());
+
+        using (client)
+        {
+            NetworkStream stream = client.GetStream();
+
+            await ReadLineAsync(stream);
+            await WriteLineAsync(stream, "a1 LOGOUT");
+            await ReadUntilTaggedAsync(stream, "a1");
+
+            // The peer has gone: the next read returns nothing rather than blocking.
+            (await ReadLineAsync(stream)).ShouldBeEmpty();
+        }
+
+        await served;
+    }
+
+    [Fact]
+    public async Task A_line_with_an_unusable_tag_is_answered_untagged_over_the_wire()
+    {
+        (TcpClient client, Task served) = await ConnectAsync(Options());
+
+        using (client)
+        {
+            NetworkStream stream = client.GetStream();
+
+            await ReadLineAsync(stream);
+
+            await WriteLineAsync(stream, "* NOOP");
+            (await ReadLineAsync(stream)).ShouldBe("* BAD Invalid tag");
+
+            // Still usable afterwards: a bad tag is one bad line, not a poisoned session.
+            await WriteLineAsync(stream, "a1 NOOP");
+            (await ReadLineAsync(stream)).ShouldBe("a1 OK NOOP completed");
+
+            await WriteLineAsync(stream, "a2 LOGOUT");
+            await ReadUntilTaggedAsync(stream, "a2");
+        }
+
+        await served;
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // STARTTLS.
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task Starttls_upgrades_the_connection_and_the_capabilities_change()
+    {
+        (TcpClient client, Task served) = await ConnectAsync(Options());
+
+        using (client)
+        {
+            NetworkStream transport = client.GetStream();
+
+            (await ReadLineAsync(transport)).ShouldContain("LOGINDISABLED");
+
+            await WriteLineAsync(transport, "a1 STARTTLS");
+            (await ReadLineAsync(transport)).ShouldBe("a1 OK Begin TLS negotiation now");
+
+            await using SslStream tls = new(
+                transport,
+                leaveInnerStreamOpen: false,
+                userCertificateValidationCallback: (_, _, _, _) => true);
+
+            await tls.AuthenticateAsClientAsync("mail.example.com");
+
+            tls.IsEncrypted.ShouldBeTrue();
+
+            // RFC 3501 section 6.2.1 tells the client to discard its cached capabilities and
+            // re-issue CAPABILITY, because a machine-in-the-middle may have altered the earlier
+            // listing. This is what it finds when it does.
+            await WriteLineAsync(tls, "a2 CAPABILITY");
+            List<string> capability = await ReadUntilTaggedAsync(tls, "a2");
+
+            capability[0].ShouldNotContain("LOGINDISABLED");
+            capability[0].ShouldNotContain("STARTTLS");
+            capability[0].ShouldContain("AUTH=PLAIN");
+
+            await WriteLineAsync(tls, "a3 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a3");
+        }
+
+        await served;
+    }
+
+    [Fact]
+    public async Task Login_succeeds_inside_the_upgraded_tunnel()
+    {
+        (TcpClient client, Task served) = await ConnectAsync(Options());
+
+        using (client)
+        {
+            NetworkStream transport = client.GetStream();
+
+            await ReadLineAsync(transport);
+            await WriteLineAsync(transport, "a1 STARTTLS");
+            await ReadLineAsync(transport);
+
+            await using SslStream tls = new(
+                transport,
+                leaveInnerStreamOpen: false,
+                userCertificateValidationCallback: (_, _, _, _) => true);
+
+            await tls.AuthenticateAsClientAsync("mail.example.com");
+
+            await WriteLineAsync(tls, "a2 LOGIN alice@example.com hunter2");
+            string completion = (await ReadUntilTaggedAsync(tls, "a2"))[^1];
+
+            completion.ShouldStartWith("a2 OK ");
+            completion.ShouldContain("[CAPABILITY IMAP4rev1");
+
+            // In the authenticated state now, so a mailbox command is in sequence - and refused
+            // for the honest reason rather than as a sequencing error.
+            await WriteLineAsync(tls, "a3 SELECT INBOX");
+            (await ReadLineAsync(tls)).ShouldContain("not implemented yet");
+
+            await WriteLineAsync(tls, "a4 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a4");
+        }
+
+        await served;
+    }
+
+    [Fact]
+    public async Task Octets_pipelined_across_starttls_close_the_connection()
+    {
+        // The command-injection pattern RFC 3501 section 6.2.1 forbids: those octets would
+        // otherwise be executed inside the tunnel with the authority the real client goes on to
+        // establish. No legitimate client does this.
+        (TcpClient client, Task served) = await ConnectAsync(Options());
+
+        using (client)
+        {
+            NetworkStream transport = client.GetStream();
+
+            await ReadLineAsync(transport);
+
+            // The command and the smuggled command in one write, so both are in the reader's
+            // buffer before the handler gets to the discard.
+            byte[] octets = Encoding.ASCII.GetBytes("a1 STARTTLS\r\na2 LOGIN victim hunter2\r\n");
+
+            await transport.WriteAsync(octets, CancellationToken.None);
+            await transport.FlushAsync(CancellationToken.None);
+
+            (await ReadLineAsync(transport)).ShouldBe("a1 OK Begin TLS negotiation now");
+
+            // Closed rather than upgraded, and the smuggled command was never answered.
+            (await ReadLineAsync(transport)).ShouldBeEmpty();
+        }
+
+        await served;
+    }
+
+    [Fact]
+    public async Task Starttls_is_refused_when_no_certificate_is_configured()
+    {
+        // The handshake is not attempted at all. Attempting one without a certificate would
+        // fail inside SslStream and give the peer a TLS-level error instead of a clean close.
+        (TcpClient client, Task served) = await ConnectAsync(Options(), new EmptyCertificateProvider());
+
+        using (client)
+        {
+            NetworkStream transport = client.GetStream();
+
+            await ReadLineAsync(transport);
+            await WriteLineAsync(transport, "a1 STARTTLS");
+
+            (await ReadLineAsync(transport)).ShouldBe("a1 OK Begin TLS negotiation now");
+            (await ReadLineAsync(transport)).ShouldBeEmpty();
+        }
+
+        await served;
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Implicit TLS, port 993.
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task The_implicit_tls_listener_handshakes_before_the_greeting()
+    {
+        // RFC 8314 section 3 prefers this over STARTTLS on 143: there is no cleartext phase for
+        // a stripping attacker to interfere with, because the handshake precedes the protocol.
+        (TcpClient client, Task served) = await ConnectAsync(Options(ImapListenerRole.ImplicitTls));
+
+        using (client)
+        {
+            await using SslStream tls = new(
+                client.GetStream(),
+                leaveInnerStreamOpen: false,
+                userCertificateValidationCallback: (_, _, _, _) => true);
+
+            await tls.AuthenticateAsClientAsync("mail.example.com");
+
+            string greeting = await ReadLineAsync(tls);
+
+            greeting.ShouldStartWith("* OK [CAPABILITY IMAP4rev1");
+            greeting.ShouldContain("AUTH=PLAIN");
+            greeting.ShouldNotContain("STARTTLS");
+            greeting.ShouldNotContain("LOGINDISABLED");
+
+            await WriteLineAsync(tls, "a1 STARTTLS");
+            (await ReadLineAsync(tls)).ShouldContain("not available on this listener");
+
+            await WriteLineAsync(tls, "a2 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a2");
+        }
+
+        await served;
+    }
+
+    [Fact]
+    public async Task Authenticate_plain_completes_over_two_lines()
+    {
+        (TcpClient client, Task served) = await ConnectAsync(Options(ImapListenerRole.ImplicitTls));
+
+        using (client)
+        {
+            await using SslStream tls = new(
+                client.GetStream(),
+                leaveInnerStreamOpen: false,
+                userCertificateValidationCallback: (_, _, _, _) => true);
+
+            await tls.AuthenticateAsClientAsync("mail.example.com");
+            await ReadLineAsync(tls);
+
+            await WriteLineAsync(tls, "a1 AUTHENTICATE PLAIN");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+
+            // The continuation line is a credential and never reaches the command parser.
+            await WriteLineAsync(tls, "AGFsaWNlQGV4YW1wbGUuY29tAGh1bnRlcjI=");
+            (await ReadUntilTaggedAsync(tls, "a1"))[^1].ShouldStartWith("a1 OK ");
+
+            await WriteLineAsync(tls, "a2 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a2");
+        }
+
+        await served;
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Bounds.
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task An_over_long_command_line_ends_the_connection_untagged()
+    {
+        // RFC 2683 section 3.2.1.5 asks for a BAD, and it must be untagged: the tag is somewhere
+        // in the text that was discarded, so the command cannot be determined. The reader has
+        // latched and will not resynchronise, because the tail of an over-long line is
+        // attacker-chosen text that would parse as a fresh command.
+        (TcpClient client, Task served) = await ConnectAsync(Options(maxLineOctets: 1_024));
+
+        using (client)
+        {
+            NetworkStream stream = client.GetStream();
+
+            await ReadLineAsync(stream);
+
+            await WriteLineAsync(stream, "a1 NOOP " + new string('x', 4_096));
+
+            (await ReadLineAsync(stream)).ShouldBe("* BAD Command line too long");
+            (await ReadLineAsync(stream)).ShouldStartWith("* BYE ");
+            (await ReadLineAsync(stream)).ShouldBeEmpty();
+        }
+
+        await served;
+    }
+
+    [Fact]
+    public async Task An_idle_connection_is_logged_out_with_a_bye()
+    {
+        // RFC 3501 section 7.1.5: the untagged BYE is how a server says it is closing of its own
+        // accord. Closing silently is indistinguishable from a network failure.
+        (TcpClient client, Task served) = await ConnectAsync(Options(preAuthSeconds: 10));
+
+        using (client)
+        {
+            NetworkStream stream = client.GetStream();
+
+            await ReadLineAsync(stream);
+
+            // Nothing sent. The pre-authentication timer is the slowloris bound, and RFC 3501
+            // section 5.4's thirty-minute floor does not apply to a connection that has proven
+            // nothing.
+            string line = await ReadLineAsync(stream);
+
+            line.ShouldStartWith("* BYE ");
+            line.ShouldContain("Autologout");
+        }
+
+        await served;
+    }
+
+    [Fact]
+    public async Task A_peer_that_disappears_does_not_fault_the_handler()
+    {
+        (TcpClient client, Task served) = await ConnectAsync(Options());
+
+        NetworkStream stream = client.GetStream();
+        await ReadLineAsync(stream);
+
+        // Gone mid-session without a LOGOUT, which is how most real connections end.
+        client.Close();
+
+        await served;
+        served.IsCompletedSuccessfully.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Shutdown_ends_the_session_without_faulting()
+    {
+        using CancellationTokenSource shutdown = new();
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(),
+            cancellationToken: shutdown.Token);
+
+        using (client)
+        {
+            await ReadLineAsync(client.GetStream());
+
+            await shutdown.CancelAsync();
+
+            await served;
+            served.IsCompletedSuccessfully.ShouldBeTrue();
+        }
+    }
+
+    [Fact]
+    public async Task The_handler_rejects_null_arguments()
+    {
+        ImapConnectionHandler handler = new(
+            _certificates,
+            new ScriptedImapAuthenticator(),
+            NullLogger<ImapConnectionHandler>.Instance);
+
+        await Should.ThrowAsync<ArgumentNullException>(async () => await handler.HandleAsync(
+            null!,
+            IpAddressValue.Parse("127.0.0.1"),
+            Options(),
+            DateTimeOffset.UtcNow,
+            CancellationToken.None));
+
+        await Should.ThrowAsync<ArgumentNullException>(async () => await handler.HandleAsync(
+            Stream.Null,
+            null!,
+            Options(),
+            DateTimeOffset.UtcNow,
+            CancellationToken.None));
+
+        await Should.ThrowAsync<ArgumentNullException>(async () => await handler.HandleAsync(
+            Stream.Null,
+            IpAddressValue.Parse("127.0.0.1"),
+            null!,
+            DateTimeOffset.UtcNow,
+            CancellationToken.None));
+    }
+}

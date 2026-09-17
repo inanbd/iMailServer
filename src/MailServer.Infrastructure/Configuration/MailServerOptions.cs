@@ -517,6 +517,47 @@ public sealed class LimitsOptions
     [Range(8_000, 262_144)]
     public int MaxImapLineBytes { get; set; } = 16_384;
 
+    /// <summary>
+    /// Longest an IMAP connection may sit idle before it has authenticated.
+    /// </summary>
+    /// <remarks>
+    /// Short on purpose, and deliberately not governed by the thirty-minute floor below.
+    /// RFC 3501 §5.4's autologout rule protects a <i>session</i> — a client that has logged in
+    /// and has a mailbox open — from being dropped while a user is simply not looking at it. A
+    /// connection that has sent nothing and proven nothing is not that; it is the slowloris
+    /// case, where the cost of holding a connection open must stay far below the cost of
+    /// opening one.
+    /// </remarks>
+    [Range(10, 600)]
+    public int ImapPreAuthenticationTimeoutSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Longest an authenticated IMAP connection may sit idle before the server logs it out.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The lower bound of the range is a conformance requirement, not a preference.</b>
+    /// RFC 3501 §5.4: "If a server has an inactivity autologout timer, the duration of that
+    /// timer MUST be at least 30 minutes." Expressing that as the floor of the
+    /// <see cref="RangeAttribute"/> rather than as a comment means an operator cannot configure
+    /// this server into violating it — the options validator refuses to start instead.
+    /// </para>
+    /// <para>
+    /// It is an <i>inactivity</i> timer and has no session-lifetime counterpart, which is the
+    /// other half of §5.4: "The receipt of ANY command from the client during that interval
+    /// SHOULD suffice to reset the autologout timer." An absolute cap on how long a connection
+    /// may live — which the SMTP listener does have, and correctly, since an SMTP transaction is
+    /// short by nature — would drop a client in the middle of a working session.
+    /// </para>
+    /// <para>
+    /// RFC 2177 §3 is the client's side of the same number: a client using <c>IDLE</c> is
+    /// advised to re-issue it "at least every 29 minutes to avoid being logged off", which is
+    /// only sound advice if the server's timer is the thirty minutes this floor guarantees.
+    /// </para>
+    /// </remarks>
+    [Range(1_800, 86_400)]
+    public int ImapInactivityTimeoutSeconds { get; set; } = 1_800;
+
     [Range(4_096, 4 * 1024 * 1024)]
     public int MaxHeaderBytes { get; set; } = 256 * 1024;
 
