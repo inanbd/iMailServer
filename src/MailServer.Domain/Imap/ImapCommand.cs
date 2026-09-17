@@ -131,6 +131,45 @@ public sealed record ImapCommand(string Tag, ImapVerb Verb, bool IsUid, string A
     /// </remarks>
     public const int MaxTagLength = 32;
 
+    /// <summary>
+    /// Prints the tag and the verb, and deliberately never the argument or the raw line.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A record's generated <c>ToString</c> prints every property, and one of these
+    /// properties is a password.</b> RFC 3501 §6.2.3's <c>LOGIN</c> is
+    /// <c>a1 LOGIN alice hunter2</c> — the credential sits in
+    /// <see cref="Argument"/> and again in <see cref="Raw"/>, in the clear, with none of the
+    /// base64 obfuscation SMTP's <c>AUTH PLAIN</c> at least applies. Left generated, this type
+    /// would render as
+    /// <c>ImapCommand { Tag = a1, Verb = Login, IsUid = False, Argument = alice hunter2, … }</c>,
+    /// so any future <c>logger.LogWarning("Unexpected command {Command}", command)</c> — or a
+    /// bare string interpolation, or an exception message, or a debugger-attached crash dump —
+    /// writes a customer's password down.
+    /// </para>
+    /// <para>
+    /// Overridden here rather than left to a rule that every call site must remember, because
+    /// the failure is silent and the call site that forgets will not be the one anybody reviews.
+    /// <c>ImapProtocolSecurityTests</c>'s scan for a logged <c>Raw</c> or <c>Argument</c> cannot
+    /// catch this shape at all: the offending line mentions neither property by name.
+    /// </para>
+    /// <para>
+    /// The tag is safe to print: <see cref="TryParse"/> refuses anything outside RFC 3501 §9's
+    /// <c>tag</c> production, so by the time one exists on this type it carries no control
+    /// character and nothing a log parser could be confused by.
+    /// </para>
+    /// </remarks>
+    private bool PrintMembers(System.Text.StringBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+
+        builder.Append("Tag = ").Append(Tag)
+            .Append(", Verb = ").Append(Verb)
+            .Append(", IsUid = ").Append(IsUid);
+
+        return true;
+    }
+
     /// <summary>Whether RFC 3501 §6.4.8's <c>UID</c> prefix may precede <paramref name="verb"/>.</summary>
     /// <remarks>
     /// <c>UID</c> takes <c>COPY</c>, <c>FETCH</c>, <c>STORE</c> and <c>SEARCH</c> (§6.4.8), and

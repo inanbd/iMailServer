@@ -334,6 +334,51 @@ public sealed class ImapCommandTests
         command.Argument.ShouldBe("INBOX {310}");
     }
 
+    // ---------------------------------------------------------------------------------------
+    // Rendering. LOGIN's argument is a cleartext password.
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Rendering_a_command_never_reveals_its_argument()
+    {
+        // A record's generated ToString prints every property. RFC 3501 section 6.2.3's LOGIN
+        // puts the password in the argument in the clear - no base64, unlike SMTP's AUTH PLAIN -
+        // so the generated form would render a customer's password into any log line, exception
+        // message or crash dump that interpolated a command.
+        ImapCommand.TryParse("a1 LOGIN alice hunter2", out ImapCommand? command, out _)
+            .ShouldBeTrue();
+
+        string rendered = command!.ToString();
+
+        rendered.ShouldNotContain("hunter2");
+        rendered.ShouldNotContain("alice");
+        rendered.ShouldContain("a1");
+        rendered.ShouldContain("Login");
+    }
+
+    [Fact]
+    public void Interpolating_a_command_never_reveals_its_argument()
+    {
+        // The shape a source scan cannot catch: the offending line names neither Raw nor
+        // Argument, so nothing but this override stands between it and the log.
+        ImapCommand.TryParse("a1 LOGIN alice hunter2", out ImapCommand? command, out _)
+            .ShouldBeTrue();
+
+        $"Unexpected command {command}".ShouldNotContain("hunter2");
+    }
+
+    [Fact]
+    public void The_argument_is_still_reachable_for_the_handler_that_needs_it()
+    {
+        // Redacted from rendering, not from the type. Whatever executes LOGIN still has to read
+        // the credential in order to verify it.
+        ImapCommand.TryParse("a1 LOGIN alice hunter2", out ImapCommand? command, out _)
+            .ShouldBeTrue();
+
+        command!.Argument.ShouldBe("alice hunter2");
+        command.Raw.ShouldBe("a1 LOGIN alice hunter2");
+    }
+
     [Fact]
     public void Rejects_a_null_line() =>
         Should.Throw<ArgumentNullException>(() => ImapCommand.TryParse(null!, out _, out _));

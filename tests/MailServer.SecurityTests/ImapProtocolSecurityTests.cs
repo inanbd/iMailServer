@@ -138,6 +138,28 @@ public sealed class ImapProtocolSecurityTests
         }
     }
 
+    [Theory]
+    [InlineData("a1 LOGIN alice hunter2")]
+    [InlineData("a1 login alice hunter2")]
+    [InlineData("a1 AUTHENTICATE PLAIN AGFsaWNlAGh1bnRlcjI=")]
+    public void Rendering_a_command_never_reveals_a_credential(string line)
+    {
+        // The exposure the scan above cannot see. A record's generated ToString prints every
+        // property, so "logger.LogWarning("Unexpected command {Command}", command)" would write
+        // the password down while mentioning neither Raw nor Argument by name - the source scan
+        // matches on those two identifiers and would pass that line without comment.
+        ImapCommand.TryParse(line, out ImapCommand? command, out _).ShouldBeTrue();
+
+        foreach (string rendered in (string[])[command!.ToString(), $"{command}", string.Format(
+                     System.Globalization.CultureInfo.InvariantCulture, "{0}", command)])
+        {
+            rendered.ShouldNotContain("hunter2", Case.Insensitive, rendered);
+            rendered.ShouldNotContain("AGFsaWNlAGh1bnRlcjI=", Case.Insensitive, rendered);
+            rendered.ShouldNotContain(command.Argument, Case.Insensitive, rendered);
+            rendered.ShouldNotContain(command.Raw, Case.Insensitive, rendered);
+        }
+    }
+
     // ---------------------------------------------------------------------------------------
     // Rule 105: no certificate validation bypass.
     // ---------------------------------------------------------------------------------------
