@@ -65,6 +65,16 @@ public sealed class ImapCommandTests
     }
 
     [Fact]
+    public void The_tag_cap_is_the_value_the_remarks_argue_for()
+    {
+        // Every other test of the cap builds its input as MaxTagLength + 1, so it holds for any
+        // value of the constant and none of them would notice it being raised to a megabyte -
+        // which would give back exactly the echo and log amplification the constant's remarks
+        // say it exists to bound. Pinning the number is what makes those tests mean something.
+        ImapCommand.MaxTagLength.ShouldBe(32);
+    }
+
+    [Fact]
     public void Refuses_a_tag_longer_than_the_maximum()
     {
         string tag = new('A', ImapCommand.MaxTagLength + 1);

@@ -58,12 +58,21 @@ public static class ImapStateMachine
     /// Whether <paramref name="verb"/> is in sequence in <paramref name="state"/>.
     /// </summary>
     /// <remarks>
-    /// False earns a tagged <c>BAD</c>. RFC 3501 §7.1.3 defines <c>BAD</c> as the answer to a
-    /// protocol error, and §6.3's preamble is explicit that a selected-state command issued
-    /// without a selected mailbox is one. It is deliberately not <c>NO</c>: <c>NO</c> means the
-    /// server understood the command and declined to perform it, which tells a client the
-    /// request was well-formed and invites it to retry. A client told <c>NO</c> for a command it
-    /// sent in the wrong state will retry in the wrong state.
+    /// <para>
+    /// False earns a tagged <c>BAD</c>. RFC 3501 §7.1.3 defines <c>BAD</c> as indicating "an
+    /// error message from the server" for a command that was not understood, and §6 organises
+    /// every command by the state it is "valid in" — §6.3's preamble lists the authenticated
+    /// state's commands, §6.4's the selected state's — without naming the response a server owes
+    /// a command sent outside its state.
+    /// </para>
+    /// <para>
+    /// So <b>choosing <c>BAD</c> over <c>NO</c> is this product's decision, not a rule the RFC
+    /// states</b>, and the reason is what the two words tell a client to do next. <c>NO</c>
+    /// means the server understood the command and declined to perform it, which says the
+    /// request was well-formed and invites a retry — and a client told <c>NO</c> for a command
+    /// it sent in the wrong state will retry it in the wrong state. <c>BAD</c> says the request
+    /// itself was wrong, which is what a client needs to hear in order to stop.
+    /// </para>
     /// </remarks>
     public static bool IsInSequence(ImapSessionState state, ImapVerb verb) => state switch
     {
@@ -99,12 +108,14 @@ public static class ImapStateMachine
                 ImapVerb.Rename or ImapVerb.Subscribe or ImapVerb.Unsubscribe or ImapVerb.List or
                 ImapVerb.Lsub or ImapVerb.Status or ImapVerb.Append => true,
 
-            // RFC 2177 §3: IDLE is valid "in the authenticated state", and a selected session is
-            // still an authenticated one - clients idle on a selected mailbox to be told about
-            // new mail, which is the whole point of the extension.
+            // RFC 2177 states IDLE's legality only in its formal syntax (§4), as a comment on
+            // the command production: ";; Valid only in Authenticated or Selected state". §3,
+            // the specification proper, never says which state the command belongs to - so the
+            // grammar is the normative statement here, not prose.
             ImapVerb.Idle => true,
 
-            // RFC 2342 §5: NAMESPACE is an authenticated-state command.
+            // RFC 2342 §4: "The NAMESPACE command is valid in the Authenticated and Selected
+            // state."
             ImapVerb.Namespace => true,
 
             // §6.2: a client does not get to re-authenticate as someone else mid-session. The
@@ -138,7 +149,9 @@ public static class ImapStateMachine
             // RFC 6851 §3.1: MOVE is a selected-state command.
             ImapVerb.Move => true,
 
-            // RFC 3691 §2: UNSELECT is CLOSE without the implicit expunge.
+            // RFC 3691 §2: UNSELECT "frees server's resources associated with the selected
+            // mailbox and returns the server to the authenticated state" - CLOSE without the
+            // implicit expunge.
             ImapVerb.Unselect => true,
 
             // Everything §6.3 allows, still allowed. RFC 3501 §6.3.1: SELECT while a mailbox is

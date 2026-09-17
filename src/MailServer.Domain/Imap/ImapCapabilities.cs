@@ -19,7 +19,6 @@ namespace MailServer.Domain.Imap;
 /// <param name="IsNamespaceAvailable">Whether RFC 2342 <c>NAMESPACE</c> is implemented and enabled.</param>
 /// <param name="IsUnselectAvailable">Whether RFC 3691 <c>UNSELECT</c> is implemented and enabled.</param>
 /// <param name="IsMoveAvailable">Whether RFC 6851 <c>MOVE</c> is implemented and enabled.</param>
-/// <param name="IsUidPlusAvailable">Whether RFC 4315 UIDPLUS is implemented and enabled.</param>
 /// <param name="IsLiteralMinusAvailable">
 /// Whether RFC 7888 <c>LITERAL-</c> is implemented and enabled. Note <c>LITERAL-</c>, not
 /// <c>LITERAL+</c>; see <see cref="ImapCapabilities.LiteralCapability"/>.
@@ -33,7 +32,6 @@ public sealed record ImapCapabilityContext(
     bool IsNamespaceAvailable = false,
     bool IsUnselectAvailable = false,
     bool IsMoveAvailable = false,
-    bool IsUidPlusAvailable = false,
     bool IsLiteralMinusAvailable = false);
 
 /// <summary>
@@ -49,6 +47,15 @@ public sealed record ImapCapabilityContext(
 /// optional atom is behind a flag that is only turned on when the commands it names have passing
 /// tests — the same mechanism, and the same discipline, as
 /// <see cref="SmtpCapabilityContext.IsChunkingAvailable"/>.
+/// </para>
+/// <para>
+/// <b>There is deliberately no UIDPLUS flag.</b> Every other extension here is one whose
+/// commands this server can already at least parse, so turning its flag on is the only step
+/// between "unimplemented" and "implemented". RFC 4315 is not: its <c>UID EXPUNGE</c> form is
+/// refused by <see cref="ImapCommand.SupportsUidPrefix"/>, so a flag for it would let a future
+/// implementer advertise an extension whose central command the parser answers <c>BAD</c> —
+/// with the build staying green, because a flag that is off is a flag nothing tests. An
+/// extension gets a flag once the parser can carry it, and not before.
 /// </para>
 /// <para>
 /// <b>The list is state-dependent, and this is the structural difference from ESMTP's.</b> RFC
@@ -77,8 +84,11 @@ public sealed record ImapCapabilityContext(
 /// <c>LOGINDISABLED</c> and an <c>AUTH=</c> atom are mutually exclusive by construction here,
 /// which is deliberate: obeying RFC 2595 §3.2 while still offering <c>AUTH=PLAIN</c> in the
 /// clear would advertise the refusal and leak the password anyway, through the other command.
-/// RFC 2595 §9 is unambiguous that PLAIN "MUST NOT be advertised or used unless a suitable TLS
-/// encryption layer is active".
+/// RFC 2595 §9's rule on PLAIN is that it "MUST NOT be advertised or used unless a suitable TLS
+/// encryption layer is active or backwards compatibility dictates otherwise" — and this product
+/// declines the escape clause. "Backwards compatibility dictates otherwise" is an allowance for
+/// servers with existing users on clients that cannot do TLS; a server shipping its first IMAP
+/// listener has no such users, so there is nothing here for it to excuse.
 /// </para>
 /// </remarks>
 public static class ImapCapabilities
@@ -149,10 +159,12 @@ public static class ImapCapabilities
     /// list.
     /// </para>
     /// <para>
-    /// Every atom here is either an IMAP4rev1 atom or a registered, standards-track extension.
-    /// RFC 3501 §7.2.1: "A server MUST NOT offer unregistered or non-standard capability names,
-    /// unless such names are prefixed with an <c>X</c>." This server emits no <c>X</c> atoms;
-    /// there is nothing here it invented.
+    /// Every atom here is either an IMAP4rev1 atom or a registered extension. RFC 3501 §7.2.1:
+    /// "A server MUST NOT offer unregistered or non-standard capability names, unless such names
+    /// are prefixed with an <c>X</c>." This server emits no <c>X</c> atoms; there is nothing here
+    /// it invented. Note "registered" rather than "standards-track": <c>AUTH=LOGIN</c> names a
+    /// SASL mechanism that is registered with IANA but never became a standards-track RFC, which
+    /// is a fair description of how widely clients implement it and not a claim about its status.
     /// </para>
     /// <para>
     /// Total over every state, including <see cref="ImapSessionState.Logout"/>, which should
@@ -191,11 +203,6 @@ public static class ImapCapabilities
         if (context.IsMoveAvailable)
         {
             capabilities.Add("MOVE");
-        }
-
-        if (context.IsUidPlusAvailable)
-        {
-            capabilities.Add("UIDPLUS");
         }
 
         if (MayOfferStartTls(context))

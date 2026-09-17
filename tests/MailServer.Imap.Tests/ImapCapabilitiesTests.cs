@@ -72,11 +72,13 @@ public sealed class ImapCapabilitiesTests
     {
         // RFC 3501 section 7.2.1: "A server MUST NOT offer unregistered or non-standard
         // capability names, unless such names are prefixed with an X." Every atom this server
-        // can emit is IMAP4rev1's own or a registered, standards-track extension.
+        // can emit is IMAP4rev1's own or a registered extension. "Registered" rather than
+        // "standards-track": AUTH=LOGIN names a SASL mechanism that is registered with IANA but
+        // never became a standards-track RFC.
         string[] registered =
         [
             "IMAP4rev1", "STARTTLS", "LOGINDISABLED", "AUTH=PLAIN", "AUTH=LOGIN",
-            "IDLE", "NAMESPACE", "UNSELECT", "MOVE", "UIDPLUS", "LITERAL-",
+            "IDLE", "NAMESPACE", "UNSELECT", "MOVE", "LITERAL-",
         ];
 
         ImapCapabilityContext context = new(
@@ -86,7 +88,6 @@ public sealed class ImapCapabilitiesTests
             IsNamespaceAvailable: true,
             IsUnselectAvailable: true,
             IsMoveAvailable: true,
-            IsUidPlusAvailable: true,
             IsLiteralMinusAvailable: true);
 
         foreach (string capability in ImapCapabilities.For(context))
@@ -114,7 +115,9 @@ public sealed class ImapCapabilitiesTests
     public void No_authentication_mechanism_is_advertised_on_a_cleartext_connection()
     {
         // RFC 2595 section 9: PLAIN "MUST NOT be advertised or used unless a suitable TLS
-        // encryption layer is active".
+        // encryption layer is active or backwards compatibility dictates otherwise" - and this
+        // product declines that escape clause, having no pre-existing users to be compatible
+        // with.
         ImapCapabilities.For(Context(ImapListenerRole.Cleartext, tls: false))
             .ShouldNotContain(c => c.StartsWith("AUTH=", StringComparison.Ordinal));
     }
@@ -213,6 +216,49 @@ public sealed class ImapCapabilitiesTests
         // not-authenticated state after a successful STARTTLS.
         ImapCapabilities.For(Context(ImapListenerRole.Cleartext, tls: true))
             .ShouldNotContain("STARTTLS");
+    }
+
+    [Theory]
+    [InlineData(ImapSessionState.Authenticated)]
+    [InlineData(ImapSessionState.Selected)]
+    [InlineData(ImapSessionState.Logout)]
+    public void Starttls_is_not_advertised_to_a_session_that_has_already_logged_in(ImapSessionState state)
+    {
+        // Cleartext AND already authenticated: the one shape that distinguishes the state
+        // condition from the TLS condition. Without this case, deleting
+        // "State == NotAuthenticated" from MayOfferStartTls leaves the whole suite green - the
+        // other STARTTLS tests either set tls:true (so !IsTlsActive already fails) or use the
+        // implicit-TLS role (so the role check already fails), and neither reaches the state
+        // check at all.
+        //
+        // What it would mean in practice: a session that logged in over a cleartext 143
+        // connection keeps being offered a command RFC 3501 section 6.2 makes illegal in its
+        // state, and every attempt at it is answered BAD.
+        ImapCapabilities.For(Context(ImapListenerRole.Cleartext, tls: false, state))
+            .ShouldNotContain("STARTTLS");
+    }
+
+    [Fact]
+    public void Starttls_is_advertised_only_while_the_session_could_still_use_it()
+    {
+        // The predicate stated as one property over the whole matrix, so no single condition can
+        // be removed without a failure here.
+        foreach (ImapListenerRole role in Enum.GetValues<ImapListenerRole>())
+        {
+            foreach (bool tls in new[] { false, true })
+            {
+                foreach (ImapSessionState state in Enum.GetValues<ImapSessionState>())
+                {
+                    bool expected = !tls &&
+                                    role == ImapListenerRole.Cleartext &&
+                                    state == ImapSessionState.NotAuthenticated;
+
+                    ImapCapabilities.For(Context(role, tls, state)).Contains("STARTTLS").ShouldBe(
+                        expected,
+                        $"role {role}, tls {tls}, state {state}");
+                }
+            }
+        }
     }
 
     [Theory]
@@ -338,13 +384,34 @@ public sealed class ImapCapabilitiesTests
         bool tls,
         ImapSessionState state)
     {
-        ImapCapabilityContext context = Context(role, tls, state);
+        // The expectation is spelled out from the RFCs rather than computed by calling
+        // MayOfferAuthentication - which is what MustDisableLogin is implemented in terms of, so
+        // asking it would make this "A == A" and it would survive the TLS check being deleted.
+        // LOGIN is refused, and so must be declared refused, exactly when the session could
+        // still issue it (RFC 3501 section 6.2 - not-authenticated state only) and this server
+        // would not accept it (no TLS, per RFC 2595 section 9, or no implementation yet).
+        ImapCapabilityContext context = Context(role, tls, state, authAvailable: true);
 
-        bool expected = state == ImapSessionState.NotAuthenticated &&
-                        !ImapCapabilities.MayOfferAuthentication(context);
+        bool expected = state == ImapSessionState.NotAuthenticated && !tls;
 
-        ImapCapabilities.MustDisableLogin(context).ShouldBe(expected);
+        ImapCapabilities.MustDisableLogin(context).ShouldBe(expected, $"{role}/{tls}/{state}");
         ImapCapabilities.For(context).Contains("LOGINDISABLED").ShouldBe(expected);
+    }
+
+    [Theory]
+    [MemberData(nameof(EveryRoleTlsAndState))]
+    public void Login_stays_disabled_while_authentication_is_unimplemented(
+        ImapListenerRole role,
+        bool tls,
+        ImapSessionState state)
+    {
+        // The other half of the same predicate, held apart from it: with no implementation, the
+        // refusal stands whatever the transport says.
+        ImapCapabilityContext context = Context(role, tls, state, authAvailable: false);
+
+        bool expected = state == ImapSessionState.NotAuthenticated;
+
+        ImapCapabilities.MustDisableLogin(context).ShouldBe(expected, $"{role}/{tls}/{state}");
     }
 
     [Fact]

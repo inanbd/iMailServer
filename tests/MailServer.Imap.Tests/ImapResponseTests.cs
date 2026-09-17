@@ -135,9 +135,12 @@ public sealed class ImapResponseTests
     public void Text_is_reduced_to_seven_bit_ascii(string eightBit)
     {
         // Stricter than the SMTP rule, which lets 8-bit through because SMTPUTF8 exists.
-        // RFC 3501 section 9 has no such licence: TEXT-CHAR is CHAR minus CR and LF, and CHAR is
-        // %x01-7F. Anything above 0x7E is ungrammatical until RFC 6855 UTF8=ACCEPT is
-        // advertised, which this server does not do.
+        // RFC 3501 section 9 gives no such licence: TEXT-CHAR is CHAR minus CR and LF, and CHAR
+        // is %x01-7F, so anything above 0x7F is ungrammatical until RFC 6855 UTF8=ACCEPT is
+        // advertised, which this server does not do. The filter stops at 0x7E rather than 0x7F
+        // on purpose - DEL is a legal TEXT-CHAR and is dropped anyway, because "what can be
+        // displayed" needs no argument about which control characters are harmless in which
+        // client.
         string formatted = ImapResponse.Tagged("A001", ImapResponseStatus.No, eightBit).Format();
 
         foreach (char c in formatted[..^2])
@@ -303,14 +306,108 @@ public sealed class ImapResponseTests
         ImapResponses.Expunge(44).Format().ShouldBe("* 44 EXPUNGE\r\n");
 
     [Fact]
-    public void An_empty_mailbox_reports_zero_rather_than_omitting_the_line() =>
+    public void An_empty_mailbox_reports_zero_rather_than_omitting_the_line()
+    {
+        // RFC 3501 section 9: mailbox-data takes "number SP EXISTS", and number admits zero.
         ImapResponses.Exists(0).Format().ShouldBe("* 0 EXISTS\r\n");
+        ImapResponses.Recent(0).Format().ShouldBe("* 0 RECENT\r\n");
+    }
+
+    [Fact]
+    public void Expunge_refuses_a_sequence_number_of_zero()
+    {
+        // A different production from EXISTS and RECENT, and the difference is not pedantry.
+        // RFC 3501 section 9: message-data = nz-number SP ("EXPUNGE" / ...), while mailbox-data
+        // takes a plain number. Sequence numbers are one-based, so "* 0 EXPUNGE" names no
+        // message; a client that renumbers its cache from it either rejects the line or acts on
+        // the wrong message - and this is the one response where acting on the wrong message
+        // means deleting the wrong mail.
+        Should.Throw<ArgumentOutOfRangeException>(() => ImapResponses.Expunge(0));
+    }
 
     [Fact]
     public void A_numeric_data_response_refuses_a_negative_number()
     {
         Should.Throw<ArgumentOutOfRangeException>(() => ImapResponses.Exists(-1));
+        Should.Throw<ArgumentOutOfRangeException>(() => ImapResponses.Recent(-1));
         Should.Throw<ArgumentOutOfRangeException>(() => ImapResponses.Expunge(-1));
+    }
+
+    [Fact]
+    public void A_numeric_data_response_refuses_a_number_wider_than_the_protocol_carries()
+    {
+        // RFC 3501 section 9: "number = 1*DIGIT ; Unsigned 32-bit integer (0 <= n <
+        // 4,294,967,296)". These are longs here because a UID counter is stored as one, so the
+        // ceiling has to be checked rather than assumed - emitting a number no client can parse
+        // is the worse of the two failures.
+        ImapResponses.Exists(4_294_967_295).Format().ShouldBe("* 4294967295 EXISTS\r\n");
+
+        Should.Throw<ArgumentOutOfRangeException>(() => ImapResponses.Exists(4_294_967_296));
+        Should.Throw<ArgumentOutOfRangeException>(() => ImapResponses.Expunge(8_589_934_592));
+        Should.Throw<ArgumentOutOfRangeException>(() => ImapResponseCode.UidNext(4_294_967_296));
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Whitespace is not text.
+    // ---------------------------------------------------------------------------------------
+
+    [Theory]
+    [InlineData(" ")]
+    [InlineData("   ")]
+    [InlineData("\t")]
+    [InlineData(" \r\n ")]
+    public void Text_that_is_only_whitespace_is_replaced(string whitespace)
+    {
+        // SP is a TEXT-CHAR, so " " survives a filter defined as "printable US-ASCII" and would
+        // render as "A001 OK  " - two spaces, no text, ending in exactly the bare space this
+        // type promises never to emit.
+        string formatted = ImapResponse.Tagged("A001", ImapResponseStatus.Ok, whitespace).Format();
+
+        formatted.ShouldBe($"A001 OK {ImapResponse.EmptyTextPlaceholder}\r\n");
+    }
+
+    [Fact]
+    public void Text_is_trimmed_rather_than_padded()
+    {
+        ImapResponse.Tagged("A001", ImapResponseStatus.Ok, "  done  ")
+            .Format()
+            .ShouldBe("A001 OK done\r\n");
+    }
+
+    [Fact]
+    public void No_response_ever_carries_a_double_space()
+    {
+        string[] awkward = ["", " ", "  x  ", "\r\n", "\u0000 \u0000"];
+
+        foreach (string text in awkward)
+        {
+            ImapResponse.Untagged(ImapResponseStatus.Ok, text)
+                .Format()
+                .ShouldNotContain("  ", Case.Sensitive, $"from [{text}]");
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Rendering. Format is the only definition of what is safe to emit.
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Rendering_a_response_never_leaks_the_unsanitised_text()
+    {
+        // The same defect ImapCommand carries, in the opposite direction: a record's generated
+        // ToString prints every property, and Text holds whatever the client sent - unsanitised,
+        // because sanitisation happens in Format. Interpolating a refusal that quotes a hostile
+        // mailbox name would otherwise put that name's CRLF into a log file, by the one route
+        // that does not go through Format.
+        ImapResponse response =
+            ImapResponse.Tagged("A001", ImapResponseStatus.No, "x\r\n* 1 EXPUNGE");
+
+        foreach (string rendered in (string[])[response.ToString(), $"{response}"])
+        {
+            rendered.ShouldNotContain("\r", Case.Sensitive);
+            rendered.ShouldNotContain("\n", Case.Sensitive);
+            rendered.ShouldContain("A001 NO");
+        }
     }
 
     // ---------------------------------------------------------------------------------------

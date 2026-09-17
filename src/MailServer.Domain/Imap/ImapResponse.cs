@@ -158,7 +158,9 @@ public sealed record ImapResponseCode(string Name, string? Argument)
 
     private static ImapResponseCode Numeric(string name, long value)
     {
+        // nz-number, and RFC 3501 §9 bounds it at 32 bits: "(0 < n < 4,294,967,296)".
         ArgumentOutOfRangeException.ThrowIfLessThan(value, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(value, 4_294_967_295);
 
         return new ImapResponseCode(name, value.ToString(CultureInfo.InvariantCulture));
     }
@@ -188,12 +190,17 @@ public sealed record ImapResponseCode(string Name, string? Argument)
 /// tells the client that command succeeded when it did not.
 /// </para>
 /// <para>
-/// <b>Text is reduced to printable US-ASCII, which is stricter than the SMTP rule.</b>
-/// <see cref="Smtp.SmtpReply.Format"/> strips control characters and lets 8-bit octets through,
-/// legitimately, because SMTPUTF8 exists. RFC 3501 §9 has no such licence: <c>TEXT-CHAR</c> is
-/// <c>CHAR</c> minus CR and LF, and <c>CHAR</c> is <c>%x01-7F</c>. Anything above 0x7E is
-/// ungrammatical in a response until RFC 6855 <c>UTF8=ACCEPT</c> is advertised, which this
-/// server does not do.
+/// <b>Text is reduced to printable US-ASCII, which is stricter than the SMTP rule and stricter
+/// than the grammar.</b> <see cref="Smtp.SmtpReply.Format"/> strips control characters and lets
+/// 8-bit octets through, legitimately, because SMTPUTF8 exists. RFC 3501 §9 gives no such
+/// licence: <c>TEXT-CHAR</c> is <c>CHAR</c> minus CR and LF, and <c>CHAR</c> is <c>%x01-7F</c>,
+/// so anything above 0x7F is ungrammatical until RFC 6855 <c>UTF8=ACCEPT</c> is advertised,
+/// which this server does not do. Between 0x7E and 0x7F the grammar and this filter disagree on
+/// purpose: DEL is a legal <c>TEXT-CHAR</c> and is dropped anyway, along with every other
+/// non-printable below SP that the grammar would also permit. A filter defined as "what can be
+/// displayed" needs no argument about which control characters are harmless in which client;
+/// one defined as "what the grammar allows" would have to make that argument for every one of
+/// them.
 /// </para>
 /// <para>
 /// <b>Stripping can empty a string, and an empty one is ungrammatical too.</b> RFC 3501 §9's
@@ -320,6 +327,30 @@ public sealed record ImapResponse
         return new ImapResponse(ImapResponseKind.Continuation, null, null, null, text);
     }
 
+    /// <summary>
+    /// Prints the response as it would actually go on the wire, never as it was constructed.
+    /// </summary>
+    /// <remarks>
+    /// The same defect <see cref="ImapCommand"/> carries, in the opposite direction. A record's
+    /// generated <c>ToString</c> prints every property, and <see cref="Text"/> is the property
+    /// holding whatever the client sent — unsanitised, because sanitisation happens in
+    /// <see cref="Format"/>. Left generated, <c>$"{response}"</c> on a refusal quoting a hostile
+    /// mailbox name would render that name's CRLF intact into a log file or an exception
+    /// message, which is the injection this type exists to prevent, arriving by the one route
+    /// that does not go through <see cref="Format"/>.
+    /// </remarks>
+    private bool PrintMembers(System.Text.StringBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+
+        // Format() is the definition of what is safe to emit, so rendering through it means
+        // this can never be less safe than the wire form. The terminator is dropped because a
+        // rendered object is not a line.
+        builder.Append(Kind).Append(": ").Append(Format().TrimEnd('\r', '\n'));
+
+        return true;
+    }
+
     /// <summary>Renders the response in wire format, with a CRLF terminator.</summary>
     /// <remarks>
     /// The only place a response becomes bytes, and therefore the only place the sanitisation
@@ -390,9 +421,15 @@ public sealed record ImapResponse
             }
         }
 
-        // text = 1*TEXT-CHAR: a line ending in a bare space is not a response. A name made
-        // entirely of control characters reduces to nothing, so this is reachable from input.
-        return builder.Length == 0 ? fallback : builder.ToString();
+        // Trimmed, then checked for emptiness rather than the other way round. RFC 3501 §9's
+        // text is 1*TEXT-CHAR and SP *is* a TEXT-CHAR, so " " survives the filter above and
+        // would render as "A001 OK  " - two spaces and no text, ending in the bare space this
+        // type promises never to emit. A name made entirely of control characters reduces to
+        // nothing and a name made entirely of spaces reduces to spaces; both are reachable from
+        // client input and both need the fallback.
+        string reduced = builder.ToString().Trim();
+
+        return reduced.Length == 0 ? fallback : reduced;
     }
 
     /// <summary>A code's name is an atom, so it carries no space and no bracket.</summary>
@@ -534,18 +571,30 @@ public static class ImapResponses
     }
 
     /// <summary><c>* n EXISTS</c> — how many messages the mailbox holds. RFC 3501 §7.3.1.</summary>
-    public static ImapResponse Exists(long count) => Numbered(count, "EXISTS");
+    public static ImapResponse Exists(long count) => Count(count, "EXISTS");
 
     /// <summary>
     /// <c>* n RECENT</c> — how many messages are "recently arrived". RFC 3501 §7.3.2.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Always zero from this server, and required all the same. <c>\Recent</c> is reserved and
-    /// never set (see <see cref="MessageFlags.Recent"/>), so zero is the truthful answer rather
-    /// than an omission — <c>docs/IMAP.md</c>'s "reporting conservatively beats reporting
-    /// incorrectly", stated on the wire.
+    /// never set — see <see cref="MessageFlags.Recent"/> — so zero is what this server's own
+    /// state says, and <c>docs/IMAP.md</c>'s "reporting conservatively beats reporting
+    /// incorrectly" is the decision behind it.
+    /// </para>
+    /// <para>
+    /// <b>This is a deliberate deviation from a SHOULD, not conformance.</b> RFC 3501 §2.3.2
+    /// says that "if it is not possible to determine whether or not this session is the first
+    /// session to be notified about a message, then that message SHOULD be considered recent" —
+    /// which points at reporting <i>more</i> messages as recent, not none. Reporting zero is
+    /// therefore a choice this product makes against that SHOULD, on the grounds that correct
+    /// <c>\Recent</c> semantics need cross-connection bookkeeping nothing here has and that
+    /// modern clients rely on <c>EXISTS</c> growing instead. Worth stating plainly rather than
+    /// dressing up as the conformant answer.
+    /// </para>
     /// </remarks>
-    public static ImapResponse Recent(long count) => Numbered(count, "RECENT");
+    public static ImapResponse Recent(long count) => Count(count, "RECENT");
 
     /// <summary>
     /// <c>* n EXPUNGE</c> — the message at sequence number <paramref name="sequenceNumber"/> is gone.
@@ -557,7 +606,8 @@ public static class ImapResponses
     /// mid-command acts on the wrong messages. Ordering and timing are the caller's to get right;
     /// this only makes the line.
     /// </remarks>
-    public static ImapResponse Expunge(long sequenceNumber) => Numbered(sequenceNumber, "EXPUNGE");
+    public static ImapResponse Expunge(long sequenceNumber) =>
+        SequenceNumber(sequenceNumber, "EXPUNGE");
 
     /// <summary><c>* FLAGS (…)</c> — the flags defined in the selected mailbox. RFC 3501 §7.2.6.</summary>
     public static ImapResponse Flags(MessageFlags flags) =>
@@ -589,11 +639,42 @@ public static class ImapResponses
     /// <summary>The continuation request that asks for a synchronising literal's octets.</summary>
     public static ImapResponse ReadyForLiteral() => ImapResponse.Continuation("Ready for literal data");
 
-    private static ImapResponse Numbered(long number, string keyword)
+    /// <summary>The largest value RFC 3501 §9's <c>number</c> can carry.</summary>
+    /// <remarks>
+    /// "Unsigned 32-bit integer (0 &lt;= n &lt; 4,294,967,296)", and <c>nz-number</c> is the same
+    /// range without zero. These are <see cref="long"/> here because a UID counter is stored as
+    /// one, so the ceiling has to be checked rather than assumed: a folder whose <c>UIDNEXT</c>
+    /// has genuinely run past 2^32 cannot be described to a client in this protocol at all, and
+    /// silently emitting a number no client can parse would be the worse of the two failures.
+    /// </remarks>
+    private const long MaxProtocolNumber = 4_294_967_295;
+
+    /// <summary>A count: <c>number</c>, so zero is legal.</summary>
+    /// <remarks>
+    /// RFC 3501 §9: <c>mailbox-data = … number SP "EXISTS" / number SP "RECENT"</c>. An empty
+    /// mailbox reports <c>* 0 EXISTS</c>, which is both grammatical and the truth.
+    /// </remarks>
+    private static ImapResponse Count(long number, string keyword)
     {
-        // A sequence number or a count, and RFC 3501 §9 types both as numbers that start at 1 -
-        // except a count, which may legitimately be zero for an empty mailbox.
         ArgumentOutOfRangeException.ThrowIfNegative(number);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(number, MaxProtocolNumber);
+
+        return ImapResponse.Data(
+            string.Create(CultureInfo.InvariantCulture, $"{number} {keyword}"));
+    }
+
+    /// <summary>A message sequence number: <c>nz-number</c>, so zero is not.</summary>
+    /// <remarks>
+    /// RFC 3501 §9: <c>message-data = nz-number SP ("EXPUNGE" / ("FETCH" SP msg-att))</c>. The
+    /// distinction from <see cref="Count"/> is not pedantry — sequence numbers are one-based, so
+    /// <c>* 0 EXPUNGE</c> names no message. A client that renumbers its cache from it either
+    /// rejects the line or acts on the wrong message, and this is the one response where acting
+    /// on the wrong message means deleting the wrong mail.
+    /// </remarks>
+    private static ImapResponse SequenceNumber(long number, string keyword)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(number, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(number, MaxProtocolNumber);
 
         return ImapResponse.Data(
             string.Create(CultureInfo.InvariantCulture, $"{number} {keyword}"));

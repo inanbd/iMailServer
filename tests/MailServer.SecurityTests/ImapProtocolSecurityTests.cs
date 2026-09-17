@@ -34,9 +34,10 @@ public sealed class ImapProtocolSecurityTests
     /// <summary>The IMAP implementation's source.</summary>
     /// <remarks>
     /// Located by walking up to the repository root rather than by a relative path from the test
-    /// binary, so the tests behave the same whatever the build output layout is. The
-    /// Infrastructure directory is permitted to be missing only while the listener has not
-    /// landed; the Domain one is not.
+    /// binary, so the tests behave the same whatever the build output layout is. Both roots are
+    /// required to exist: a scan whose directory quietly vanished would pass every test below
+    /// while asserting nothing, which is the failure mode these tests are least able to notice
+    /// about themselves.
     /// </remarks>
     private static IReadOnlyList<string> ImapSourceFiles()
     {
@@ -99,6 +100,28 @@ public sealed class ImapProtocolSecurityTests
     // Rule 77: never log or echo a credential. IMAP's LOGIN is cleartext, not base64.
     // ---------------------------------------------------------------------------------------
 
+    /// <summary>Levels that reach a production log.</summary>
+    private static readonly string[] ReachesProductionLogs =
+        ["LogInformation", "LogWarning", "LogError", "LogCritical"];
+
+    /// <summary>Things that are a credential, or carry one.</summary>
+    /// <remarks>
+    /// <c>.Argument</c> is in the list because <c>LOGIN</c>'s argument is a username and a
+    /// cleartext password together; <c>Raw</c> because it is that plus the verb.
+    /// </remarks>
+    private static readonly string[] CarriesACredential = ["command.Raw", "line.Text", ".Argument"];
+
+    /// <summary>Whether one line of source logs a credential at a level that reaches a log.</summary>
+    /// <remarks>
+    /// A named predicate rather than an inline loop so it can be exercised directly. See
+    /// <see cref="The_credential_scan_can_actually_fail"/>: nothing in the IMAP tree logs
+    /// anything yet, so the scan over real source currently evaluates zero assertions and would
+    /// keep passing however the matching were broken.
+    /// </remarks>
+    private static bool LogsACredential(string line) =>
+        ReachesProductionLogs.Any(level => line.Contains(level, StringComparison.Ordinal)) &&
+        CarriesACredential.Any(carrier => line.Contains(carrier, StringComparison.OrdinalIgnoreCase));
+
     [Fact]
     public void No_imap_source_logs_a_raw_command_line_at_information_level_or_above()
     {
@@ -107,35 +130,59 @@ public sealed class ImapProtocolSecurityTests
         // down verbatim.
         foreach (string file in ImapSourceFiles())
         {
-            string source = ExecutableSource(file);
-
-            foreach (string level in (string[])["LogInformation", "LogWarning", "LogError", "LogCritical"])
+            foreach (string line in ExecutableSource(file).Split('\n'))
             {
-                foreach (string line in source.Split('\n'))
-                {
-                    if (!line.Contains(level, StringComparison.Ordinal))
-                    {
-                        continue;
-                    }
-
-                    line.ShouldNotContain(
-                        "command.Raw",
-                        Case.Insensitive,
-                        $"{Path.GetFileName(file)} logs a raw command line at {level}.");
-
-                    line.ShouldNotContain(
-                        "line.Text",
-                        Case.Insensitive,
-                        $"{Path.GetFileName(file)} logs a raw command line at {level}.");
-
-                    line.ShouldNotContain(
-                        ".Argument",
-                        Case.Insensitive,
-                        $"{Path.GetFileName(file)} logs a command argument at {level}; " +
-                        "LOGIN's argument is a username and a cleartext password.");
-                }
+                LogsACredential(line).ShouldBeFalse(
+                    $"{Path.GetFileName(file)} logs a credential: {line.Trim()}");
             }
         }
+    }
+
+    [Fact]
+    public void The_credential_scan_can_actually_fail()
+    {
+        // The scan above is a guard for code that does not exist yet: no line in either IMAP
+        // directory mentions a logging method today, so it runs to completion having compared
+        // nothing. A guard that has never once matched is a guard nobody has checked, and the
+        // first time it is asked to do its job will be the first time it is exercised. These are
+        // the lines it exists to catch, and the ones it must not object to.
+        string[] mustCatch =
+        [
+            "_logger.LogWarning(\"Unexpected command {Line}\", command.Raw);",
+            "_logger.LogInformation(\"Command: {Text}\", line.Text);",
+            "_logger.LogError(\"Bad argument {Arg}\", command.Argument);",
+            "logger.LogCritical(COMMAND.RAW);",
+        ];
+
+        string[] mustAllow =
+        [
+            "_logger.LogDebug(\"Command {Line}\", command.Raw);",
+            "_logger.LogTrace(\"Command {Line}\", command.Raw);",
+            "_logger.LogWarning(\"Unknown command {Verb}\", command.Verb);",
+            "string argument = command.Argument;",
+            "_logger.LogInformation(\"IMAP listener started on port {Port}.\", port);",
+        ];
+
+        foreach (string line in mustCatch)
+        {
+            LogsACredential(line).ShouldBeTrue($"the scan would have missed: {line}");
+        }
+
+        foreach (string line in mustAllow)
+        {
+            LogsACredential(line).ShouldBeFalse($"the scan would have objected to: {line}");
+        }
+    }
+
+    [Fact]
+    public void The_credential_scan_sees_past_a_comment_but_not_through_one()
+    {
+        // ExecutableSource strips whole-line comments only, which is deliberate - a comment
+        // explaining why something is absent must not be mistaken for the thing. The limit worth
+        // stating: a trailing comment on a code line is NOT stripped, so a line of real code
+        // with an explanatory tail is still scanned.
+        ExecutableSource(ImapSourceFiles().First(f => Path.GetFileName(f) == "ImapCommand.cs"))
+            .ShouldNotContain("/// <summary>", Case.Sensitive);
     }
 
     [Theory]
@@ -416,6 +463,65 @@ public sealed class ImapProtocolSecurityTests
         ImapResponse.Untagged(ImapResponseStatus.No, hostile).Format().ShouldNotEndWith(" \r\n");
     }
 
+    [Theory]
+    [MemberData(nameof(HostileText))]
+    public void A_response_code_name_is_sanitised_as_hard_as_the_text_is(string hostile)
+    {
+        // Format has four sanitisers - the tag's validator, the status word's fixed table, the
+        // code's name and argument, and the text - and a payload only ever reaches one of them
+        // at a time. The code NAME is the one nothing else covers: it is an atom, so it may
+        // carry neither space nor bracket nor control character, and a caller can construct an
+        // ImapResponseCode with any string at all.
+        ImapResponseCode code = new(hostile, null);
+
+        string formatted = ImapResponse.Untagged(ImapResponseStatus.Ok, "text", code).Format();
+
+        formatted.ShouldEndWith("\r\n");
+        formatted.Count(c => c == '\n').ShouldBe(1, formatted);
+        formatted.Count(c => c == '[').ShouldBe(1, formatted);
+        formatted.Count(c => c == ']').ShouldBe(1, formatted);
+
+        foreach (char c in formatted[..^2])
+        {
+            (c is >= (char)0x20 and <= (char)0x7E).ShouldBeTrue($"U+{(int)c:X4} escaped the name.");
+        }
+    }
+
+    [Theory]
+    [InlineData("caf\u00e9")]
+    [InlineData("\u4e2d\u6587")]
+    [InlineData("\u00ff\u00fe")]
+    public void Eight_bit_data_never_reaches_a_response_code(string eightBit)
+    {
+        // RFC 3501 section 9 is 7-bit throughout, and a code's argument is as reachable from
+        // client input as the text is: a BADCHARSET argument quotes the charset the client
+        // asked for.
+        ImapResponse[] responses =
+        [
+            ImapResponse.Untagged(ImapResponseStatus.Ok, "text", new ImapResponseCode(eightBit, null)),
+            ImapResponse.Untagged(ImapResponseStatus.Ok, "text", new ImapResponseCode("BADCHARSET", eightBit)),
+        ];
+
+        foreach (ImapResponse response in responses)
+        {
+            foreach (char c in response.Format()[..^2])
+            {
+                (c is >= (char)0x20 and <= (char)0x7E).ShouldBeTrue($"U+{(int)c:X4} reached the wire.");
+            }
+        }
+    }
+
+    [Fact]
+    public void A_response_code_that_sanitises_away_to_nothing_still_produces_a_code()
+    {
+        // An empty atom is not an atom, so a name reduced to nothing needs a fallback for the
+        // same reason the text does - otherwise the line renders as "* OK [] text", which is
+        // ungrammatical.
+        ImapResponse.Untagged(ImapResponseStatus.Ok, "text", new ImapResponseCode("\r\n", null))
+            .Format()
+            .ShouldNotContain("[]");
+    }
+
     // ---------------------------------------------------------------------------------------
     // The tag: validated on the way in, refused on the way out.
     // ---------------------------------------------------------------------------------------
@@ -619,8 +725,12 @@ public sealed class ImapProtocolSecurityTests
         // necessarily proven anything about itself. Guessing at what a malformed encoding meant
         // is how one user reaches another user's folder.
         // An unrecognised character in the shift sequence, and non-zero leftover padding bits a
-        // correct encoder would never have produced. ("&AAA" is NOT malformed - it is a
-        // well-formed encoding of U+0000, which is a different problem for a different layer.)
+        // correct encoder would never have produced. Note what is NOT asserted here: "&AAA" -
+        // an unterminated shift whose bits decode to U+0000 - is currently accepted by the
+        // decoder, and whether RFC 3501 section 5.1.3 permits an unterminated shift at end of
+        // input is a question about ImapMailboxName rather than about this grammar layer. It is
+        // left unasserted rather than asserted either way, so that nothing here can be read as
+        // having settled it.
         ImapMailboxName.TryDecode("&Jj_-", out _).ShouldBeFalse();
         ImapMailboxName.TryDecode("&JjoB-", out _).ShouldBeFalse();
 
