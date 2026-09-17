@@ -388,6 +388,48 @@ public sealed class SmtpProtocolSecurityTests
         }
     }
 
+    [Theory]
+    [InlineData("AUTH PLAIN AGFsaWNlAGh1bnRlcjI=")]
+    [InlineData("AUTH LOGIN")]
+    [InlineData("auth plain AGFsaWNlAGh1bnRlcjI=")]
+    public void Rendering_a_command_never_reveals_a_credential(string line)
+    {
+        // The exposure the scan above cannot see. A record's generated ToString prints every
+        // property, so "logger.LogWarning("Unexpected command {Command}", command)" would write
+        // the base64 credential down while mentioning neither Raw nor Argument by name - the
+        // scan matches on those two identifiers and would pass that line without comment.
+        // Base64 is an encoding, not a protection: anyone reading the log decodes it in one step.
+        SmtpCommand command = SmtpCommand.Parse(line);
+
+        foreach (string rendered in (string[])[command.ToString(), $"{command}"])
+        {
+            rendered.ShouldNotContain("AGFsaWNlAGh1bnRlcjI=", Case.Insensitive, rendered);
+            rendered.ShouldNotContain(command.Raw, Case.Insensitive, rendered);
+
+            if (command.Argument.Length > 0)
+            {
+                rendered.ShouldNotContain(command.Argument, Case.Insensitive, rendered);
+            }
+        }
+    }
+
+    [Fact]
+    public void A_rendered_command_still_says_which_command_it_was()
+    {
+        // Redacted from rendering, not made useless: the verb is a fixed enum value, never
+        // client text, and it is the part a diagnostic actually needs.
+        SmtpCommand.Parse("AUTH PLAIN AGFsaWNlAGh1bnRlcjI=").ToString().ShouldContain("Auth");
+    }
+
+    [Fact]
+    public void The_argument_is_still_reachable_for_the_handler_that_needs_it()
+    {
+        SmtpCommand command = SmtpCommand.Parse("AUTH PLAIN AGFsaWNlAGh1bnRlcjI=");
+
+        command.Argument.ShouldBe("PLAIN AGFsaWNlAGh1bnRlcjI=");
+        command.Raw.ShouldBe("AUTH PLAIN AGFsaWNlAGh1bnRlcjI=");
+    }
+
     [Fact]
     public void No_reply_in_the_vocabulary_echoes_an_authentication_argument()
     {

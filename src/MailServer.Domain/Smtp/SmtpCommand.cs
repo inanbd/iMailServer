@@ -43,6 +43,48 @@ public enum SmtpVerb
 public sealed record SmtpCommand(SmtpVerb Verb, string Argument, string Raw)
 {
     /// <summary>
+    /// Prints the verb, and deliberately never the argument or the raw line.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A record's generated <c>ToString</c> prints every property, and two of these
+    /// properties can carry a credential.</b> <c>AUTH PLAIN AGFsaWNlAGh1bnRlcjI=</c> puts a
+    /// base64-wrapped username and password in <see cref="Argument"/> and again in
+    /// <see cref="Raw"/>. Base64 is an encoding, not a protection — anyone reading the log
+    /// decodes it in one step — so the generated rendering would have made
+    /// <c>logger.LogWarning("Unexpected command {Command}", command)</c>, a bare string
+    /// interpolation, an exception message or a debugger-attached crash dump write a customer's
+    /// password down.
+    /// </para>
+    /// <para>
+    /// <c>SmtpProtocolSecurityTests</c>'s rule-77 scan cannot catch that shape: it matches the
+    /// identifiers <c>command.Raw</c> and <c>line.Text</c> on logging lines, and a line passing
+    /// the whole command object names neither. The defence therefore belongs in the type rather
+    /// than in a rule every future call site has to remember, because the call site that forgets
+    /// will not be the one anybody reviews.
+    /// </para>
+    /// <para>
+    /// Nothing in this repository logs a command object today, so this closes a latent trap
+    /// rather than a live leak. Its IMAP counterpart is
+    /// <see cref="Imap.ImapCommand"/>, where the same defect is worse: RFC 3501's <c>LOGIN</c>
+    /// carries the password with no encoding at all.
+    /// </para>
+    /// <para>
+    /// The verb is safe to print — it is one of a fixed set of enum values, never client text.
+    /// The argument remains reachable on the type; it is redacted from rendering, not from the
+    /// handler that has to read it.
+    /// </para>
+    /// </remarks>
+    private bool PrintMembers(System.Text.StringBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+
+        builder.Append("Verb = ").Append(Verb);
+
+        return true;
+    }
+
+    /// <summary>
     /// Parses a command line.
     /// </summary>
     /// <remarks>
