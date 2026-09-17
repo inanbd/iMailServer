@@ -34,15 +34,32 @@ incorrectly.
 
 ## Literals
 
-`{n}` and `{n+}` need hard caps. `LITERAL+` non-synchronising literals let a client push
-arbitrary bytes **before the server can refuse**, which without a cap is a trivial memory
-exhaustion. Above a threshold, literals stream to disk rather than to memory.
+`{n}` and `{n+}` need hard caps. Non-synchronising literals let a client push arbitrary bytes
+**before the server can refuse**, which without a cap is a trivial memory exhaustion. Above a
+threshold, literals stream to disk rather than to memory.
+
+**The capability advertised for this is `LITERAL-`, not `LITERAL+`.** RFC 7888 defines both:
+they permit the same `{n+}` syntax, but `LITERAL-` caps a non-synchronising literal at 4096
+octets while `LITERAL+` places no bound on one at all, and §5 forbids advertising both at once.
+Requiring a hard cap, as the paragraph above does, is the same thing as deciding this is not a
+`LITERAL+` server. Advertising `LITERAL+` and then enforcing a cap anyway leaves only the two
+exits RFC 7888 §4 spells out — read every declared byte and refuse the command regardless,
+spending exactly the bandwidth an attacker wanted spent, or send an untagged `BYE` and drop the
+connection, which §4 notes "some naive clients are known to blindly reconnect" from,
+"introducing an infinite loop". That is a reconnect loop built into a denial-of-service defence.
+`LITERAL-` states the cap up front instead, and a complying client sends a synchronising literal
+above it — which the server can refuse before a single octet of it arrives.
 
 ## Special-use folders
 
-`Inbox`, `Sent`, `Drafts`, `Trash`, `Junk`, `Archive` are created with the mailbox and
-advertised via `SPECIAL-USE` (`\Sent`, `\Drafts`, `\Trash`, `\Junk`, `\Archive`), so clients
-stop creating duplicates like `Sent Items` alongside `Sent`.
+`Inbox`, `Sent`, `Drafts`, `Trash`, `Junk`, `Archive` are created with the mailbox and the
+RFC 6154 attributes (`\Sent`, `\Drafts`, `\Trash`, `\Junk`, `\Archive`) are returned for them,
+so clients stop creating duplicates like `Sent Items` alongside `Sent`.
+
+**No capability is advertised for this.** RFC 6154 §2 is explicit that the attributes need none
+on the non-extended `LIST`; the `SPECIAL-USE` atom is about the *extended* `LIST` of RFC 5258,
+and advertising it would commit this server to that command's selection and return options. So
+the attributes are emitted and the atom is not — the whole benefit, with no promise attached.
 
 ## IDLE
 

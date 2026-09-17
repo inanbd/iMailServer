@@ -94,9 +94,9 @@ Status values:
 |---|---|---|---|---|
 | IMAP4rev1 | 3501 | Planned | 10 | UID and UIDVALIDITY correctness is the priority |
 | IMAP IDLE | 2177 | Planned | 10 | Server-side timer below the 29-minute limit |
-| IMAP SPECIAL-USE | 6154 | Planned | 10 | Stops clients creating duplicate Sent folders |
+| IMAP SPECIAL-USE | 6154 | Planned | 10 | Stops clients creating duplicate Sent folders. Note RFC 6154 §2: the attributes need **no capability** on the non-extended `LIST`; the `SPECIAL-USE` atom instead commits a server to RFC 5258 LIST-EXTENDED, so this product will emit the attributes and advertise nothing |
 | IMAP MOVE | 6851 | Planned | 10 | |
-| IMAP LITERAL+ | 7888 | Planned | 10 | Hard caps: `{n+}` lets a client push bytes before the server can refuse |
+| IMAP LITERAL- | 7888 | Partial | 10 | **`LITERAL-`, not `LITERAL+`.** RFC 7888 defines both; `LITERAL-` caps a non-synchronising literal at 4096 octets and `LITERAL+` places no bound on one, and §5 forbids advertising both. This product requires a hard cap — `{n+}` lets a client push bytes before the server can refuse — so it was never a `LITERAL+` server. `ImapLiteralSpecifier` parses the `{n+}` syntax and `ImapCapabilities` knows the atom; **nothing reads a literal's octets yet**, so the capability stays behind a flag that is off |
 | POP3 | 1939 | Planned | 10 | **Disabled by default.** Destructive reads interact badly with IMAP on the same mailbox |
 
 ---

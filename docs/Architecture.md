@@ -1506,6 +1506,7 @@ live in the DPAPI-protected secret store and configuration holds only a referenc
       "SmtpCommandTimeoutSeconds": 300,
       "SmtpSessionTimeoutSeconds": 600,
       "MaxSmtpLineBytes": 4096,
+      "MaxImapLineBytes": 16384,
       "MaxHeaderBytes": 262144,
       "MaxMimeDepth": 20,
       "MaxAuthAttemptsPerSession": 3
@@ -1612,9 +1613,11 @@ test investment is budgeted up front.
 8. **SPF macro expansion and lookup limits.** Macros are obscure and rarely implemented
    correctly; the 10-lookup and 2-void-lookup limits must produce `permerror`, not partial
    evaluation.
-9. **IMAP literals, `LITERAL+`, and sequence-set arithmetic.** `{n+}` non-synchronizing
+9. **IMAP literals, `LITERAL-`, and sequence-set arithmetic.** `{n+}` non-synchronizing
    literals let a client push arbitrary bytes before the server can refuse — hard caps are
-   mandatory. Sequence sets like `1,3:5,*:8` and `UID` variants are a classic bug farm.
+   mandatory, which is why Milestone 10 advertises RFC 7888's `LITERAL-` (a 4096-octet cap)
+   rather than `LITERAL+` (no cap at all); see `docs/IMAP.md`. Sequence sets like `1,3:5,*:8`
+   and `UID` variants are a classic bug farm.
 10. **IMAP `SEARCH` charset and `FETCH BODY[…]` part addressing.** Partial fetches
     (`BODY[1.2.HEADER]<0.2048>`) must map exactly onto MIME structure.
 11. **`EXPUNGE` response sequencing.** Untagged `EXPUNGE` at the wrong moment, or in the
