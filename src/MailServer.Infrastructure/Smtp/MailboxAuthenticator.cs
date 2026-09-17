@@ -190,7 +190,8 @@ public sealed class MailboxAuthenticator(
         return new MailboxAuthenticationResult(
             MailboxAuthenticationOutcome.Succeeded,
             mailbox.Address,
-            "Authenticated.");
+            "Authenticated.",
+            mailbox.Id);
     }
 
     /// <summary>Refuses, having first spent a verification's worth of work.</summary>

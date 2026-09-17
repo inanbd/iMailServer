@@ -35,10 +35,30 @@ public enum MailboxAuthenticationOutcome
 /// <param name="Diagnostic">
 /// For the server's own log. Never sent to the client, and never contains credential material.
 /// </param>
+/// <param name="MailboxId">
+/// The authenticated mailbox's identity, when it succeeded. Null otherwise.
+/// </param>
+/// <remarks>
+/// <para>
+/// <see cref="MailboxId"/> arrived with IMAP and is why it has a default rather than a position
+/// alongside the others: SMTP never needed it, because an SMTP session records who authenticated
+/// as an address and nothing more. An IMAP session caches the identity for the life of the
+/// connection — see <c>ImapSessionContext</c>'s remarks on why — so it needs the id, and the
+/// authenticator has already loaded the mailbox in order to check the credential. Returning what
+/// it is holding costs nothing; making the caller look the same row up again would be a second
+/// query to answer a question that was just answered.
+/// </para>
+/// <para>
+/// Null on every failure, and deliberately so: a result that carried an id alongside
+/// <see cref="MailboxAuthenticationOutcome.Failed"/> would be a refusal that still told the
+/// caller the mailbox exists.
+/// </para>
+/// </remarks>
 public sealed record MailboxAuthenticationResult(
     MailboxAuthenticationOutcome Outcome,
     EmailAddress? Mailbox,
-    string Diagnostic)
+    string Diagnostic,
+    MailboxId? MailboxId = null)
 {
     public bool IsSuccess => Outcome == MailboxAuthenticationOutcome.Succeeded;
 }
