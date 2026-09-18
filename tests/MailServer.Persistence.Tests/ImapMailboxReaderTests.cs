@@ -1267,4 +1267,204 @@ public sealed class ImapMailboxReaderTests
         after.Count.ShouldBe(Count);
         after.ShouldAllBe(s => s.Flags == MessageFlags.Seen);
     }
+    // ---------------------------------------------------------------------------------------
+    // EXPUNGE.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// RFC 3501 §6.4.3's worked example: an 11-message mailbox with 3, 4, 7 and 11 marked
+    /// \Deleted. Asserted against the real query, and in this server's descending order — where
+    /// the numbers are the positions as they stood before anything was removed.
+    /// </summary>
+    [Fact]
+    public async Task The_rfcs_own_expunge_example_removes_the_right_positions()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, MailboxFolderId folder) = await SeedFolderAsync(connection);
+
+        for (long uid = 1; uid <= 11; uid++)
+        {
+            await DeliverAsync(
+                connection,
+                mailbox,
+                folder,
+                uid,
+                uid is 3 or 4 or 7 or 11 ? MessageFlags.Deleted : MessageFlags.None);
+        }
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        IReadOnlyList<long> removed = await scope.ImapWrites.ExpungeAsync(
+            mailbox,
+            folder,
+            CancellationToken.None);
+
+        removed.ShouldBe([11, 7, 4, 3]);
+
+        IReadOnlyList<ImapMessageSummary> after = await scope.ImapMailboxes.ReadSummariesAsync(
+            mailbox,
+            folder,
+            Set("1:*"),
+            byUid: false,
+            CancellationToken.None);
+
+        // The survivors the RFC's example leaves, renumbered from 1 by the window function.
+        after.Select(m => m.Uid).ShouldBe([1, 2, 5, 6, 8, 9, 10]);
+        after.Select(m => m.SequenceNumber).ShouldBe([1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    /// <summary>
+    /// The positions reported are positions in the whole folder, not positions among the deleted
+    /// — which is what makes them meaningful to a client that never saw the \Deleted flags.
+    /// </summary>
+    [Fact]
+    public async Task The_positions_are_folder_positions_and_not_positions_among_the_deleted()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, MailboxFolderId folder) = await SeedFolderAsync(connection);
+
+        // UIDs with gaps, so a position is plainly not a UID either.
+        await DeliverAsync(connection, mailbox, folder, uid: 5);
+        await DeliverAsync(connection, mailbox, folder, uid: 9, flags: MessageFlags.Deleted);
+        await DeliverAsync(connection, mailbox, folder, uid: 14);
+        await DeliverAsync(connection, mailbox, folder, uid: 20, flags: MessageFlags.Deleted);
+
+        IReadOnlyList<long> removed = await database.CreateScope().ImapWrites.ExpungeAsync(
+            mailbox,
+            folder,
+            CancellationToken.None);
+
+        removed.ShouldBe([4, 2]);
+    }
+
+    [Fact]
+    public async Task Nothing_deleted_removes_nothing_and_reports_nothing()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        (await scope.ImapWrites.ExpungeAsync(mailbox, folder, CancellationToken.None))
+            .ShouldBeEmpty();
+
+        (await scope.ImapMailboxes.ReadSummariesAsync(
+            mailbox, folder, Set("1:*"), byUid: false, CancellationToken.None))
+            .Count.ShouldBe(4);
+    }
+
+    /// <summary>
+    /// UIDs are never reused, so expunging must not disturb UIDNEXT — a client that cached a UID
+    /// must never find a different message at it later.
+    /// </summary>
+    [Fact]
+    public async Task Expunging_does_not_move_uidnext()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, MailboxFolderId folder) = await SeedFolderAsync(connection);
+
+        await DeliverAsync(connection, mailbox, folder, uid: 1, flags: MessageFlags.Deleted);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        ImapFolderSnapshot? before = await scope.ImapMailboxes
+            .OpenFolderAsync(mailbox, "INBOX", CancellationToken.None);
+
+        await scope.ImapWrites.ExpungeAsync(mailbox, folder, CancellationToken.None);
+
+        ImapFolderSnapshot? after = await scope.ImapMailboxes
+            .OpenFolderAsync(mailbox, "INBOX", CancellationToken.None);
+
+        after!.UidNext.ShouldBe(before!.UidNext);
+        after.UidValidity.ShouldBe(before.UidValidity);
+        after.ExistsCount.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// The stored message survives the delivery. The schema's own comment on
+    /// Messages.ContentRemovedUtc says the row "outlives the file so that delivery history
+    /// survives retention, which is what an abuse investigation actually needs months later" —
+    /// so an expunge that destroyed it would destroy evidence the schema exists to keep.
+    /// </summary>
+    [Fact]
+    public async Task Expunging_removes_the_delivery_and_keeps_the_message()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, MailboxFolderId folder) = await SeedFolderAsync(connection);
+
+        await DeliverAsync(connection, mailbox, folder, uid: 1, flags: MessageFlags.Deleted);
+
+        await database.CreateScope().ImapWrites
+            .ExpungeAsync(mailbox, folder, CancellationToken.None);
+
+        (await connection.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM Deliveries"))
+            .ShouldBe(0);
+
+        (await connection.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM Messages"))
+            .ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Another_mailboxs_folder_id_expunges_nothing()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId alice, _) = await SeedFolderAsync(connection);
+
+        (MailboxId bob, MailboxFolderId bobsFolder) = await SeedFolderAsync(
+            connection,
+            address: "bob@example.net");
+
+        await DeliverAsync(connection, bob, bobsFolder, uid: 1, flags: MessageFlags.Deleted);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        (await scope.ImapWrites.ExpungeAsync(alice, bobsFolder, CancellationToken.None))
+            .ShouldBeEmpty();
+
+        (await scope.ImapMailboxes.ReadSummariesAsync(
+            bob, bobsFolder, Set("1:*"), byUid: false, CancellationToken.None))
+            .Count.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Expunging_more_messages_than_one_statement_holds_removes_them_all()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, MailboxFolderId folder) = await SeedFolderAsync(connection);
+
+        const int Count = 1_200;
+
+        for (long uid = 1; uid <= Count; uid++)
+        {
+            await DeliverAsync(connection, mailbox, folder, uid, MessageFlags.Deleted);
+        }
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        IReadOnlyList<long> removed = await scope.ImapWrites.ExpungeAsync(
+            mailbox,
+            folder,
+            CancellationToken.None);
+
+        removed.Count.ShouldBe(Count);
+        removed[0].ShouldBe(Count);
+        removed[^1].ShouldBe(1);
+
+        (await connection.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM Deliveries")).ShouldBe(0);
+    }
 }

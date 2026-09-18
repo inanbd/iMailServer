@@ -147,4 +147,113 @@ internal sealed class ImapMailboxWriter(
             },
             cancellationToken);
     }
+
+    /// <summary>
+    /// The positions and UIDs of every message carrying <c>\Deleted</c>, highest position first.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The position is computed by <c>ROW_NUMBER() OVER (ORDER BY Uid)</c> over the whole folder,
+    /// exactly as the reader does, because RFC 3501 §2.3.1.2 makes a sequence number a position
+    /// rather than a stored value. The <c>\Deleted</c> filter is applied outside that window, so
+    /// the numbers are positions in the folder as the client sees it rather than positions among
+    /// the deleted.
+    /// </para>
+    /// <para>
+    /// <c>ORDER BY Seq DESC</c> is the response order, and it is the query's job rather than the
+    /// caller's so that the rows arrive already in the order they must be reported — see
+    /// <see cref="IImapMailboxWriter.ExpungeAsync"/> for why descending removes the arithmetic
+    /// entirely.
+    /// </para>
+    /// </remarks>
+    private const string SelectDeleted = """
+        SELECT  Ordered.Seq, Ordered.Uid
+        FROM    (SELECT ROW_NUMBER() OVER (ORDER BY Uid) AS Seq, Uid, Flags
+                 FROM   Deliveries
+                 WHERE  FolderId = @FolderId
+                   AND  MailboxId = @MailboxId) AS Ordered
+        WHERE   (Ordered.Flags & @DeletedFlag) <> 0
+        ORDER BY Ordered.Seq DESC
+        """;
+
+    /// <summary>Removes a batch of deliveries by UID.</summary>
+    /// <remarks>
+    /// Only the <c>Deliveries</c> rows. The <c>Messages</c> row and its stored file survive by
+    /// design — see <see cref="IImapMailboxWriter.ExpungeAsync"/>.
+    /// </remarks>
+    private const string DeleteDeliveries = """
+        DELETE  FROM Deliveries
+        WHERE   FolderId = @FolderId
+          AND   MailboxId = @MailboxId
+          AND   Uid IN @Uids
+        """;
+
+    /// <summary>Flat shape of one message marked for removal.</summary>
+    private sealed class DeletedRow
+    {
+        public long Seq { get; set; }
+
+        public long Uid { get; set; }
+    }
+
+    public Task<IReadOnlyList<long>> ExpungeAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        CancellationToken cancellationToken)
+    {
+        // One transaction around the read and the delete: a position computed against one state
+        // of the folder and reported against another is how a client renumbers onto the wrong
+        // message.
+        return transactions.ExecuteScopedAsync(
+            async ct =>
+            {
+                return await ExecuteAsync(
+                    async (session, inner) =>
+                    {
+                        IEnumerable<DeletedRow> rows = await session.Connection
+                            .QueryAsync<DeletedRow>(Command(
+                                session,
+                                SelectDeleted,
+                                new
+                                {
+                                    FolderId = folderId.Value,
+                                    MailboxId = mailboxId.Value,
+                                    DeletedFlag = (int)MessageFlags.Deleted,
+                                },
+                                inner))
+                            .ConfigureAwait(false);
+
+                        List<DeletedRow> deleted = [.. rows];
+
+                        if (deleted.Count == 0)
+                        {
+                            return (IReadOnlyList<long>)[];
+                        }
+
+                        long[] uids = [.. deleted.Select(r => r.Uid)];
+
+                        for (int offset = 0; offset < uids.Length; offset += UidBatchSize)
+                        {
+                            long[] batch = [.. uids.Skip(offset).Take(UidBatchSize)];
+
+                            await session.Connection
+                                .ExecuteAsync(Command(
+                                    session,
+                                    DeleteDeliveries,
+                                    new
+                                    {
+                                        FolderId = folderId.Value,
+                                        MailboxId = mailboxId.Value,
+                                        Uids = batch,
+                                    },
+                                    inner))
+                                .ConfigureAwait(false);
+                        }
+
+                        return (IReadOnlyList<long>)[.. deleted.Select(r => r.Seq)];
+                    },
+                    ct).ConfigureAwait(false);
+            },
+            cancellationToken);
+    }
 }

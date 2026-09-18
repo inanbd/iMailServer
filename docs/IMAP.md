@@ -239,6 +239,46 @@ The write batches its UIDs at 500 per statement. Every UID is a bound parameter 
 providers cap those — SQLite historically at 999, SQL Server at 2,100 — so a store over a larger
 set becomes more statements inside the one transaction rather than a driver error.
 
+## EXPUNGE and CLOSE
+
+`EXPUNGE` removes every message carrying `\Deleted` and sends one untagged `* n EXPUNGE` per
+message removed, per RFC 3501 §6.4.3.
+
+**The responses go out highest position first.** §7.4.1 makes sequence numbers renumber as
+messages go — "The message sequence number for each successive message in the mailbox is
+immediately decremented by 1, and this decrement is reflected in message sequence numbers in
+subsequent responses" — and names both directions as legal: a "lower to higher" server and a
+"higher to lower" one. Descending is the half where no number moves before it is sent, because
+only higher positions have gone. So the numbers emitted are simply the positions as they stood
+before the removal, and there is no running decrement anywhere in the product. In the one
+response where an off-by-one makes a client delete the wrong mail, having no arithmetic at all is
+worth more than the symmetry. §6.4.3's own example (messages 3, 4, 7, 11 of 11, answered
+`3 3 5 8` by an ascending server) is reproduced as a test in both forms, to prove the descending
+output names the same messages.
+
+**No `EXISTS` follows.** §7.4.1: "The EXPUNGE response also decrements the number of messages in
+the mailbox; it is not necessary to send an EXISTS response with the new value."
+
+**`CLOSE` does the same removal and says nothing about it**, then returns to the authenticated
+state — §6.4.2: "No untagged EXPUNGE responses are sent." That silence is the command's purpose;
+the RFC explains that a `CLOSE-LOGOUT` sequence "is considerably faster than an `EXPUNGE-LOGOUT`
+… because no untagged EXPUNGE responses (which the client would probably ignore) are sent."
+
+**On a read-only mailbox the two commands differ, and the difference is the RFC's.** `EXPUNGE`
+is refused with a tagged `NO` — §6.3.2 permits no change to the permanent state, and §6.4.3's
+result list has the case for it. `CLOSE` succeeds, removes nothing and still deselects, because
+§6.4.2 says so outright: "No messages are removed, and no error is given, if the mailbox is
+selected by an EXAMINE command or is otherwise selected read-only." `CLOSE` has no `NO` result at
+all. A server that refused there would fail every client that closes each mailbox it opens.
+
+**Only the delivery goes; the stored message stays.** Expunging deletes the `Deliveries` row and
+leaves the `Messages` row and its content file, which is what the schema intends — its own
+comment on `ContentRemovedUtc` reads "The row outlives the file so that delivery history survives
+retention, which is what an abuse investigation actually needs months later". Reclaiming a
+content file once no delivery references it is a retention sweep's job and **no such sweep exists
+yet**, so an expunged message's bytes stay on disk until one is built. Deleting them here would
+destroy exactly what the schema keeps them for.
+
 ## IDLE
 
 Held with a server-side timer that emits a keep-alive before the 29-minute RFC 2177 limit, and

@@ -308,6 +308,57 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
 
         return after;
     }
+
+    /// <summary>Every folder this fake was asked to expunge.</summary>
+    public List<(Guid Mailbox, Guid Folder)> Expunged { get; } = [];
+
+    /// <summary>
+    /// Removes the \Deleted messages, reporting their positions highest first.
+    /// </summary>
+    /// <remarks>
+    /// The positions are computed before anything is removed and the surviving messages are
+    /// renumbered afterwards, because that is what the real query and the real table do — a fake
+    /// that left stale sequence numbers behind would make a later FETCH agree with nothing.
+    /// </remarks>
+    public Task<IReadOnlyList<long>> ExpungeAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        CancellationToken cancellationToken)
+    {
+        Expunged.Add((mailboxId.Value, folderId.Value));
+
+        KeyValuePair<(Guid Mailbox, string Path), Entry> owner = _folders
+            .FirstOrDefault(pair =>
+                pair.Value.Folder.Id.Value == folderId.Value &&
+                pair.Key.Mailbox == mailboxId.Value);
+
+        if (owner.Value is null ||
+            !_messages.TryGetValue(owner.Key, out List<ImapMessageSummary>? all))
+        {
+            return Task.FromResult<IReadOnlyList<long>>([]);
+        }
+
+        List<long> removed =
+        [
+            .. all.Where(m => m.Flags.HasFlag(MessageFlags.Deleted))
+                  .Select(m => m.SequenceNumber)
+                  .OrderByDescending(n => n),
+        ];
+
+        List<ImapMessageSummary> survivors =
+            [.. all.Where(m => !m.Flags.HasFlag(MessageFlags.Deleted))];
+
+        all.Clear();
+
+        long sequenceNumber = 1;
+
+        foreach (ImapMessageSummary survivor in survivors.OrderBy(m => m.Uid))
+        {
+            all.Add(survivor with { SequenceNumber = sequenceNumber++ });
+        }
+
+        return Task.FromResult<IReadOnlyList<long>>(removed);
+    }
 }
 
 public sealed class ImapCommandProcessorTests
@@ -2157,5 +2208,203 @@ public sealed class ImapCommandProcessorTests
         string wire = Wire(await ExecuteAsync(await FetchableAsync(), "a2 FETCH 1 (UID FLAGS)"));
 
         wire.ShouldBe("* 1 FETCH (UID 3 FLAGS (\\Seen))\r\na2 OK FETCH completed\r\n");
+    }
+    // ---------------------------------------------------------------------------------------
+    // EXPUNGE and CLOSE.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// A selected mailbox of eleven messages with 3, 4, 7 and 11 marked <c>\Deleted</c> — the
+    /// exact shape of RFC 3501 §6.4.3's worked example.
+    /// </summary>
+    private static async Task<(
+        ImapCommandProcessor Processor,
+        ScriptedImapMailboxReader Store,
+        ImapSessionContext Session)>
+        ExpungeableAsync(bool readOnly = false)
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 11)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
+
+        ImapSessionContext session = Session();
+
+        ImapCommandProcessor processor = Processor(
+            session: session,
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, readOnly ? "a1 EXAMINE INBOX" : "a1 SELECT INBOX");
+
+        if (!readOnly)
+        {
+            // Positions 3, 4, 7 and 11 - the RFC's own example.
+            await ExecuteAsync(processor, @"a1b STORE 3,4,7,11 +FLAGS.SILENT (\Deleted)");
+        }
+
+        return (processor, mailboxes, session);
+    }
+
+    /// <summary>
+    /// RFC 3501 §7.4.1 permits either order and names both. This server sends the "higher to
+    /// lower" one, where every number is still valid when it is sent because only higher
+    /// positions have gone — so the numbers are simply the positions as they were.
+    /// </summary>
+    [Fact]
+    public async Task Expunge_reports_the_removed_positions_highest_first()
+    {
+        (ImapCommandProcessor processor, _, _) = await ExpungeableAsync();
+
+        string wire = Wire(await ExecuteAsync(processor, "a2 EXPUNGE"));
+
+        wire.ShouldBe(
+            "* 11 EXPUNGE\r\n" +
+            "* 7 EXPUNGE\r\n" +
+            "* 4 EXPUNGE\r\n" +
+            "* 3 EXPUNGE\r\n" +
+            "a2 OK EXPUNGE completed\r\n");
+    }
+
+    /// <summary>
+    /// The messages the RFC's example leaves behind are 1, 2, 5, 6, 8, 9, 10 — asserted through
+    /// a following FETCH, so the renumbering is observed rather than assumed.
+    /// </summary>
+    [Fact]
+    public async Task The_survivors_are_renumbered_from_one()
+    {
+        (ImapCommandProcessor processor, _, _) = await ExpungeableAsync();
+
+        await ExecuteAsync(processor, "a2 EXPUNGE");
+
+        string wire = Wire(await ExecuteAsync(processor, "a3 FETCH 1:* UID"));
+
+        wire.ShouldBe(
+            "* 1 FETCH (UID 1)\r\n" +
+            "* 2 FETCH (UID 2)\r\n" +
+            "* 3 FETCH (UID 5)\r\n" +
+            "* 4 FETCH (UID 6)\r\n" +
+            "* 5 FETCH (UID 8)\r\n" +
+            "* 6 FETCH (UID 9)\r\n" +
+            "* 7 FETCH (UID 10)\r\n" +
+            "a3 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// §7.4.1: "it is not necessary to send an EXISTS response with the new value." A client that
+    /// has already decremented would otherwise have to reconcile two statements of one fact.
+    /// </summary>
+    [Fact]
+    public async Task Expunge_does_not_follow_with_an_exists()
+    {
+        (ImapCommandProcessor processor, _, _) = await ExpungeableAsync();
+
+        Wire(await ExecuteAsync(processor, "a2 EXPUNGE")).ShouldNotContain("EXISTS");
+    }
+
+    [Fact]
+    public async Task Expunge_with_nothing_deleted_is_an_ok_with_no_data()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 3)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2, 3);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+
+        Wire(await ExecuteAsync(processor, "a2 EXPUNGE"))
+            .ShouldBe("a2 OK EXPUNGE completed\r\n");
+    }
+
+    /// <summary>
+    /// §6.3.2 permits no change to a read-only mailbox's permanent state, and §6.4.3's result
+    /// list has the shape for the refusal: "NO - expunge failure: can't expunge".
+    /// </summary>
+    [Fact]
+    public async Task Expunge_on_a_read_only_mailbox_is_refused()
+    {
+        (ImapCommandProcessor processor, ScriptedImapMailboxReader store, _) =
+            await ExpungeableAsync(readOnly: true);
+
+        string wire = Wire(await ExecuteAsync(processor, "a2 EXPUNGE"));
+
+        wire.ShouldContain("a2 NO ");
+        wire.ShouldContain("read-only");
+        store.Expunged.ShouldBeEmpty();
+    }
+
+    [Theory]
+    [InlineData("a2 EXPUNGE 1")]
+    [InlineData("a2 EXPUNGE nonsense")]
+    public async Task Expunge_takes_no_arguments(string line)
+    {
+        (ImapCommandProcessor processor, _, _) = await ExpungeableAsync();
+
+        Wire(await ExecuteAsync(processor, line)).ShouldContain("a2 BAD ");
+    }
+
+    /// <summary>
+    /// §6.4.2: CLOSE removes the deleted messages "and returns to the authenticated state", and
+    /// "No untagged EXPUNGE responses are sent." The silence is the command's whole purpose.
+    /// </summary>
+    [Fact]
+    public async Task Close_expunges_silently_and_leaves_the_selected_state()
+    {
+        (ImapCommandProcessor processor, ScriptedImapMailboxReader store, ImapSessionContext session) =
+            await ExpungeableAsync();
+
+        string wire = Wire(await ExecuteAsync(processor, "a2 CLOSE"));
+
+        wire.ShouldBe("a2 OK CLOSE completed\r\n");
+        wire.ShouldNotContain("EXPUNGE");
+
+        store.Expunged.ShouldNotBeEmpty();
+        session.State.ShouldBe(ImapSessionState.Authenticated);
+        session.SelectedFolderId.ShouldBeNull();
+    }
+
+    /// <summary>
+    /// The asymmetry with EXPUNGE, and it is the RFC's. §6.4.2: "No messages are removed, and no
+    /// error is given, if the mailbox is selected by an EXAMINE command or is otherwise selected
+    /// read-only." CLOSE has no NO case at all, while EXPUNGE does.
+    /// </summary>
+    [Fact]
+    public async Task Close_on_a_read_only_mailbox_succeeds_and_removes_nothing()
+    {
+        (ImapCommandProcessor processor, ScriptedImapMailboxReader store, ImapSessionContext session) =
+            await ExpungeableAsync(readOnly: true);
+
+        string wire = Wire(await ExecuteAsync(processor, "a2 CLOSE"));
+
+        wire.ShouldBe("a2 OK CLOSE completed\r\n");
+        store.Expunged.ShouldBeEmpty();
+        session.State.ShouldBe(ImapSessionState.Authenticated);
+    }
+
+    /// <summary>After CLOSE the session is authenticated, so a selected-state command is out of sequence.</summary>
+    [Fact]
+    public async Task A_selected_state_command_is_out_of_sequence_after_close()
+    {
+        (ImapCommandProcessor processor, _, _) = await ExpungeableAsync();
+
+        await ExecuteAsync(processor, "a2 CLOSE");
+
+        Wire(await ExecuteAsync(processor, "a3 FETCH 1 FLAGS")).ShouldContain("a3 BAD ");
+    }
+
+    [Fact]
+    public async Task Close_takes_no_arguments()
+    {
+        (ImapCommandProcessor processor, _, _) = await ExpungeableAsync();
+
+        Wire(await ExecuteAsync(processor, "a2 CLOSE now")).ShouldContain("a2 BAD ");
     }
 }

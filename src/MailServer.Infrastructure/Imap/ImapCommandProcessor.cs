@@ -232,6 +232,8 @@ public sealed class ImapCommandProcessor
             ImapVerb.Status => await StatusAsync(command, cancellationToken).ConfigureAwait(false),
             ImapVerb.Fetch => await FetchAsync(command, cancellationToken).ConfigureAwait(false),
             ImapVerb.Store => await StoreAsync(command, cancellationToken).ConfigureAwait(false),
+            ImapVerb.Expunge => await ExpungeAsync(command, cancellationToken).ConfigureAwait(false),
+            ImapVerb.Close => await CloseAsync(command, cancellationToken).ConfigureAwait(false),
             _ => NotImplemented(command),
         };
     }
@@ -1230,6 +1232,145 @@ public sealed class ImapCommandProcessor
             command.IsUid ? "UID STORE completed" : "STORE completed"));
 
         return new ImapCommandResult(responses, ImapSessionAction.Continue);
+    }
+
+    /// <summary>
+    /// <c>EXPUNGE</c> — RFC 3501 §6.4.3.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// §6.4.3: it "permanently removes all messages that have the <c>\Deleted</c> flag set from
+    /// the currently selected mailbox. Before returning an OK to the client, an untagged EXPUNGE
+    /// response is sent for each message that is removed."
+    /// </para>
+    /// <para>
+    /// <b>The responses go out highest position first</b>, which is the half of §7.4.1's rule
+    /// that needs no arithmetic — see <see cref="IImapMailboxWriter.ExpungeAsync"/>. The RFC
+    /// names both orders as legal and this one keeps every number valid at the moment it is sent.
+    /// </para>
+    /// <para>
+    /// <b>No <c>EXISTS</c> follows.</b> §7.4.1: "The EXPUNGE response also decrements the number
+    /// of messages in the mailbox; it is not necessary to send an EXISTS response with the new
+    /// value." Sending one would not be wrong, but a client that had already decremented would
+    /// have to reconcile two statements of the same fact.
+    /// </para>
+    /// <para>
+    /// <b>Refused on a read-only mailbox</b>, where §6.3.2 permits "No changes to the permanent
+    /// state of the mailbox", and §6.4.3's own result list has the shape for it: "NO - expunge
+    /// failure: can't expunge (e.g., permission denied)". Note that <c>CLOSE</c> is treated
+    /// differently and deliberately so — see <see cref="CloseAsync"/>.
+    /// </para>
+    /// </remarks>
+    private async ValueTask<ImapCommandResult> ExpungeAsync(
+        ImapCommand command,
+        CancellationToken cancellationToken)
+    {
+        if (_writer is null)
+        {
+            return NotImplemented(command);
+        }
+
+        if (_session.AuthenticatedMailboxId is null || _session.SelectedFolderId is null)
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, "No mailbox is selected"));
+        }
+
+        // §9: expunge = "EXPUNGE" - the whole production. Anything after it is an argument the
+        // grammar has nowhere to put.
+        if (command.Argument.Trim().Length != 0)
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, "EXPUNGE takes no arguments"));
+        }
+
+        if (_session.IsSelectedReadOnly)
+        {
+            return ImapCommandResult.Single(ImapResponses.No(
+                command.Tag,
+                "Mailbox is open read-only; messages cannot be expunged"));
+        }
+
+        IReadOnlyList<long> removed = await _writer
+            .ExpungeAsync(
+                _session.AuthenticatedMailboxId.Value,
+                _session.SelectedFolderId.Value,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        List<ImapResponse> responses = [];
+
+        foreach (long sequenceNumber in removed)
+        {
+            responses.Add(ImapResponses.Expunge(sequenceNumber));
+        }
+
+        responses.Add(ImapResponses.Ok(command.Tag, "EXPUNGE completed"));
+
+        return new ImapCommandResult(responses, ImapSessionAction.Continue);
+    }
+
+    /// <summary>
+    /// <c>CLOSE</c> — RFC 3501 §6.4.2.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// §6.4.2: it "permanently removes all messages that have the <c>\Deleted</c> flag set from
+    /// the currently selected mailbox, and returns to the authenticated state from the selected
+    /// state. <b>No untagged EXPUNGE responses are sent.</b>" That silence is the whole point of
+    /// the command, and the RFC says why: "when many messages are deleted, a CLOSE-LOGOUT or
+    /// CLOSE-SELECT sequence is considerably faster than an EXPUNGE-LOGOUT or EXPUNGE-SELECT
+    /// because no untagged EXPUNGE responses (which the client would probably ignore) are sent."
+    /// </para>
+    /// <para>
+    /// <b>On a read-only mailbox this succeeds and removes nothing, where <c>EXPUNGE</c>
+    /// refuses.</b> The asymmetry is the RFC's, stated outright in §6.4.2: "No messages are
+    /// removed, and no error is given, if the mailbox is selected by an EXAMINE command or is
+    /// otherwise selected read-only." The command's result list bears it out — <c>CLOSE</c> has
+    /// only <c>OK</c> and <c>BAD</c>, with no <c>NO</c> case at all, while <c>EXPUNGE</c> has
+    /// one. A server that refused here would fail a client that closes every mailbox it opens.
+    /// </para>
+    /// <para>
+    /// The deselect happens either way, because returning to the authenticated state is what the
+    /// command is for and it is not conditional on anything having been removed.
+    /// </para>
+    /// </remarks>
+    private async ValueTask<ImapCommandResult> CloseAsync(
+        ImapCommand command,
+        CancellationToken cancellationToken)
+    {
+        if (_writer is null)
+        {
+            return NotImplemented(command);
+        }
+
+        if (_session.AuthenticatedMailboxId is null || _session.SelectedFolderId is null)
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, "No mailbox is selected"));
+        }
+
+        if (command.Argument.Trim().Length != 0)
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, "CLOSE takes no arguments"));
+        }
+
+        // Read-only: remove nothing, say nothing about it, and still close. §6.4.2's "no error is
+        // given" is explicit, so this is not a refusal path.
+        if (!_session.IsSelectedReadOnly)
+        {
+            await _writer
+                .ExpungeAsync(
+                    _session.AuthenticatedMailboxId.Value,
+                    _session.SelectedFolderId.Value,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        _session.Deselect();
+
+        return ImapCommandResult.Single(ImapResponses.Ok(command.Tag, "CLOSE completed"));
     }
 
     private static ImapCommandResult NotImplemented(ImapCommand command) =>
