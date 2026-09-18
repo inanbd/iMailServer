@@ -114,6 +114,8 @@ public sealed class ImapCommandProcessor
     private readonly IMailboxAuthenticator _authenticator;
     private readonly IImapMailboxReader? _mailboxes;
 
+    private readonly IImapMailboxWriter? _writer;
+
     /// <summary>The mechanism mid-exchange, or null when no <c>AUTHENTICATE</c> is in flight.</summary>
     private ISaslMechanism? _mechanism;
 
@@ -131,7 +133,8 @@ public sealed class ImapCommandProcessor
         ImapProcessorOptions options,
         ILogger logger,
         IMailboxAuthenticator? authenticator = null,
-        IImapMailboxReader? mailboxes = null)
+        IImapMailboxReader? mailboxes = null,
+    IImapMailboxWriter? writer = null)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(options);
@@ -149,6 +152,7 @@ public sealed class ImapCommandProcessor
         // makes the "not implemented yet" answers below honest rather than a stub: a processor
         // built without a reader refuses every mailbox command instead of pretending.
         _mailboxes = mailboxes;
+        _writer = writer;
     }
 
     /// <summary>The session this processor drives.</summary>
@@ -227,6 +231,7 @@ public sealed class ImapCommandProcessor
             ImapVerb.Lsub => await ListAsync(command, subscribedOnly: true, cancellationToken).ConfigureAwait(false),
             ImapVerb.Status => await StatusAsync(command, cancellationToken).ConfigureAwait(false),
             ImapVerb.Fetch => await FetchAsync(command, cancellationToken).ConfigureAwait(false),
+            ImapVerb.Store => await StoreAsync(command, cancellationToken).ConfigureAwait(false),
             _ => NotImplemented(command),
         };
     }
@@ -1103,6 +1108,122 @@ public sealed class ImapCommandProcessor
         responses.Add(ImapResponses.Ok(
             command.Tag,
             command.IsUid ? "UID FETCH completed" : "FETCH completed"));
+
+        return new ImapCommandResult(responses, ImapSessionAction.Continue);
+    }
+
+    /// <summary>
+    /// <c>STORE</c> and <c>UID STORE</c> — RFC 3501 §6.4.6.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Refused outright on a mailbox opened with <c>EXAMINE</c>.</b> §6.3.2: "The EXAMINE
+    /// command is identical to SELECT and returns the same output; however, the selected mailbox
+    /// is identified as read-only. No changes to the permanent state of the mailbox, including
+    /// per-user state, are permitted". The session already told the client so, with
+    /// <c>[PERMANENTFLAGS ()]</c> and a <c>[READ-ONLY]</c> completion, so a client sending this
+    /// has ignored two notices and gets a tagged <c>NO</c> rather than a silently discarded
+    /// write.
+    /// </para>
+    /// <para>
+    /// <b>The untagged <c>FETCH</c> responses are the point of the command, not a courtesy.</b>
+    /// §6.4.6: "Normally, STORE will return the updated value of the data with an untagged FETCH
+    /// response", and the values come back from the write rather than being predicted here — see
+    /// <see cref="IImapMailboxWriter.StoreFlagsAsync"/>. <c>.SILENT</c> suppresses them, and
+    /// suppresses only them: the work still happens and the tagged <c>OK</c> still arrives.
+    /// </para>
+    /// <para>
+    /// <b><c>UID STORE</c> carries the UID on every line it does send.</b> §6.4.8's MUST is about
+    /// "any FETCH response caused by a UID command", and a <c>STORE</c>'s untagged <c>FETCH</c>
+    /// is caused by one — the note under it says so explicitly: "The rule about including the UID
+    /// message data item as part of a FETCH response primarily applies to the UID FETCH and UID
+    /// STORE commands".
+    /// </para>
+    /// </remarks>
+    private async ValueTask<ImapCommandResult> StoreAsync(
+        ImapCommand command,
+        CancellationToken cancellationToken)
+    {
+        if (_writer is null)
+        {
+            return NotImplemented(command);
+        }
+
+        if (_session.AuthenticatedMailboxId is null || _session.SelectedFolderId is null)
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, "No mailbox is selected"));
+        }
+
+        if (_session.IsSelectedReadOnly)
+        {
+            return ImapCommandResult.Single(ImapResponses.No(
+                command.Tag,
+                "Mailbox is open read-only; flags cannot be changed"));
+        }
+
+        string argument = command.Argument.Trim();
+        int split = argument.IndexOf(' ', StringComparison.Ordinal);
+
+        if (split <= 0)
+        {
+            return ImapCommandResult.Single(ImapResponses.Bad(
+                command.Tag,
+                "STORE expects a sequence set, a data item and a flag list"));
+        }
+
+        if (!ImapSequenceSet.TryParse(argument[..split], out ImapSequenceSet? set))
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, "STORE sequence set is not valid"));
+        }
+
+        if (!ImapStore.TryParse(argument[(split + 1)..], out ImapStoreRequest? request))
+        {
+            return ImapCommandResult.Single(ImapResponses.Bad(
+                command.Tag,
+                "STORE expects FLAGS, +FLAGS or -FLAGS, optionally .SILENT, and a flag list"));
+        }
+
+        IReadOnlyList<ImapMessageSummary> stored = await _writer
+            .StoreFlagsAsync(
+                _session.AuthenticatedMailboxId.Value,
+                _session.SelectedFolderId.Value,
+                set,
+                command.IsUid,
+                request,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (request.HadUnstorableFlags)
+        {
+            // Logged rather than reported. RFC 3501 §7.1 permits ignoring a flag outside
+            // PERMANENTFLAGS, and the untagged FETCH already shows the client what it got - but
+            // an operator looking at why a client keeps re-sending a keyword wants to see it.
+            _logger.LogInformation(
+                "IMAP STORE named one or more flags this server does not store; they were ignored.");
+        }
+
+        List<ImapResponse> responses = [];
+
+        if (!request.Silent)
+        {
+            List<ImapFetchItem> items = [ImapFetchItem.Flags];
+
+            if (command.IsUid)
+            {
+                items.Add(ImapFetchItem.Uid);
+            }
+
+            foreach (ImapMessageSummary summary in stored)
+            {
+                responses.Add(ImapResponses.Fetch(summary.SequenceNumber, items, summary));
+            }
+        }
+
+        responses.Add(ImapResponses.Ok(
+            command.Tag,
+            command.IsUid ? "UID STORE completed" : "STORE completed"));
 
         return new ImapCommandResult(responses, ImapSessionAction.Continue);
     }

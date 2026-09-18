@@ -33,7 +33,11 @@ public sealed class ImapListenerTests : IAsyncDisposable
         services.AddLogging(b => b.AddProvider(NullLoggerProvider.Instance));
         services.AddSingleton<ITlsCertificateProvider>(_certificates);
         services.AddSingleton<IMailboxAuthenticator, ScriptedImapAuthenticator>();
-        services.AddSingleton<IImapMailboxReader, ScriptedImapMailboxReader>();
+        // One instance behind both interfaces, so a store is visible to a later read - the same
+        // arrangement the processor and wire tests use.
+        services.AddSingleton<ScriptedImapMailboxReader>();
+        services.AddSingleton<IImapMailboxReader>(p => p.GetRequiredService<ScriptedImapMailboxReader>());
+        services.AddSingleton<IImapMailboxWriter>(p => p.GetRequiredService<ScriptedImapMailboxReader>());
         services.AddScoped<ImapConnectionHandler>();
 
         _services = services.BuildServiceProvider();

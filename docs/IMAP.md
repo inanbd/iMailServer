@@ -168,6 +168,45 @@ of.
 a million messages builds a million response objects before any of them is written. That is
 within the current `ImapCommandResult` shape and is the next thing to change for large mailboxes.
 
+## STORE
+
+Implemented for `FLAGS`, `+FLAGS` and `-FLAGS`, each with the optional `.SILENT` suffix — the
+only data item RFC 3501 §6.4.6 defines for the command.
+
+**The untagged `FETCH` responses report what was written, not what was asked for.** §6.4.6: "The
+new value of the flags is returned as if a FETCH of those flags was done." The write reads the
+result back inside the same transaction, which is what closes the race the RFC's own note names:
+"The intent is that the status of the flags is determinate without a race condition." A message
+already in the requested state is skipped for the write and still reported, because the response
+is the new value rather than a list of what changed.
+
+**`\Recent` survives every mode, including `FLAGS`.** §6.4.6 puts the exception inside the
+sentence — "Replace the flags for the message (other than `\Recent`) with the argument" — and
+§2.3.2 says the flag "can not be altered by the client". §9's `flag` production is annotated
+"Does not include `\Recent`", so a client cannot even name it.
+
+**The flag list may arrive without brackets, and an empty bracketed list means something.**
+§9: `… SP (flag-list / (flag *(SP flag)))`, and `flag-list = "(" [flag *(SP flag)] ")"`. So
+`STORE 1 +FLAGS \Deleted` is as conformant as `STORE 1 +FLAGS (\Deleted)`, and
+`STORE 1 FLAGS ()` clears every flag — which is how a client marks a message unread, undeleted
+and unflagged in one command.
+
+**A flag this server cannot store is ignored rather than refused.** §7.1 sanctions it in as many
+words: "If the client attempts to STORE a flag that is not in the PERMANENTFLAGS list, the server
+will either ignore the change or store the state change for the remainder of the current session
+only." The untagged `FETCH` then shows the client exactly what it got. Refusing would be within
+the letter of §6.4.6's "NO - store error" and would break real clients — Thunderbird and Apple
+Mail both send keywords like `$Junk` and `$MDNSent` without asking.
+
+**A mailbox opened with `EXAMINE` refuses the command.** §6.3.2: "No changes to the permanent
+state of the mailbox, including per-user state, are permitted." The client has already been told
+twice, by `[PERMANENTFLAGS ()]` and a `[READ-ONLY]` completion, so this is a tagged `NO` rather
+than a silently discarded write.
+
+The write batches its UIDs at 500 per statement. Every UID is a bound parameter and both
+providers cap those — SQLite historically at 999, SQL Server at 2,100 — so a store over a larger
+set becomes more statements inside the one transaction rather than a driver error.
+
 ## IDLE
 
 Held with a server-side timer that emits a keep-alive before the 29-minute RFC 2177 limit, and

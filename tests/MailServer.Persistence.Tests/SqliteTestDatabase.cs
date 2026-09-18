@@ -171,6 +171,16 @@ public sealed class SqliteTestDatabase : IAsyncDisposable
                 database.ConnectionFactory,
                 AmbientSession,
                 database.Dialect);
+
+            // Given the real reader and the real transaction manager, because what the writer is
+            // for is applying a store and reading back what it wrote in one transaction - and a
+            // substitute for either would leave that untested.
+            ImapWrites = new ImapMailboxWriter(
+                database.ConnectionFactory,
+                AmbientSession,
+                database.Dialect,
+                Transactions,
+                ImapMailboxes);
         }
 
         internal AmbientDbSession AmbientSession { get; }
@@ -190,6 +200,8 @@ public sealed class SqliteTestDatabase : IAsyncDisposable
         public IDeliveryRepository Deliveries { get; }
 
         public IImapMailboxReader ImapMailboxes { get; }
+
+        public IImapMailboxWriter ImapWrites { get; }
     }
 }
 

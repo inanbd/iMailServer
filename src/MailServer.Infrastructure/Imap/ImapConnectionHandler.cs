@@ -68,6 +68,7 @@ public sealed class ImapConnectionHandler(
     ITlsCertificateProvider certificates,
     IMailboxAuthenticator authenticator,
     IImapMailboxReader mailboxes,
+    IImapMailboxWriter writer,
     ILogger<ImapConnectionHandler> logger)
 {
     /// <summary>Handles one connection to completion.</summary>
@@ -112,7 +113,7 @@ public sealed class ImapConnectionHandler(
             ImapSessionContext session = new(remoteAddress, startedAt, implicitTls);
 
             ImapCommandProcessor processor =
-                new(session, options.Processor, logger, authenticator, mailboxes);
+                new(session, options.Processor, logger, authenticator, mailboxes, writer);
 
             ImapLineReader reader = new(stream, options.MaxLineOctets);
 

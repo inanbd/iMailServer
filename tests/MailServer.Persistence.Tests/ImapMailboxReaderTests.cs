@@ -953,4 +953,316 @@ public sealed class ImapMailboxReaderTests
             .ReadSummariesAsync(alice, bobsFolder, Set("1:*"), byUid: false, CancellationToken.None))
             .ShouldBeEmpty();
     }
+    // ---------------------------------------------------------------------------------------
+    // STORE.
+    // ---------------------------------------------------------------------------------------
+
+    private static ImapStoreRequest Store(
+        ImapStoreMode mode,
+        MessageFlags flags,
+        bool silent = false) =>
+        new(mode, silent, flags, HadUnstorableFlags: false);
+
+    [Fact]
+    public async Task Adding_a_flag_writes_it_and_reports_the_new_value()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        IReadOnlyList<ImapMessageSummary> reported = await scope.ImapWrites.StoreFlagsAsync(
+            mailbox,
+            folder,
+            Set("1:2"),
+            byUid: false,
+            Store(ImapStoreMode.Add, MessageFlags.Deleted),
+            CancellationToken.None);
+
+        reported.Select(s => s.Flags).ShouldBe(
+        [
+            MessageFlags.Seen | MessageFlags.Deleted,
+            MessageFlags.Deleted,
+        ]);
+
+        // Read back through a separate call, so the assertion is about the database rather than
+        // about what the writer returned.
+        IReadOnlyList<ImapMessageSummary> after = await scope.ImapMailboxes.ReadSummariesAsync(
+            mailbox,
+            folder,
+            Set("1:*"),
+            byUid: false,
+            CancellationToken.None);
+
+        after.Select(s => s.Flags).ShouldBe(
+        [
+            MessageFlags.Seen | MessageFlags.Deleted,
+            MessageFlags.Deleted,
+            MessageFlags.Flagged,
+            MessageFlags.None,
+        ]);
+    }
+
+    [Fact]
+    public async Task Replacing_flags_takes_the_argument_wholesale()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        await scope.ImapWrites.StoreFlagsAsync(
+            mailbox,
+            folder,
+            Set("1:*"),
+            byUid: false,
+            Store(ImapStoreMode.Replace, MessageFlags.Draft),
+            CancellationToken.None);
+
+        IReadOnlyList<ImapMessageSummary> after = await scope.ImapMailboxes.ReadSummariesAsync(
+            mailbox,
+            folder,
+            Set("1:*"),
+            byUid: false,
+            CancellationToken.None);
+
+        after.ShouldAllBe(s => s.Flags == MessageFlags.Draft);
+    }
+
+    [Fact]
+    public async Task Removing_a_flag_leaves_the_others_alone()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, MailboxFolderId folder) = await SeedFolderAsync(connection);
+
+        await DeliverAsync(
+            connection,
+            mailbox,
+            folder,
+            uid: 1,
+            flags: MessageFlags.Seen | MessageFlags.Flagged | MessageFlags.Deleted);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        IReadOnlyList<ImapMessageSummary> reported = await scope.ImapWrites.StoreFlagsAsync(
+            mailbox,
+            folder,
+            Set("1"),
+            byUid: false,
+            Store(ImapStoreMode.Remove, MessageFlags.Deleted),
+            CancellationToken.None);
+
+        reported[0].Flags.ShouldBe(MessageFlags.Seen | MessageFlags.Flagged);
+    }
+
+    /// <summary>
+    /// Messages sharing an outcome are written in one statement, and messages with different
+    /// outcomes still each get the right one — the grouping must not smear one result over the
+    /// whole set.
+    /// </summary>
+    [Fact]
+    public async Task Messages_with_different_starting_flags_get_different_results()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        await scope.ImapWrites.StoreFlagsAsync(
+            mailbox,
+            folder,
+            Set("1:*"),
+            byUid: false,
+            Store(ImapStoreMode.Add, MessageFlags.Answered),
+            CancellationToken.None);
+
+        IReadOnlyList<ImapMessageSummary> after = await scope.ImapMailboxes.ReadSummariesAsync(
+            mailbox,
+            folder,
+            Set("1:*"),
+            byUid: false,
+            CancellationToken.None);
+
+        after.Select(s => s.Flags).ShouldBe(
+        [
+            MessageFlags.Seen | MessageFlags.Answered,
+            MessageFlags.Answered,
+            MessageFlags.Flagged | MessageFlags.Answered,
+            MessageFlags.Answered,
+        ]);
+    }
+
+    /// <summary>
+    /// A message already in the requested state is skipped for the write and still reported:
+    /// RFC 3501 §6.4.6 returns "the new value of the flags", not "the flags that changed".
+    /// </summary>
+    [Fact]
+    public async Task A_message_already_in_the_requested_state_is_still_reported()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, MailboxFolderId folder) = await SeedFolderAsync(connection);
+
+        await DeliverAsync(connection, mailbox, folder, uid: 1, flags: MessageFlags.Seen);
+
+        IReadOnlyList<ImapMessageSummary> reported = await database.CreateScope().ImapWrites
+            .StoreFlagsAsync(
+                mailbox,
+                folder,
+                Set("1"),
+                byUid: false,
+                Store(ImapStoreMode.Add, MessageFlags.Seen),
+                CancellationToken.None);
+
+        reported.Count.ShouldBe(1);
+        reported[0].Flags.ShouldBe(MessageFlags.Seen);
+    }
+
+    [Fact]
+    public async Task A_uid_store_selects_by_uid()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        IReadOnlyList<ImapMessageSummary> reported = await scope.ImapWrites.StoreFlagsAsync(
+            mailbox,
+            folder,
+            Set("11"),
+            byUid: true,
+            Store(ImapStoreMode.Add, MessageFlags.Draft),
+            CancellationToken.None);
+
+        reported.Count.ShouldBe(1);
+        reported[0].Uid.ShouldBe(11);
+        reported[0].SequenceNumber.ShouldBe(3);
+        reported[0].Flags.ShouldBe(MessageFlags.Flagged | MessageFlags.Draft);
+    }
+
+    [Fact]
+    public async Task Storing_to_nothing_writes_nothing_and_reports_nothing()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        (await scope.ImapWrites.StoreFlagsAsync(
+            mailbox,
+            folder,
+            Set("99"),
+            byUid: false,
+            Store(ImapStoreMode.Replace, MessageFlags.Draft),
+            CancellationToken.None))
+            .ShouldBeEmpty();
+
+        IReadOnlyList<ImapMessageSummary> after = await scope.ImapMailboxes.ReadSummariesAsync(
+            mailbox,
+            folder,
+            Set("1:*"),
+            byUid: false,
+            CancellationToken.None);
+
+        after[0].Flags.ShouldBe(MessageFlags.Seen);
+    }
+
+    /// <summary>
+    /// The authorisation boundary on a statement that changes data. A folder id alone must not be
+    /// enough to write to somebody else's folder.
+    /// </summary>
+    [Fact]
+    public async Task Another_mailboxs_folder_id_writes_nothing()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId alice, _) = await SeedFolderAsync(connection);
+
+        (MailboxId bob, MailboxFolderId bobsFolder) = await SeedFolderAsync(
+            connection,
+            address: "bob@example.net");
+
+        await DeliverAsync(connection, bob, bobsFolder, uid: 1, flags: MessageFlags.Seen);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        (await scope.ImapWrites.StoreFlagsAsync(
+            alice,
+            bobsFolder,
+            Set("1:*"),
+            byUid: false,
+            Store(ImapStoreMode.Replace, MessageFlags.Deleted),
+            CancellationToken.None))
+            .ShouldBeEmpty();
+
+        IReadOnlyList<ImapMessageSummary> bobs = await scope.ImapMailboxes.ReadSummariesAsync(
+            bob,
+            bobsFolder,
+            Set("1:*"),
+            byUid: false,
+            CancellationToken.None);
+
+        bobs[0].Flags.ShouldBe(MessageFlags.Seen);
+    }
+
+    /// <summary>
+    /// More UIDs than fit in one statement's parameter list, so the batching is exercised against
+    /// a real driver rather than reasoned about.
+    /// </summary>
+    [Fact]
+    public async Task A_store_over_more_messages_than_one_statement_holds_writes_them_all()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, MailboxFolderId folder) = await SeedFolderAsync(connection);
+
+        const int Count = 1_200;
+
+        for (long uid = 1; uid <= Count; uid++)
+        {
+            await DeliverAsync(connection, mailbox, folder, uid);
+        }
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        IReadOnlyList<ImapMessageSummary> reported = await scope.ImapWrites.StoreFlagsAsync(
+            mailbox,
+            folder,
+            Set("1:*"),
+            byUid: false,
+            Store(ImapStoreMode.Add, MessageFlags.Seen),
+            CancellationToken.None);
+
+        reported.Count.ShouldBe(Count);
+
+        IReadOnlyList<ImapMessageSummary> after = await scope.ImapMailboxes.ReadSummariesAsync(
+            mailbox,
+            folder,
+            Set("1:*"),
+            byUid: false,
+            CancellationToken.None);
+
+        after.Count.ShouldBe(Count);
+        after.ShouldAllBe(s => s.Flags == MessageFlags.Seen);
+    }
 }

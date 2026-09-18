@@ -103,7 +103,7 @@ public sealed class ImapWireTests : IDisposable
     private async Task<(TcpClient Client, Task Served)> ConnectAsync(
         ImapConnectionOptions options,
         ITlsCertificateProvider? certificates = null,
-        IImapMailboxReader? mailboxes = null,
+        ScriptedImapMailboxReader? mailboxes = null,
         IMailboxAuthenticator? authenticator = null,
         CancellationToken cancellationToken = default)
     {
@@ -120,10 +120,15 @@ public sealed class ImapWireTests : IDisposable
         TcpClient accepted = await accepting;
         listener.Stop();
 
+        // One object for both interfaces, so a STORE over the wire is visible to the FETCH that
+        // follows it - see ScriptedImapMailboxReader.StoreFlagsAsync.
+        ScriptedImapMailboxReader store = mailboxes ?? new ScriptedImapMailboxReader();
+
         ImapConnectionHandler handler = new(
             certificates ?? _certificates,
             authenticator ?? new ScriptedImapAuthenticator(),
-            mailboxes ?? new ScriptedImapMailboxReader(),
+            store,
+            store,
             NullLogger<ImapConnectionHandler>.Instance);
 
         Task served = Task.Run(
@@ -652,10 +657,13 @@ public sealed class ImapWireTests : IDisposable
     [Fact]
     public async Task The_handler_rejects_null_arguments()
     {
+        ScriptedImapMailboxReader store = new();
+
         ImapConnectionHandler handler = new(
             _certificates,
             new ScriptedImapAuthenticator(),
-            new ScriptedImapMailboxReader(),
+            store,
+            store,
             NullLogger<ImapConnectionHandler>.Instance);
 
         await Should.ThrowAsync<ArgumentNullException>(async () => await handler.HandleAsync(

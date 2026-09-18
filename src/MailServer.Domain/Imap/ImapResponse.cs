@@ -514,6 +514,41 @@ public static class ImapFlagNames
         _ => throw new ArgumentOutOfRangeException(nameof(flag), flag, "Not a single system flag."),
     };
 
+    /// <summary>
+    /// Recognises one system flag a client may set.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Only the five in <see cref="Ordered"/>. <c>\Recent</c> is deliberately not recognised
+    /// here even though <see cref="NameOf"/> can write it: §9's <c>flag</c> production is
+    /// annotated "; Does not include <c>\Recent</c>" and §2.3.2 says "This flag can not be
+    /// altered by the client", so a <c>STORE</c> naming it must not be able to reach the flag
+    /// through this method. Writing it and reading it are different permissions, and this is the
+    /// read side.
+    /// </para>
+    /// <para>
+    /// Case-insensitively, per §9's note (1): "all alphabetic characters are case-insensitive
+    /// […] Implementations MUST accept these strings in a case-insensitive fashion." Clients do
+    /// vary — <c>\seen</c> and <c>\SEEN</c> both occur in the wild.
+    /// </para>
+    /// </remarks>
+    public static bool TryParse(string name, out MessageFlags flag)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+
+        foreach (MessageFlags candidate in Ordered)
+        {
+            if (name.Equals(NameOf(candidate), StringComparison.OrdinalIgnoreCase))
+            {
+                flag = candidate;
+                return true;
+            }
+        }
+
+        flag = MessageFlags.None;
+        return false;
+    }
+
     /// <summary>Formats a set of flags as the space-separated body of a parenthesised list.</summary>
     /// <remarks>
     /// Without the parentheses, because the surrounding syntax differs by response — <c>FLAGS</c>

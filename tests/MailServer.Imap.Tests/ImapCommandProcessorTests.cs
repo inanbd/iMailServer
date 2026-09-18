@@ -59,7 +59,7 @@ internal sealed class ScriptedImapAuthenticator : IMailboxAuthenticator
 /// over every folder shape that matters — empty, all read, some unseen, belonging to somebody
 /// else — without a database standing between the test and what it is asserting.
 /// </remarks>
-internal sealed class ScriptedImapMailboxReader : IImapMailboxReader
+internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailboxWriter
 {
     /// <summary>One folder, with the numbers every command that reads it would see.</summary>
     private sealed record Entry(
@@ -254,6 +254,60 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader
 
         return Task.FromResult<IReadOnlyList<ImapMessageSummary>>(matched);
     }
+
+    /// <summary>Every store this fake was asked to perform.</summary>
+    public List<(Guid Mailbox, Guid Folder, ImapStoreRequest Request)> Stored { get; } = [];
+
+    /// <summary>
+    /// Applies a store to the in-memory messages, so a later FETCH sees what a STORE did.
+    /// </summary>
+    /// <remarks>
+    /// The same object serves both interfaces on purpose. A fake whose writes were invisible to
+    /// its own reads could not catch a handler that reported the value it asked for rather than
+    /// the value that was written, which is the defect
+    /// <see cref="IImapMailboxWriter.StoreFlagsAsync"/> exists to prevent.
+    /// </remarks>
+    public async Task<IReadOnlyList<ImapMessageSummary>> StoreFlagsAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        ImapSequenceSet set,
+        bool byUid,
+        ImapStoreRequest request,
+        CancellationToken cancellationToken)
+    {
+        Stored.Add((mailboxId.Value, folderId.Value, request));
+
+        IReadOnlyList<ImapMessageSummary> before = await ReadSummariesAsync(
+            mailboxId,
+            folderId,
+            set,
+            byUid,
+            cancellationToken);
+
+        KeyValuePair<(Guid Mailbox, string Path), Entry> owner = _folders
+            .FirstOrDefault(pair =>
+                pair.Value.Folder.Id.Value == folderId.Value &&
+                pair.Key.Mailbox == mailboxId.Value);
+
+        if (owner.Value is null ||
+            !_messages.TryGetValue(owner.Key, out List<ImapMessageSummary>? all))
+        {
+            return [];
+        }
+
+        List<ImapMessageSummary> after = [];
+
+        foreach (ImapMessageSummary summary in before)
+        {
+            ImapMessageSummary updated = summary with { Flags = request.Apply(summary.Flags) };
+
+            all[all.FindIndex(m => m.Uid == summary.Uid)] = updated;
+
+            after.Add(updated);
+        }
+
+        return after;
+    }
 }
 
 public sealed class ImapCommandProcessorTests
@@ -269,12 +323,15 @@ public sealed class ImapCommandProcessorTests
         bool authAvailable = true,
         IMailboxAuthenticator? authenticator = null,
         int maxAttempts = 3,
-        IImapMailboxReader? mailboxes = null) =>
+        ScriptedImapMailboxReader? mailboxes = null) =>
         new(
             session ?? Session(),
             new ImapProcessorOptions("AetherMail", role, authAvailable, maxAttempts),
             NullLogger.Instance,
             authenticator,
+            mailboxes,
+
+            // The same object reads and writes, so a STORE's effect is visible to a later FETCH.
             mailboxes);
 
     private static ImapCommand Parse(string line)
@@ -1790,5 +1847,207 @@ public sealed class ImapCommandProcessorTests
 
         mailboxes.Read.ShouldAllBe(r => r.Mailbox == authenticator.KnownMailboxId.Value);
         mailboxes.Read.ShouldNotBeEmpty();
+    }
+    // ---------------------------------------------------------------------------------------
+    // STORE.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>A selected, writable INBOX holding four messages with mixed flags.</summary>
+    private static async Task<(
+        ImapCommandProcessor Processor,
+        ScriptedImapMailboxReader Store,
+        ScriptedImapAuthenticator Authenticator)>
+        StorableAsync(bool readOnly = false)
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 4)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 3, 7, 11, 19);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, readOnly ? "a1 EXAMINE INBOX" : "a1 SELECT INBOX");
+
+        return (processor, mailboxes, authenticator);
+    }
+
+    /// <summary>
+    /// RFC 3501 §6.4.6: "Normally, STORE will return the updated value of the data with an
+    /// untagged FETCH response." Every message the set names gets a line, whether or not its
+    /// flags changed — the response is "the new value", not "what changed".
+    /// </summary>
+    [Fact]
+    public async Task Store_reports_the_new_value_of_every_message_it_names()
+    {
+        (ImapCommandProcessor processor, _, _) = await StorableAsync();
+
+        string wire = Wire(await ExecuteAsync(processor, @"a2 STORE 1:2 +FLAGS (\Deleted)"));
+
+        wire.ShouldBe(
+            "* 1 FETCH (FLAGS (\\Seen \\Deleted))\r\n" +
+            "* 2 FETCH (FLAGS (\\Seen \\Deleted))\r\n" +
+            "a2 OK STORE completed\r\n");
+    }
+
+    /// <summary>
+    /// The value reported is what was written, not what was asked for — proved by storing a flag
+    /// that was already set and seeing the whole resulting set rather than just the argument.
+    /// </summary>
+    [Fact]
+    public async Task The_reported_value_is_the_result_and_not_the_argument()
+    {
+        (ImapCommandProcessor processor, _, _) = await StorableAsync();
+
+        Wire(await ExecuteAsync(processor, @"a2 STORE 1 +FLAGS (\Seen)"))
+            .ShouldBe("* 1 FETCH (FLAGS (\\Seen))\r\na2 OK STORE completed\r\n");
+    }
+
+    [Fact]
+    public async Task Replace_takes_the_argument_wholesale_over_the_wire()
+    {
+        (ImapCommandProcessor processor, _, _) = await StorableAsync();
+
+        Wire(await ExecuteAsync(processor, @"a2 STORE 1 FLAGS (\Draft)"))
+            .ShouldBe("* 1 FETCH (FLAGS (\\Draft))\r\na2 OK STORE completed\r\n");
+    }
+
+    [Fact]
+    public async Task Remove_takes_away_only_what_it_names()
+    {
+        (ImapCommandProcessor processor, _, _) = await StorableAsync();
+
+        Wire(await ExecuteAsync(processor, @"a2 STORE 1 -FLAGS (\Seen)"))
+            .ShouldBe("* 1 FETCH (FLAGS ())\r\na2 OK STORE completed\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.6: ".SILENT" "prevents the untagged FETCH". It suppresses the report and nothing
+    /// else — the write still happens, which the following FETCH proves.
+    /// </summary>
+    [Fact]
+    public async Task Silent_suppresses_the_report_but_not_the_write()
+    {
+        (ImapCommandProcessor processor, _, _) = await StorableAsync();
+
+        Wire(await ExecuteAsync(processor, @"a2 STORE 1 +FLAGS.SILENT (\Deleted)"))
+            .ShouldBe("a2 OK STORE completed\r\n");
+
+        Wire(await ExecuteAsync(processor, "a3 FETCH 1 FLAGS"))
+            .ShouldContain("(FLAGS (\\Seen \\Deleted))");
+    }
+
+    /// <summary>
+    /// §6.4.8's MUST covers "any FETCH response caused by a UID command", and its own note names
+    /// UID STORE among them.
+    /// </summary>
+    [Fact]
+    public async Task Uid_store_includes_the_uid_on_every_line()
+    {
+        (ImapCommandProcessor processor, _, _) = await StorableAsync();
+
+        Wire(await ExecuteAsync(processor, @"a2 UID STORE 7 +FLAGS (\Flagged)"))
+            .ShouldBe(
+                "* 2 FETCH (FLAGS (\\Seen \\Flagged) UID 7)\r\n" +
+                "a2 OK UID STORE completed\r\n");
+    }
+
+    /// <summary>
+    /// §6.3.2: an EXAMINE'd mailbox is read-only and "No changes to the permanent state of the
+    /// mailbox, including per-user state, are permitted". The client was told twice already —
+    /// [PERMANENTFLAGS ()] and a [READ-ONLY] completion — so this is a tagged NO rather than a
+    /// silently discarded write.
+    /// </summary>
+    [Fact]
+    public async Task Store_on_a_read_only_mailbox_is_refused()
+    {
+        (ImapCommandProcessor processor, ScriptedImapMailboxReader store, _) =
+            await StorableAsync(readOnly: true);
+
+        string wire = Wire(await ExecuteAsync(processor, @"a2 STORE 1 +FLAGS (\Deleted)"));
+
+        wire.ShouldContain("a2 NO ");
+        wire.ShouldContain("read-only");
+        wire.ShouldNotContain(" FETCH (");
+
+        // Refused before it reached the writer, not attempted and rolled back.
+        store.Stored.ShouldBeEmpty();
+    }
+
+    /// <summary>
+    /// §7.1: "the server will either ignore the change or store the state change for the
+    /// remainder of the current session only". Ignoring is sanctioned, and the untagged FETCH
+    /// shows the client exactly what it got.
+    /// </summary>
+    [Fact]
+    public async Task A_keyword_this_server_cannot_store_is_ignored_rather_than_refused()
+    {
+        (ImapCommandProcessor processor, _, _) = await StorableAsync();
+
+        string wire = Wire(await ExecuteAsync(processor, "a2 STORE 1 +FLAGS ($Junk)"));
+
+        wire.ShouldContain("a2 OK ");
+        wire.ShouldContain("* 1 FETCH (FLAGS (\\Seen))");
+        wire.ShouldNotContain("$Junk");
+    }
+
+    /// <summary>§6.4.8: a number naming no message is ignored without an error.</summary>
+    [Theory]
+    [InlineData(@"a2 STORE 99 +FLAGS (\Seen)")]
+    [InlineData(@"a2 UID STORE 5 +FLAGS (\Seen)")]
+    public async Task Storing_to_a_message_that_is_not_there_is_an_ok_with_no_data(string line)
+    {
+        (ImapCommandProcessor processor, _, _) = await StorableAsync();
+
+        string wire = Wire(await ExecuteAsync(processor, line));
+
+        wire.ShouldNotContain(" FETCH (");
+        wire.ShouldContain(" OK ");
+    }
+
+    [Theory]
+    [InlineData("a2 STORE")]
+    [InlineData("a2 STORE 1")]
+    [InlineData(@"a2 STORE 1 FLAGS")]
+    [InlineData(@"a2 STORE 1 NONSENSE (\Seen)")]
+    [InlineData(@"a2 STORE nonsense +FLAGS (\Seen)")]
+    [InlineData(@"a2 STORE 0 +FLAGS (\Seen)")]
+    [InlineData(@"a2 STORE 1 +FLAGS (\Seen")]
+    public async Task A_malformed_store_earns_a_tagged_bad(string line)
+    {
+        (ImapCommandProcessor processor, _, _) = await StorableAsync();
+
+        Wire(await ExecuteAsync(processor, line)).ShouldContain("a2 BAD ");
+    }
+
+    [Fact]
+    public async Task Store_without_a_selected_mailbox_is_refused()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: new ScriptedImapMailboxReader().Add(authenticator.KnownMailboxId, "INBOX"));
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        Wire(await ExecuteAsync(processor, @"a1 STORE 1 +FLAGS (\Seen)")).ShouldContain(" BAD ");
+    }
+
+    /// <summary>The write is scoped to the authenticated mailbox as well as the selected folder.</summary>
+    [Fact]
+    public async Task A_store_is_scoped_to_the_authenticated_mailbox()
+    {
+        (ImapCommandProcessor processor,
+         ScriptedImapMailboxReader store,
+         ScriptedImapAuthenticator authenticator) = await StorableAsync();
+
+        await ExecuteAsync(processor, @"a2 STORE 1 +FLAGS (\Deleted)");
+
+        store.Stored.ShouldNotBeEmpty();
+        store.Stored.ShouldAllBe(s => s.Mailbox == authenticator.KnownMailboxId.Value);
     }
 }
