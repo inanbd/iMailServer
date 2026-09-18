@@ -9,8 +9,9 @@ public sealed class ImapCapabilitiesTests
         ImapListenerRole role = ImapListenerRole.Cleartext,
         bool tls = false,
         ImapSessionState state = ImapSessionState.NotAuthenticated,
-        bool authAvailable = true) =>
-        new(role, tls, state, authAvailable);
+        bool authAvailable = true,
+        bool children = false) =>
+        new(role, tls, state, authAvailable, IsChildrenAvailable: children);
 
     public static TheoryData<ImapListenerRole, bool, ImapSessionState> EveryRoleTlsAndState()
     {
@@ -421,5 +422,50 @@ public sealed class ImapCapabilitiesTests
         Should.Throw<ArgumentNullException>(() => ImapCapabilities.MayOfferStartTls(null!));
         Should.Throw<ArgumentNullException>(() => ImapCapabilities.MayOfferAuthentication(null!));
         Should.Throw<ArgumentNullException>(() => ImapCapabilities.MustDisableLogin(null!));
+    }
+    // ---------------------------------------------------------------------------------------
+    // CHILDREN, which the attributes depend on.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// RFC 3348 §3: "IMAP4 servers that support this extension MUST list the keyword CHILDREN
+    /// in their CAPABILITY response." So the keyword is the licence to send \HasChildren at all,
+    /// and a server sending the attribute without it is claiming an extension it has not
+    /// announced.
+    /// </summary>
+    [Fact]
+    public void Children_is_advertised_when_the_attributes_will_be_sent() =>
+        ImapCapabilities.For(Context(children: true)).ShouldContain("CHILDREN");
+
+    [Fact]
+    public void Children_is_withheld_when_the_attributes_will_not_be_sent() =>
+        ImapCapabilities.For(Context(children: false)).ShouldNotContain("CHILDREN");
+
+    /// <summary>
+    /// Unlike STARTTLS and LOGINDISABLED, this one does not depend on where the session has got
+    /// to: LIST is an authenticated command, but a client reads CAPABILITY before logging in and
+    /// decides then whether it can trust the absence of \HasChildren.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(EveryRoleTlsAndState))]
+    public void Children_does_not_depend_on_the_session_state(
+        ImapListenerRole role,
+        bool tls,
+        ImapSessionState state) =>
+        ImapCapabilities.For(Context(role, tls, state, children: true))
+            .ShouldContain("CHILDREN");
+
+    /// <summary>
+    /// RFC 6154 §2: "There is no capability string related to the support of special-use
+    /// attributes on the non-extended LIST command." The contrast with CHILDREN is the whole
+    /// reason the two are not treated alike, so it is asserted rather than left in a comment.
+    /// </summary>
+    [Fact]
+    public void No_special_use_capability_is_advertised()
+    {
+        IReadOnlyList<string> capabilities = ImapCapabilities.For(Context(children: true));
+
+        capabilities.ShouldNotContain("SPECIAL-USE");
+        capabilities.ShouldNotContain("LIST-EXTENDED");
     }
 }

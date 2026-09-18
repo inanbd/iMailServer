@@ -98,6 +98,35 @@ public sealed class ImapMailboxReaderTests
         return (new MailboxId(mailboxId), new MailboxFolderId(folderId));
     }
 
+    /// <summary>Adds another folder to a mailbox that already exists.</summary>
+    private static async Task<MailboxFolderId> AddFolderAsync(
+        DbConnection connection,
+        MailboxId mailboxId,
+        string path,
+        FolderSpecialUse specialUse = FolderSpecialUse.None,
+        bool subscribed = true)
+    {
+        Guid folderId = Guid.NewGuid();
+
+        await connection.ExecuteAsync(
+            """
+            INSERT INTO MailboxFolders (Id, MailboxId, Path, SpecialUse, UidValidity, NextUid,
+                                        IsSubscribed, CreatedUtc)
+            VALUES (@FolderId, @MailboxId, @Path, @SpecialUse, 1, 1, @Subscribed, @Now)
+            """,
+            new
+            {
+                FolderId = folderId,
+                MailboxId = mailboxId.Value,
+                Path = path,
+                SpecialUse = (int)specialUse,
+                Subscribed = subscribed,
+                Now,
+            });
+
+        return new MailboxFolderId(folderId);
+    }
+
     /// <summary>Puts one delivery in a folder at a given UID, with given flags.</summary>
     private static async Task DeliverAsync(
         DbConnection connection,
@@ -459,5 +488,244 @@ public sealed class ImapMailboxReaderTests
                 new MailboxId(Guid.NewGuid()),
                 null!,
                 CancellationToken.None));
+    }
+    // ---------------------------------------------------------------------------------------
+    // Enumerating the folders.
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task Every_folder_in_the_mailbox_is_listed_in_path_order()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, _) = await SeedFolderAsync(connection);
+
+        await AddFolderAsync(connection, mailbox, "Sent", FolderSpecialUse.Sent);
+        await AddFolderAsync(connection, mailbox, "Archive", FolderSpecialUse.Archive);
+
+        IReadOnlyList<ImapFolderListing> listings = await database.CreateScope().ImapMailboxes
+            .ListFoldersAsync(mailbox, CancellationToken.None);
+
+        listings.Select(l => l.Path).ShouldBe(["Archive", "INBOX", "Sent"]);
+        listings.Select(l => l.SpecialUse).ShouldBe(
+        [
+            FolderSpecialUse.Archive,
+            FolderSpecialUse.Inbox,
+            FolderSpecialUse.Sent,
+        ]);
+    }
+
+    /// <summary>
+    /// The one thing the SQL cannot answer on its own, so it is derived from the set — and the
+    /// derivation is what this proves against real rows rather than a hand-built list.
+    /// </summary>
+    [Fact]
+    public async Task A_folder_with_something_nested_beneath_it_reports_children()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, _) = await SeedFolderAsync(connection);
+
+        await AddFolderAsync(connection, mailbox, "Projects");
+        await AddFolderAsync(connection, mailbox, "Projects/2026");
+        await AddFolderAsync(connection, mailbox, "Projects/2026/Q1");
+
+        IReadOnlyList<ImapFolderListing> listings = await database.CreateScope().ImapMailboxes
+            .ListFoldersAsync(mailbox, CancellationToken.None);
+
+        listings.Single(l => l.Path == "Projects").HasChildren.ShouldBeTrue();
+        listings.Single(l => l.Path == "Projects/2026").HasChildren.ShouldBeTrue();
+        listings.Single(l => l.Path == "Projects/2026/Q1").HasChildren.ShouldBeFalse();
+        listings.Single(l => l.Path == "INBOX").HasChildren.ShouldBeFalse();
+    }
+
+    /// <summary>
+    /// A sibling whose name merely starts the same way is not a child, and a sibling sorting
+    /// between a parent and its child does not hide the child. '.' is 0x2E and the separator is
+    /// 0x2F, so ordered ordinally these rows are Work, Work.old, Work/Q1 — the case that rules
+    /// out a neighbour comparison. Proved here against the real query's real ordering.
+    /// </summary>
+    [Fact]
+    public async Task A_sibling_is_neither_a_child_nor_a_way_to_hide_one()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, _) = await SeedFolderAsync(connection);
+
+        await AddFolderAsync(connection, mailbox, "Work");
+        await AddFolderAsync(connection, mailbox, "Work.old");
+        await AddFolderAsync(connection, mailbox, "Workshop");
+        await AddFolderAsync(connection, mailbox, "Work/Q1");
+
+        IReadOnlyList<ImapFolderListing> listings = await database.CreateScope().ImapMailboxes
+            .ListFoldersAsync(mailbox, CancellationToken.None);
+
+        listings.Single(l => l.Path == "Work").HasChildren.ShouldBeTrue();
+        listings.Single(l => l.Path == "Work.old").HasChildren.ShouldBeFalse();
+        listings.Single(l => l.Path == "Workshop").HasChildren.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task A_folders_subscription_is_reported_as_stored()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, _) = await SeedFolderAsync(connection);
+
+        await AddFolderAsync(connection, mailbox, "Quiet", subscribed: false);
+
+        IReadOnlyList<ImapFolderListing> listings = await database.CreateScope().ImapMailboxes
+            .ListFoldersAsync(mailbox, CancellationToken.None);
+
+        listings.Single(l => l.Path == "Quiet").IsSubscribed.ShouldBeFalse();
+        listings.Single(l => l.Path == "INBOX").IsSubscribed.ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// The authorisation boundary again, and for the command that would leak the most: a folder
+    /// listing names every folder the caller has, so a missing MailboxId here would hand one
+    /// mailbox the shape of every other.
+    /// </summary>
+    [Fact]
+    public async Task Another_mailboxs_folders_are_never_enumerated()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId alice, _) = await SeedFolderAsync(connection);
+
+        (MailboxId bob, _) = await SeedFolderAsync(
+            connection,
+            address: "bob@example.net");
+
+        await AddFolderAsync(connection, bob, "Payroll");
+
+        IReadOnlyList<ImapFolderListing> listings = await database.CreateScope().ImapMailboxes
+            .ListFoldersAsync(alice, CancellationToken.None);
+
+        listings.Select(l => l.Path).ShouldBe(["INBOX"]);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // STATUS.
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task Status_counts_the_messages_and_the_unread_ones()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, MailboxFolderId folder) = await SeedFolderAsync(
+            connection,
+            uidValidity: 999);
+
+        await DeliverAsync(connection, mailbox, folder, uid: 1, flags: MessageFlags.Seen);
+        await DeliverAsync(connection, mailbox, folder, uid: 2, flags: MessageFlags.Seen);
+        await DeliverAsync(connection, mailbox, folder, uid: 7);
+        await DeliverAsync(connection, mailbox, folder, uid: 9);
+
+        ImapFolderStatus? status = await database.CreateScope().ImapMailboxes
+            .ReadStatusAsync(mailbox, "INBOX", CancellationToken.None);
+
+        status.ShouldNotBeNull();
+        status.MessageCount.ShouldBe(4);
+        status.UnseenCount.ShouldBe(2);
+        status.RecentCount.ShouldBe(0);
+        status.UidValidity.ShouldBe(999);
+    }
+
+    /// <summary>
+    /// The distinction the two commands bury under one word: STATUS's UNSEEN counts and
+    /// SELECT's [UNSEEN n] points. Read from the same folder by the two real queries, so a
+    /// future change that made one serve the other would fail here.
+    /// </summary>
+    [Fact]
+    public async Task Status_counts_unread_where_select_locates_the_first_one()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, MailboxFolderId folder) = await SeedFolderAsync(connection);
+
+        for (long uid = 1; uid <= 11; uid++)
+        {
+            await DeliverAsync(connection, mailbox, folder, uid, MessageFlags.Seen);
+        }
+
+        await DeliverAsync(connection, mailbox, folder, uid: 12);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        ImapFolderStatus? status = await scope.ImapMailboxes
+            .ReadStatusAsync(mailbox, "INBOX", CancellationToken.None);
+
+        ImapFolderSnapshot? snapshot = await scope.ImapMailboxes
+            .OpenFolderAsync(mailbox, "INBOX", CancellationToken.None);
+
+        status!.UnseenCount.ShouldBe(1);
+        snapshot!.FirstUnseenSequenceNumber.ShouldBe(12);
+    }
+
+    [Fact]
+    public async Task Status_for_an_empty_folder_is_zeroes_rather_than_null()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, _) = await SeedFolderAsync(connection);
+
+        ImapFolderStatus? status = await database.CreateScope().ImapMailboxes
+            .ReadStatusAsync(mailbox, "INBOX", CancellationToken.None);
+
+        status.ShouldNotBeNull();
+        status.MessageCount.ShouldBe(0);
+        status.UnseenCount.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task Status_for_a_folder_this_mailbox_does_not_have_reads_as_null()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId alice, _) = await SeedFolderAsync(connection);
+
+        (MailboxId bob, _) = await SeedFolderAsync(connection, address: "bob@example.net");
+
+        await AddFolderAsync(connection, bob, "Payroll");
+
+        (await database.CreateScope().ImapMailboxes
+            .ReadStatusAsync(alice, "Payroll", CancellationToken.None))
+            .ShouldBeNull();
+    }
+
+    /// <summary>
+    /// The inbox is the one name RFC 3501 §5.1 reserves and folds, and STATUS must apply the
+    /// rule the same way SELECT does — a client that opened "inbox" and then asked STATUS for
+    /// "INBOX" is asking about the same folder.
+    /// </summary>
+    [Theory]
+    [InlineData("INBOX")]
+    [InlineData("inbox")]
+    [InlineData("InBoX")]
+    public async Task Status_folds_the_inbox_name_the_way_select_does(string name)
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, MailboxFolderId folder) = await SeedFolderAsync(connection);
+
+        await DeliverAsync(connection, mailbox, folder, uid: 1);
+
+        ImapFolderStatus? status = await database.CreateScope().ImapMailboxes
+            .ReadStatusAsync(mailbox, name, CancellationToken.None);
+
+        status.ShouldNotBeNull();
+        status.MessageCount.ShouldBe(1);
     }
 }

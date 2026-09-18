@@ -223,6 +223,9 @@ public sealed class ImapCommandProcessor
             ImapVerb.Authenticate => await AuthenticateAsync(command, cancellationToken).ConfigureAwait(false),
             ImapVerb.Select => await SelectAsync(command, readOnly: false, cancellationToken).ConfigureAwait(false),
             ImapVerb.Examine => await SelectAsync(command, readOnly: true, cancellationToken).ConfigureAwait(false),
+            ImapVerb.List => await ListAsync(command, subscribedOnly: false, cancellationToken).ConfigureAwait(false),
+            ImapVerb.Lsub => await ListAsync(command, subscribedOnly: true, cancellationToken).ConfigureAwait(false),
+            ImapVerb.Status => await StatusAsync(command, cancellationToken).ConfigureAwait(false),
             _ => NotImplemented(command),
         };
     }
@@ -686,6 +689,307 @@ public sealed class ImapCommandProcessor
     /// client looking for a syntax error that is not there. None of these is advertised in the
     /// capability listing either, so a complying client never sends one.
     /// </remarks>
+    /// <summary>
+    /// <c>LIST</c> and <c>LSUB</c> — RFC 3501 §6.3.8 and §6.3.9.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>One handler for both, because the commands differ in their input and not in their
+    /// logic.</b> §6.3.9: "The arguments to LSUB are in the same form as those for LIST." What
+    /// changes is which folders are eligible — all of them, or the subscribed ones — and the
+    /// keyword on the untagged line. Everything between is the same matching, so writing it
+    /// twice would mean the <c>%</c> rule below could be fixed in one command and left wrong in
+    /// the other.
+    /// </para>
+    /// <para>
+    /// <b>The pattern is decoded from modified UTF-7 before it is matched, and the order
+    /// matters.</b> Matching the encoded form would let an encoded run interact with a wildcard,
+    /// because <c>&amp;</c> begins a base64 sequence and a <c>*</c> on either side of it would
+    /// then be matched against characters that are not in the name the user sees. Decoding first
+    /// is safe in the other direction: RFC 3501 §5.1.3's base64 alphabet uses <c>,</c> in place
+    /// of <c>/</c> and contains neither wildcard, so decoding can neither introduce nor destroy
+    /// one.
+    /// </para>
+    /// <para>
+    /// <b>A trailing <c>%</c> obliges this server to report hierarchy levels that are not
+    /// mailboxes.</b> §6.3.8: "If the <c>%</c> wildcard is the last character of a mailbox name
+    /// argument, matching levels of hierarchy are also returned. If these levels of hierarchy are
+    /// not also selectable mailboxes, they are returned with the <c>\Noselect</c> mailbox name
+    /// attribute." So a mailbox holding only <c>Projects/2026/Q1</c> answers <c>LIST "" "%"</c>
+    /// with <c>Projects</c> — a name no row in the table carries. Omitting it would show the
+    /// client a tree with the trunk missing.
+    /// </para>
+    /// <para>
+    /// <b>For <c>LSUB</c> the same rule is a MUST and is stranger.</b> §6.3.9: "Consider what
+    /// happens if <c>foo/bar</c> […] is subscribed but <c>foo</c> is not. A <c>%</c> wildcard to
+    /// LSUB must return foo, not foo/bar, in the LSUB response, and it MUST be flagged with the
+    /// <c>\Noselect</c> attribute." Note what that means: <c>foo</c> may be a perfectly
+    /// selectable mailbox and is still flagged <c>\Noselect</c>, because here the attribute is
+    /// reporting absence from the subscription list rather than unselectability. It is the RFC's
+    /// instruction and it is followed literally; a client that treats <c>LSUB</c>'s flags as
+    /// authoritative has been told not to — §6.3.9: "the flags in the untagged LIST are
+    /// considered more authoritative".
+    /// </para>
+    /// <para>
+    /// <b>RFC 3348's child attributes are sent on <c>LSUB</c> too, which is a decision and not an
+    /// oversight.</b> §3 anticipates the opposite: "The <c>\HasChildren</c> and
+    /// <c>\HasNoChildren</c> attributes might not be returned in response to a LSUB response.
+    /// Many servers maintain a simple mailbox subscription list that is not updated when the
+    /// underlying mailbox structure is changed. A client MUST NOT assume that hierarchy
+    /// information will be maintained in the subscription list." That is permission to omit them
+    /// and a warning to clients, not a prohibition — and the reason it gives does not hold here,
+    /// because this server's subscription flag is a column on the folder row, so the hierarchy
+    /// behind it is the live one. The attribute is therefore a true statement about the mailbox
+    /// rather than a stale one about a name list, and a client that ignores it loses nothing.
+    /// </para>
+    /// <para>
+    /// <b>That coupling is also a known limitation, and this is where it will first bite.</b>
+    /// §6.3.9: "The server MUST NOT unilaterally remove an existing mailbox name from the
+    /// subscription list even if a mailbox by that name no longer exists." A subscription stored
+    /// on the folder row cannot outlive the folder, so once <c>DELETE</c> exists this server will
+    /// not be able to honour that MUST without moving subscriptions into a list of their own.
+    /// Recorded rather than worked around, because the deviation is not reachable until
+    /// <c>DELETE</c> is implemented and the fix is a schema change rather than a handler change.
+    /// </para>
+    /// </remarks>
+    private async ValueTask<ImapCommandResult> ListAsync(
+        ImapCommand command,
+        bool subscribedOnly,
+        CancellationToken cancellationToken)
+    {
+        if (_mailboxes is null)
+        {
+            return NotImplemented(command);
+        }
+
+        if (_session.AuthenticatedMailboxId is null)
+        {
+            // Unreachable through the state machine, which refuses both commands before
+            // authentication. Answered rather than asserted for the reason SelectAsync gives.
+            return ImapCommandResult.Single(ImapResponses.Bad(command.Tag, "Not authenticated"));
+        }
+
+        ImapAstringReader reader = new(command.Argument);
+
+        if (!reader.TryReadText(out string? wireReference) ||
+            !reader.TryReadListMailbox(out string? wirePattern) ||
+            !reader.AtEnd)
+        {
+            return ImapCommandResult.Single(ImapResponses.Bad(
+                command.Tag,
+                $"{Describe(command.Verb)} expects a reference name and a mailbox pattern"));
+        }
+
+        // RFC 3501 §6.3.8: "An empty ("" string) mailbox name argument is a special request to
+        // return the hierarchy delimiter and the root name of the name given in the reference."
+        // This server has no namespace prefixes and no break-out characters, so the root name of
+        // every reference is the empty string - see ImapMailboxPattern.TryCombine. LSUB is
+        // answered the same way: §6.3.9 does not restate the special case, but it does say the
+        // arguments take the same form, and a client that probes with LSUB is better served by
+        // the delimiter than by a bare OK.
+        if (wirePattern.Length == 0)
+        {
+            return new ImapCommandResult(
+                [
+                    subscribedOnly
+                        ? ImapResponses.LsubHierarchyDelimiter(string.Empty)
+                        : ImapResponses.HierarchyDelimiter(string.Empty),
+                    ImapResponses.Ok(command.Tag, $"{Describe(command.Verb)} completed"),
+                ],
+                ImapSessionAction.Continue);
+        }
+
+        if (!ImapMailboxName.TryDecode(wireReference, out string? reference) ||
+            !ImapMailboxName.TryDecode(wirePattern, out string? decodedPattern))
+        {
+            // Refused without being echoed, as in SelectAsync: a malformed name is client text.
+            return ImapCommandResult.Single(ImapResponses.No(
+                command.Tag,
+                "Mailbox name is not valid modified UTF-7"));
+        }
+
+        if (!ImapMailboxPattern.TryCombine(reference, decodedPattern, out ImapMailboxPattern? pattern))
+        {
+            // NO rather than BAD: §6.3.8's own result codes list "NO - list failure: can't list
+            // that reference or name", which is exactly a pattern this server will not match.
+            return ImapCommandResult.Single(ImapResponses.No(
+                command.Tag,
+                $"{Describe(command.Verb)} pattern is too long"));
+        }
+
+        IReadOnlyList<ImapFolderListing> folders = await _mailboxes
+            .ListFoldersAsync(_session.AuthenticatedMailboxId.Value, cancellationToken)
+            .ConfigureAwait(false);
+
+        List<ImapResponse> responses = [];
+
+        foreach ((string name, ImapMailboxAttribute attributes) in
+            Matches(folders, pattern, subscribedOnly))
+        {
+            responses.Add(subscribedOnly
+                ? ImapResponses.Lsub(attributes, name)
+                : ImapResponses.List(attributes, name));
+        }
+
+        responses.Add(ImapResponses.Ok(command.Tag, $"{Describe(command.Verb)} completed"));
+
+        return new ImapCommandResult(responses, ImapSessionAction.Continue);
+    }
+
+    /// <summary>
+    /// The names a pattern selects, with their attributes, ordered.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Sorted ordinally so that a parent always precedes its children and two captures of the
+    /// same mailbox read alike. RFC 3501 §7.2.2 imposes no order on untagged <c>LIST</c>
+    /// responses, so this is for whoever has to read the transcript rather than for conformance —
+    /// but a client building a tree incrementally benefits from seeing <c>Projects</c> before
+    /// <c>Projects/2026</c>, and nothing is lost by giving it that.
+    /// </para>
+    /// <para>
+    /// The eligible set is computed once and the derived levels are taken from it, not from every
+    /// folder: for <c>LSUB</c> that is the difference between reporting the parent of a
+    /// subscribed folder, which §6.3.9 requires, and reporting the parent of any folder at all,
+    /// which would leak the existence of folders the user has not subscribed to into a command
+    /// that is supposed to be about the subscription list.
+    /// </para>
+    /// </remarks>
+    private static IEnumerable<(string Name, ImapMailboxAttribute Attributes)> Matches(
+        IReadOnlyList<ImapFolderListing> folders,
+        ImapMailboxPattern pattern,
+        bool subscribedOnly)
+    {
+        List<ImapFolderListing> eligible = [];
+
+        foreach (ImapFolderListing folder in folders)
+        {
+            if (!subscribedOnly || folder.IsSubscribed)
+            {
+                eligible.Add(folder);
+            }
+        }
+
+        Dictionary<string, ImapMailboxAttribute> selected = new(StringComparer.Ordinal);
+
+        foreach (ImapFolderListing folder in eligible)
+        {
+            if (pattern.Matches(folder.Path))
+            {
+                selected[folder.Path] = folder.Attributes;
+            }
+        }
+
+        if (pattern.EndsWithHierarchyWildcard)
+        {
+            foreach (ImapFolderListing folder in eligible)
+            {
+                foreach (string level in ImapMailboxPattern.HierarchyLevelsOf(folder.Path))
+                {
+                    // A level that is itself eligible has already been added with its real
+                    // attributes, and must not be overwritten with \Noselect.
+                    if (pattern.Matches(level) && !selected.ContainsKey(level))
+                    {
+                        // \HasChildren as well as \Noselect: this name exists only because
+                        // something is nested beneath it, so the attribute is not a guess.
+                        selected[level] =
+                            ImapMailboxAttribute.NoSelect | ImapMailboxAttribute.HasChildren;
+                    }
+                }
+            }
+        }
+
+        List<string> names = [.. selected.Keys];
+
+        names.Sort(string.CompareOrdinal);
+
+        foreach (string name in names)
+        {
+            yield return (name, selected[name]);
+        }
+    }
+
+    /// <summary>
+    /// <c>STATUS</c> — RFC 3501 §6.3.10.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The selected mailbox is not touched, and neither is any message.</b> §6.3.10: it "does
+    /// not change the currently selected mailbox, nor does it affect the state of any messages in
+    /// the queried mailbox (in particular, STATUS MUST NOT cause messages to lose the
+    /// <c>\Recent</c> flag)". So there is no <c>Select</c> or <c>Deselect</c> anywhere below,
+    /// which is what makes the MUST structural rather than remembered.
+    /// </para>
+    /// <para>
+    /// <b>An empty item list is a syntax error.</b> §9 requires at least one <c>status-att</c>,
+    /// and <see cref="ImapStatusItems.TryParseList"/> enforces it — so <c>STATUS INBOX ()</c>
+    /// earns <c>BAD</c> rather than an untagged line reporting nothing.
+    /// </para>
+    /// <para>
+    /// The item list is read as the remainder of the line rather than as further arguments,
+    /// because the brackets and names are their own production and are not an
+    /// <c>astring</c>. <see cref="ImapAstringReader.Remainder"/> exists for exactly this.
+    /// </para>
+    /// </remarks>
+    private async ValueTask<ImapCommandResult> StatusAsync(
+        ImapCommand command,
+        CancellationToken cancellationToken)
+    {
+        if (_mailboxes is null)
+        {
+            return NotImplemented(command);
+        }
+
+        if (_session.AuthenticatedMailboxId is null)
+        {
+            return ImapCommandResult.Single(ImapResponses.Bad(command.Tag, "Not authenticated"));
+        }
+
+        ImapAstringReader reader = new(command.Argument);
+
+        if (!reader.TryReadText(out string? wireName))
+        {
+            return ImapCommandResult.Single(ImapResponses.Bad(
+                command.Tag,
+                "STATUS expects a mailbox name and a list of data items"));
+        }
+
+        if (!ImapStatusItems.TryParseList(reader.Remainder, out IReadOnlyList<ImapStatusItem> items))
+        {
+            return ImapCommandResult.Single(ImapResponses.Bad(
+                command.Tag,
+                "STATUS expects a parenthesised list of MESSAGES, RECENT, UIDNEXT, " +
+                "UIDVALIDITY or UNSEEN"));
+        }
+
+        if (!ImapMailboxName.TryDecode(wireName, out string? path))
+        {
+            return ImapCommandResult.Single(ImapResponses.No(
+                command.Tag,
+                "Mailbox name is not valid modified UTF-7"));
+        }
+
+        ImapFolderStatus? status = await _mailboxes
+            .ReadStatusAsync(_session.AuthenticatedMailboxId.Value, path, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (status is null)
+        {
+            // §6.3.10's own result list: "NO - status failure: no status for that name".
+            return ImapCommandResult.Single(ImapResponses.No(command.Tag, "No such mailbox"));
+        }
+
+        // Echoed as the client spelled it, not as the folder is stored. The two differ only for
+        // the inbox, whose case the client may have chosen - and a client matching the response
+        // against the name it sent should find them equal.
+        return new ImapCommandResult(
+            [
+                ImapResponses.Status(wireName, items, status),
+                ImapResponses.Ok(command.Tag, "STATUS completed"),
+            ],
+            ImapSessionAction.Continue);
+    }
+
     private static ImapCommandResult NotImplemented(ImapCommand command) =>
         ImapCommandResult.Single(ImapResponses.No(
             command.Tag,
@@ -722,5 +1026,10 @@ public sealed class ImapCommandProcessor
         _options.Role,
         _session.IsTlsActive,
         _session.State,
-        _options.IsAuthenticationAvailable);
+        _options.IsAuthenticationAvailable,
+
+        // Tied to whether LIST can run at all. Without a mailbox reader every LIST is answered
+        // "not implemented", and advertising CHILDREN would be undertaking to send attributes on
+        // a response this session will never produce.
+        IsChildrenAvailable: _mailboxes is not null);
 }

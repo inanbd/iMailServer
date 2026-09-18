@@ -1,5 +1,7 @@
+using MailServer.Domain.Entities;
 using MailServer.Domain.Enums;
 using MailServer.Domain.Imap;
+using MailServer.Domain.ValueObjects;
 
 namespace MailServer.Imap.Tests;
 
@@ -527,5 +529,193 @@ public sealed class ImapResponseTests
         Should.Throw<ArgumentNullException>(() => ImapResponse.Continuation(null!));
         Should.Throw<ArgumentNullException>(() => ImapResponseCode.Capability(null!));
         Should.Throw<ArgumentNullException>(() => ImapResponses.Capability(null!));
+    }
+    // ---------------------------------------------------------------------------------------
+    // LIST and LSUB.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// RFC 3501 §9: mailbox-list = "(" [mbx-list-flags] ")" SP (DQUOTE QUOTED-CHAR DQUOTE / nil)
+    /// SP mailbox. The delimiter is quoted, the attributes are bracketed, and the name comes
+    /// last.
+    /// </summary>
+    [Fact]
+    public void A_list_line_has_attributes_then_delimiter_then_name() =>
+        ImapResponses.List(ImapMailboxAttribute.HasNoChildren, "INBOX").Format()
+            .ShouldBe("* LIST (\\HasNoChildren) \"/\" INBOX\r\n");
+
+    [Fact]
+    public void A_folder_with_nothing_to_say_about_itself_has_empty_brackets() =>
+        ImapResponses.List(ImapMailboxAttribute.None, "Notes").Format()
+            .ShouldBe("* LIST () \"/\" Notes\r\n");
+
+    [Fact]
+    public void An_lsub_line_differs_from_a_list_line_only_in_its_keyword() =>
+        ImapResponses.Lsub(ImapMailboxAttribute.HasNoChildren, "INBOX").Format()
+            .ShouldBe("* LSUB (\\HasNoChildren) \"/\" INBOX\r\n");
+
+    [Fact]
+    public void A_special_use_folder_carries_its_attribute() =>
+        ImapResponses.List(
+                ImapMailboxAttribute.HasNoChildren | ImapMailboxAttribute.Sent,
+                "Sent")
+            .Format()
+            .ShouldBe("* LIST (\\HasNoChildren \\Sent) \"/\" Sent\r\n");
+
+    /// <summary>
+    /// A name needing quotes is quoted, because astring's first branch is 1*ASTRING-CHAR and a
+    /// space is not one of them.
+    /// </summary>
+    [Fact]
+    public void A_name_containing_a_space_is_quoted() =>
+        ImapResponses.List(ImapMailboxAttribute.None, "My Folder").Format()
+            .ShouldBe("* LIST () \"/\" \"My Folder\"\r\n");
+
+    /// <summary>
+    /// Encoded first and quoted second. RFC 3501 §5.1.3's modified UTF-7 introduces '&amp;' and
+    /// base64 characters, none of which need quoting — but a name encoded after being quoted
+    /// would have its quotes encoded too, and a client would receive a name with literal quote
+    /// characters in it.
+    /// </summary>
+    [Fact]
+    public void A_non_ascii_name_is_encoded_before_it_is_considered_for_quoting()
+    {
+        string formatted = ImapResponses.List(ImapMailboxAttribute.None, "Rechnungen/Jänner")
+            .Format();
+
+        formatted.ShouldBe("* LIST () \"/\" Rechnungen/J&AOQ-nner\r\n");
+        formatted.ShouldNotContain("ä");
+    }
+
+    /// <summary>
+    /// RFC 3501 §6.3.8's own worked example: C: A101 LIST "" "" answered with
+    /// S: * LIST (\Noselect) "/" "". The empty name has no unquoted form, so it must be "".
+    /// </summary>
+    [Fact]
+    public void The_hierarchy_delimiter_probe_is_answered_with_an_empty_quoted_name() =>
+        ImapResponses.HierarchyDelimiter(string.Empty).Format()
+            .ShouldBe("* LIST (\\Noselect) \"/\" \"\"\r\n");
+
+    [Fact]
+    public void The_probe_can_be_answered_as_an_lsub_line() =>
+        ImapResponses.LsubHierarchyDelimiter(string.Empty).Format()
+            .ShouldBe("* LSUB (\\Noselect) \"/\" \"\"\r\n");
+
+    /// <summary>
+    /// A derived hierarchy level is \Noselect because it is not a mailbox, and \HasChildren
+    /// because it exists only by virtue of something beneath it.
+    /// </summary>
+    [Fact]
+    public void A_derived_hierarchy_level_is_unselectable_and_has_children() =>
+        ImapResponses.List(
+                ImapMailboxAttribute.NoSelect | ImapMailboxAttribute.HasChildren,
+                "Projects")
+            .Format()
+            .ShouldBe("* LIST (\\Noselect \\HasChildren) \"/\" Projects\r\n");
+
+    [Fact]
+    public void A_list_line_refuses_a_null_name() =>
+        Should.Throw<ArgumentNullException>(
+            () => ImapResponses.List(ImapMailboxAttribute.None, null!));
+
+    // ---------------------------------------------------------------------------------------
+    // STATUS.
+    // ---------------------------------------------------------------------------------------
+
+    private static ImapFolderStatus StatusOf(
+        long messageCount = 231,
+        long unseenCount = 7,
+        long uidValidity = 3_857_529_045,
+        long nextUid = 44_292)
+    {
+        MailboxFolder folder = new(
+            new MailboxFolderId(Guid.NewGuid()),
+            new MailboxId(Guid.NewGuid()),
+            "INBOX",
+            FolderSpecialUse.Inbox,
+            uidValidity,
+            nextUid,
+            isSubscribed: true,
+            DateTimeOffset.UnixEpoch,
+            null);
+
+        return new ImapFolderStatus(folder, messageCount, unseenCount);
+    }
+
+    /// <summary>
+    /// RFC 3501 §6.3.10's own example, verbatim: C: A042 STATUS blurdybloop (UIDNEXT MESSAGES)
+    /// answered S: * STATUS blurdybloop (MESSAGES 231 UIDNEXT 44292).
+    /// </summary>
+    [Fact]
+    public void The_rfcs_own_status_example_is_reproduced() =>
+        ImapResponses
+            .Status(
+                "blurdybloop",
+                [ImapStatusItem.Messages, ImapStatusItem.UidNext],
+                StatusOf(messageCount: 231, nextUid: 44_292))
+            .Format()
+            .ShouldBe("* STATUS blurdybloop (MESSAGES 231 UIDNEXT 44292)\r\n");
+
+    [Fact]
+    public void A_status_line_reports_only_the_items_asked_for() =>
+        ImapResponses
+            .Status("INBOX", [ImapStatusItem.Unseen], StatusOf(unseenCount: 7))
+            .Format()
+            .ShouldBe("* STATUS INBOX (UNSEEN 7)\r\n");
+
+    [Fact]
+    public void A_status_line_reports_them_in_the_order_asked() =>
+        ImapResponses
+            .Status(
+                "INBOX",
+                [ImapStatusItem.Unseen, ImapStatusItem.Messages],
+                StatusOf(messageCount: 231, unseenCount: 7))
+            .Format()
+            .ShouldBe("* STATUS INBOX (UNSEEN 7 MESSAGES 231)\r\n");
+
+    /// <summary>
+    /// The pairing is done here rather than by the caller, so every name is followed by its own
+    /// number — a client reading UNSEEN where the server meant MESSAGES would badge every
+    /// message in the folder as unread.
+    /// </summary>
+    [Fact]
+    public void Every_name_is_followed_by_its_own_number()
+    {
+        string formatted = ImapResponses
+            .Status(
+                "INBOX",
+                ImapStatusItems.All,
+                StatusOf(messageCount: 231, unseenCount: 7, uidValidity: 42, nextUid: 300))
+            .Format();
+
+        formatted.ShouldBe(
+            "* STATUS INBOX (MESSAGES 231 RECENT 0 UIDNEXT 300 UIDVALIDITY 42 UNSEEN 7)\r\n");
+    }
+
+    [Fact]
+    public void A_status_line_quotes_a_mailbox_name_that_needs_it() =>
+        ImapResponses
+            .Status("My Folder", [ImapStatusItem.Messages], StatusOf(messageCount: 1))
+            .Format()
+            .ShouldBe("* STATUS \"My Folder\" (MESSAGES 1)\r\n");
+
+    [Fact]
+    public void A_status_line_encodes_a_non_ascii_mailbox_name() =>
+        ImapResponses
+            .Status("Jänner", [ImapStatusItem.Messages], StatusOf(messageCount: 1))
+            .Format()
+            .ShouldBe("* STATUS J&AOQ-nner (MESSAGES 1)\r\n");
+
+    [Fact]
+    public void A_status_line_refuses_null_arguments()
+    {
+        Should.Throw<ArgumentNullException>(
+            () => ImapResponses.Status(null!, [ImapStatusItem.Messages], StatusOf()));
+
+        Should.Throw<ArgumentNullException>(
+            () => ImapResponses.Status("INBOX", null!, StatusOf()));
+
+        Should.Throw<ArgumentNullException>(
+            () => ImapResponses.Status("INBOX", [ImapStatusItem.Messages], null!));
     }
 }

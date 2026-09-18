@@ -15,6 +15,9 @@ namespace MailServer.Domain.Imap;
 /// Whether <c>LOGIN</c>/<c>AUTHENTICATE</c> are implemented and enabled. False until the IMAP
 /// authentication handler exists with passing tests.
 /// </param>
+/// <param name="IsChildrenAvailable">
+/// Whether RFC 3348's <c>\HasChildren</c> and <c>\HasNoChildren</c> are sent on <c>LIST</c>.
+/// </param>
 /// <param name="IsIdleAvailable">Whether RFC 2177 <c>IDLE</c> is implemented and enabled.</param>
 /// <param name="IsNamespaceAvailable">Whether RFC 2342 <c>NAMESPACE</c> is implemented and enabled.</param>
 /// <param name="IsUnselectAvailable">Whether RFC 3691 <c>UNSELECT</c> is implemented and enabled.</param>
@@ -28,6 +31,7 @@ public sealed record ImapCapabilityContext(
     bool IsTlsActive,
     ImapSessionState State,
     bool IsAuthenticationAvailable,
+    bool IsChildrenAvailable = false,
     bool IsIdleAvailable = false,
     bool IsNamespaceAvailable = false,
     bool IsUnselectAvailable = false,
@@ -183,6 +187,15 @@ public static class ImapCapabilities
         if (context.IsLiteralMinusAvailable)
         {
             capabilities.Add(LiteralCapability);
+        }
+
+        // RFC 3348 §3: "IMAP4 servers that support this extension MUST list the keyword CHILDREN
+        // in their CAPABILITY response." So this is not optional decoration - it is the licence
+        // to send the two attributes at all, and ImapMailboxAttribute.HasChildren's remarks
+        // record the contrast with RFC 6154's special-use attributes, which need no capability.
+        if (context.IsChildrenAvailable)
+        {
+            capabilities.Add("CHILDREN");
         }
 
         if (context.IsIdleAvailable)

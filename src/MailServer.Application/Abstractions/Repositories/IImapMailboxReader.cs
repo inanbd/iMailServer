@@ -51,4 +51,63 @@ public interface IImapMailboxReader
         MailboxId mailboxId,
         string path,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Every folder in a mailbox, with enough about each to answer <c>LIST</c> and <c>LSUB</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>All of them, unfiltered, with the pattern applied afterwards in memory — and that is
+    /// not laziness.</b> RFC 3501 §6.3.8's wildcards do not translate into <c>LIKE</c>: <c>%</c>
+    /// must not cross the hierarchy delimiter, which <c>LIKE</c>'s <c>%</c> cheerfully does, and
+    /// a folder path may itself contain <c>%</c> or <c>_</c>, which are <c>LIKE</c>
+    /// metacharacters needing an <c>ESCAPE</c> clause whose syntax differs between providers.
+    /// A pattern pushed into SQL would therefore be a second, subtly different matcher living in
+    /// two dialects, against the one in
+    /// <see cref="ImapMailboxPattern"/> that has tests. One matcher, in one place.
+    /// </para>
+    /// <para>
+    /// <b><c>HasChildren</c> is computed here rather than per folder.</b> It is a question about
+    /// the set — "is any other path nested beneath this one" — so answering it once for the
+    /// whole set is one pass, while answering it per folder is a query per folder, which is the
+    /// shape RFC 3501 §6.3.8 warns about: "if each name requires 1 second of processing, then a
+    /// list of 1200 names would take 20 minutes!"
+    /// </para>
+    /// <para>
+    /// The result is bounded by what the mailbox's own owner created, and the command is
+    /// available only to an authenticated session, so there is no cap here — a cap would
+    /// silently truncate a user's folder list, which is a worse failure than a large response to
+    /// a request only its owner can make.
+    /// </para>
+    /// </remarks>
+    /// <param name="mailboxId">The authenticated mailbox. Scopes the enumeration; never optional.</param>
+    /// <returns>The folders, ordered by path.</returns>
+    Task<IReadOnlyList<ImapFolderListing>> ListFoldersAsync(
+        MailboxId mailboxId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The counts <c>STATUS</c> reports about a folder, without selecting it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A separate read from <see cref="OpenFolderAsync"/>, not a reuse of it, because the number
+    /// both commands call <c>UNSEEN</c> is not the same number: <c>SELECT</c> reports the first
+    /// unseen message's position and <c>STATUS</c> reports how many are unseen. See
+    /// <see cref="ImapStatusItem.Unseen"/> for what reusing one as the other would get wrong.
+    /// </para>
+    /// <para>
+    /// <b>Nothing about the session changes.</b> RFC 3501 §6.3.10: <c>STATUS</c> "does not change
+    /// the currently selected mailbox, nor does it affect the state of any messages in the
+    /// queried mailbox". A read method that returns a value and touches nothing is how that is
+    /// made true rather than remembered.
+    /// </para>
+    /// </remarks>
+    /// <param name="mailboxId">The authenticated mailbox. Scopes the search; never optional.</param>
+    /// <param name="path">The mailbox name from the command, already decoded.</param>
+    /// <returns>The counts, or null when this mailbox has no such folder.</returns>
+    Task<ImapFolderStatus?> ReadStatusAsync(
+        MailboxId mailboxId,
+        string path,
+        CancellationToken cancellationToken);
 }

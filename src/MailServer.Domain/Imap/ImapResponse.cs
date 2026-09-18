@@ -609,6 +609,141 @@ public static class ImapResponses
     public static ImapResponse Expunge(long sequenceNumber) =>
         SequenceNumber(sequenceNumber, "EXPUNGE");
 
+    /// <summary>
+    /// <c>* LIST (…) "/" name</c> — one mailbox. RFC 3501 §7.2.2.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// RFC 3501 §9's production is
+    /// <c>mailbox-list = "(" [mbx-list-flags] ")" SP (DQUOTE QUOTED-CHAR DQUOTE / nil) SP
+    /// mailbox</c> — so the delimiter is a <i>quoted single character</i> and never a bare one,
+    /// and the name is an <c>astring</c> rather than raw text.
+    /// </para>
+    /// <para>
+    /// <b>The name is encoded to modified UTF-7 first and quoted second, and that order is not
+    /// interchangeable.</b> <see cref="ImapMailboxName.Encode"/> turns a name into printable
+    /// US-ASCII; <see cref="ImapAstring.Format"/> then quotes that if the grammar requires it.
+    /// Reversing the two would quote the Unicode name and then run the modified-UTF-7 encoder
+    /// over the quotation marks it had just added, producing a name no client can decode back to
+    /// what the user called their folder.
+    /// </para>
+    /// <para>
+    /// The delimiter is always present for this server. §7.2.2: "A NIL hierarchy delimiter means
+    /// that no hierarchy exists; the name is a 'flat' name" — and folder names here are
+    /// <c>/</c>-separated paths, so <c>NIL</c> would be a false claim about the namespace.
+    /// </para>
+    /// </remarks>
+    public static ImapResponse List(ImapMailboxAttribute attributes, string name) =>
+        MailboxListing("LIST", attributes, name);
+
+    /// <summary>
+    /// <c>* LSUB (…) "/" name</c> — one subscribed mailbox. RFC 3501 §7.2.3.
+    /// </summary>
+    /// <remarks>
+    /// The same shape as <see cref="List"/>, differing only in the keyword, which is why they
+    /// share one formatter: two would be one grammar written twice with two places to get the
+    /// quoting wrong.
+    /// </remarks>
+    public static ImapResponse Lsub(ImapMailboxAttribute attributes, string name) =>
+        MailboxListing("LSUB", attributes, name);
+
+    /// <summary>
+    /// The answer to <c>LIST reference ""</c> — the hierarchy-delimiter probe.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// RFC 3501 §6.3.8: "An empty ("" string) mailbox name argument is a special request to
+    /// return the hierarchy delimiter and the root name of the name given in the reference […]
+    /// This permits a client to get the hierarchy delimiter (or find out that the mailbox names
+    /// are flat) even when no mailboxes by that name currently exist."
+    /// </para>
+    /// <para>
+    /// It is the first thing most clients send, and §6.3.8's own example fixes the wire form
+    /// exactly:
+    /// </para>
+    /// <code>
+    /// C: A101 LIST "" ""
+    /// S: * LIST (\Noselect) "/" ""
+    /// </code>
+    /// <para>
+    /// <c>\Noselect</c> because the root is not a mailbox anybody can open, and the empty name
+    /// as <c>""</c> because <c>astring</c>'s unquoted branch is <c>1*ASTRING-CHAR</c> and an
+    /// empty argument has no unquoted form — emitting nothing at all there would shift every
+    /// following token in the response.
+    /// </para>
+    /// </remarks>
+    public static ImapResponse HierarchyDelimiter(string root) =>
+        MailboxListing("LIST", ImapMailboxAttribute.NoSelect, root);
+
+    /// <summary>
+    /// The hierarchy-delimiter probe answered as an <c>LSUB</c> line.
+    /// </summary>
+    /// <remarks>
+    /// The same information under the other keyword. RFC 3501 §6.3.9 does not restate §6.3.8's
+    /// empty-name special case, but it does say the arguments take the same form, so a client
+    /// that probes with <c>LSUB</c> gets the same answer rather than a bare <c>OK</c> it cannot
+    /// use.
+    /// </remarks>
+    public static ImapResponse LsubHierarchyDelimiter(string root) =>
+        MailboxListing("LSUB", ImapMailboxAttribute.NoSelect, root);
+
+    private static ImapResponse MailboxListing(
+        string keyword,
+        ImapMailboxAttribute attributes,
+        string name)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+
+        string encoded = ImapAstring.Format(ImapMailboxName.Encode(name));
+
+        return ImapResponse.Data(
+            $"{keyword} ({ImapMailboxAttributes.Format(attributes)}) " +
+            $"\"{Entities.MailboxFolder.PathSeparator}\" {encoded}");
+    }
+
+    /// <summary>
+    /// <c>* STATUS mailbox (…)</c> — the answer to <c>STATUS</c>. RFC 3501 §7.2.4.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The items and their values are paired here rather than by the caller.</b> §9's
+    /// <c>status-att-list</c> is a flat run of alternating names and numbers, which is exactly
+    /// the shape in which a name can end up next to another item's number — and a client reading
+    /// <c>UNSEEN</c> where the server meant <c>MESSAGES</c> would show the user an unread badge
+    /// on every message in the folder. Taking the requested items and the folder's status and
+    /// doing the pairing in one place makes that mismatch unexpressible.
+    /// </para>
+    /// <para>
+    /// Only the items asked for are reported, in the order asked. §6.3.10's own example does the
+    /// same — <c>C: A042 STATUS blurdybloop (UIDNEXT MESSAGES)</c> is answered
+    /// <c>S: * STATUS blurdybloop (MESSAGES 231 UIDNEXT 44292)</c> — so a server may reorder,
+    /// but there is nothing to gain by it.
+    /// </para>
+    /// </remarks>
+    /// <param name="name">The mailbox, as the client named it. Encoded and quoted here.</param>
+    /// <param name="items">The requested items, already parsed and de-duplicated.</param>
+    /// <param name="status">The folder's numbers.</param>
+    public static ImapResponse Status(
+        string name,
+        IReadOnlyList<ImapStatusItem> items,
+        ImapFolderStatus status)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+        ArgumentNullException.ThrowIfNull(items);
+        ArgumentNullException.ThrowIfNull(status);
+
+        List<string> pairs = new(items.Count);
+
+        foreach (ImapStatusItem item in items)
+        {
+            pairs.Add($"{ImapStatusItems.NameOf(item)} {status.ValueOf(item)}");
+        }
+
+        string encoded = ImapAstring.Format(ImapMailboxName.Encode(name));
+
+        return ImapResponse.Data($"STATUS {encoded} ({string.Join(' ', pairs)})");
+    }
+
     /// <summary><c>* FLAGS (…)</c> — the flags defined in the selected mailbox. RFC 3501 §7.2.6.</summary>
     public static ImapResponse Flags(MessageFlags flags) =>
         ImapResponse.Data($"FLAGS ({ImapFlagNames.Format(flags)})");

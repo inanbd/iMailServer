@@ -61,10 +61,20 @@ internal sealed class ScriptedImapAuthenticator : IMailboxAuthenticator
 /// </remarks>
 internal sealed class ScriptedImapMailboxReader : IImapMailboxReader
 {
-    private readonly Dictionary<(Guid Mailbox, string Path), ImapFolderSnapshot> _folders = [];
+    /// <summary>One folder, with the numbers every command that reads it would see.</summary>
+    private sealed record Entry(
+        MailboxFolder Folder,
+        long ExistsCount,
+        long? FirstUnseen,
+        long UnseenCount);
+
+    private readonly Dictionary<(Guid Mailbox, string Path), Entry> _folders = [];
 
     /// <summary>Every (mailbox, path) pair this reader was asked for.</summary>
     public List<(Guid Mailbox, string Path)> Asked { get; } = [];
+
+    /// <summary>Every mailbox whose folders were enumerated.</summary>
+    public List<Guid> Listed { get; } = [];
 
     public ScriptedImapMailboxReader Add(
         MailboxId mailboxId,
@@ -73,7 +83,9 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader
         long? firstUnseen = null,
         long uidValidity = 3_857_529_045,
         long nextUid = 1,
-        FolderSpecialUse specialUse = FolderSpecialUse.None)
+        FolderSpecialUse specialUse = FolderSpecialUse.None,
+        bool subscribed = true,
+        long? unseenCount = null)
     {
         MailboxFolder folder = new(
             new MailboxFolderId(Guid.NewGuid()),
@@ -82,11 +94,18 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader
             specialUse,
             uidValidity,
             nextUid,
-            isSubscribed: true,
+            subscribed,
             DateTimeOffset.UnixEpoch,
             null);
 
-        _folders[(mailboxId.Value, path)] = new ImapFolderSnapshot(folder, existsCount, firstUnseen);
+        _folders[(mailboxId.Value, path)] = new Entry(
+            folder,
+            existsCount,
+            firstUnseen,
+
+            // Defaults to "one unread if anything is unread", which is enough for the tests that
+            // only care that the count is a count. A test about the count itself passes its own.
+            unseenCount ?? (firstUnseen is null ? 0 : 1));
 
         return this;
     }
@@ -103,9 +122,62 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader
         Asked.Add((mailboxId.Value, canonical));
 
         return Task.FromResult(
-            _folders.TryGetValue((mailboxId.Value, canonical), out ImapFolderSnapshot? snapshot)
-                ? snapshot
+            _folders.TryGetValue((mailboxId.Value, canonical), out Entry? entry)
+                ? new ImapFolderSnapshot(entry.Folder, entry.ExistsCount, entry.FirstUnseen)
                 : null);
+    }
+
+    public Task<ImapFolderStatus?> ReadStatusAsync(
+        MailboxId mailboxId,
+        string path,
+        CancellationToken cancellationToken)
+    {
+        string canonical = ImapMailboxPath.Canonical(path);
+
+        Asked.Add((mailboxId.Value, canonical));
+
+        return Task.FromResult(
+            _folders.TryGetValue((mailboxId.Value, canonical), out Entry? entry)
+                ? new ImapFolderStatus(entry.Folder, entry.ExistsCount, entry.UnseenCount)
+                : null);
+    }
+
+    /// <summary>
+    /// The folders of one mailbox, with <c>HasChildren</c> derived the way the real reader
+    /// derives it.
+    /// </summary>
+    /// <remarks>
+    /// Through <see cref="ImapMailboxPattern.ParentsAmong"/>, which is the same call the real
+    /// reader makes. Reimplementing the derivation here would let the fake and the product
+    /// disagree about the one thing this fake exists to feed the product.
+    /// </remarks>
+    public Task<IReadOnlyList<ImapFolderListing>> ListFoldersAsync(
+        MailboxId mailboxId,
+        CancellationToken cancellationToken)
+    {
+        Listed.Add(mailboxId.Value);
+
+        List<MailboxFolder> mine =
+        [
+            .. _folders
+                .Where(pair => pair.Key.Mailbox == mailboxId.Value)
+                .Select(pair => pair.Value.Folder),
+        ];
+
+        IReadOnlySet<string> parents = ImapMailboxPattern.ParentsAmong(mine.Select(f => f.Path));
+
+        List<ImapFolderListing> listings =
+        [
+            .. mine
+                .OrderBy(folder => folder.Path, StringComparer.Ordinal)
+                .Select(folder => new ImapFolderListing(
+                    folder.Path,
+                    folder.SpecialUse,
+                    folder.IsSubscribed,
+                    parents.Contains(folder.Path))),
+        ];
+
+        return Task.FromResult<IReadOnlyList<ImapFolderListing>>(listings);
     }
 }
 
@@ -277,9 +349,8 @@ public sealed class ImapCommandProcessorTests
 
     [Theory]
     [InlineData("a1 SELECT INBOX", "SELECT")]
-    [InlineData("a1 LIST \"\" \"*\"", "LIST")]
-    [InlineData("a1 STATUS INBOX (MESSAGES)", "STATUS")]
     [InlineData("a1 CREATE Archive", "CREATE")]
+    [InlineData("a1 SUBSCRIBE Archive", "SUBSCRIBE")]
     [InlineData("a1 IDLE", "IDLE")]
     public async Task An_unimplemented_command_says_so_rather_than_pretending(string line, string verb)
     {
@@ -1010,5 +1081,434 @@ public sealed class ImapCommandProcessorTests
     {
         await Should.ThrowAsync<ArgumentNullException>(
             async () => await Processor().ExecuteAsync(null!, CancellationToken.None));
+    }
+    // ---------------------------------------------------------------------------------------
+    // LIST and LSUB.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// A mailbox with a little of everything: nested folders, an unsubscribed one, a
+    /// special-use one, and a level that exists only as a parent.
+    /// </summary>
+    private static async Task<ImapCommandProcessor> ListableAsync()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox)
+            .Add(authenticator.KnownMailboxId, "Sent", specialUse: FolderSpecialUse.Sent)
+            .Add(authenticator.KnownMailboxId, "Projects/2026")
+            .Add(authenticator.KnownMailboxId, "Projects/2026/Q1")
+            .Add(authenticator.KnownMailboxId, "Archive", subscribed: false);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        return processor;
+    }
+
+    /// <summary>
+    /// RFC 3501 §6.3.8's own worked exchange: C: A101 LIST "" "" answered with
+    /// S: * LIST (\Noselect) "/" "". The first thing most clients send.
+    /// </summary>
+    [Fact]
+    public async Task The_empty_pattern_is_answered_with_the_hierarchy_delimiter()
+    {
+        string wire = Wire(await ExecuteAsync(await ListableAsync(), "a1 LIST \"\" \"\""));
+
+        wire.ShouldBe("* LIST (\\Noselect) \"/\" \"\"\r\na1 OK LIST completed\r\n");
+    }
+
+    [Fact]
+    public async Task The_empty_pattern_is_answered_for_lsub_too()
+    {
+        string wire = Wire(await ExecuteAsync(await ListableAsync(), "a1 LSUB \"\" \"\""));
+
+        wire.ShouldBe("* LSUB (\\Noselect) \"/\" \"\"\r\na1 OK LSUB completed\r\n");
+    }
+
+    /// <summary>
+    /// '*' matches across the delimiter, so everything the mailbox holds is reported — including
+    /// the unsubscribed folder, which LIST does not filter on.
+    /// </summary>
+    [Fact]
+    public async Task A_star_pattern_lists_every_folder()
+    {
+        string wire = Wire(await ExecuteAsync(await ListableAsync(), "a1 LIST \"\" \"*\""));
+
+        wire.ShouldBe(
+            "* LIST (\\HasNoChildren) \"/\" Archive\r\n" +
+            "* LIST (\\HasNoChildren) \"/\" INBOX\r\n" +
+            "* LIST (\\HasChildren) \"/\" Projects/2026\r\n" +
+            "* LIST (\\HasNoChildren) \"/\" Projects/2026/Q1\r\n" +
+            "* LIST (\\HasNoChildren \\Sent) \"/\" Sent\r\n" +
+            "a1 OK LIST completed\r\n");
+    }
+
+    /// <summary>
+    /// The rule from §6.3.8 that a naive implementation misses: "If the "%" wildcard is the last
+    /// character of a mailbox name argument, matching levels of hierarchy are also returned. If
+    /// these levels of hierarchy are not also selectable mailboxes, they are returned with the
+    /// \Noselect mailbox name attribute." No folder here is called Projects, and a client that
+    /// was not told about it would show a tree with Projects/2026 unreachable.
+    /// </summary>
+    [Fact]
+    public async Task A_trailing_percent_reports_a_hierarchy_level_that_is_not_a_mailbox()
+    {
+        string wire = Wire(await ExecuteAsync(await ListableAsync(), "a1 LIST \"\" \"%\""));
+
+        wire.ShouldBe(
+            "* LIST (\\HasNoChildren) \"/\" Archive\r\n" +
+            "* LIST (\\HasNoChildren) \"/\" INBOX\r\n" +
+            "* LIST (\\Noselect \\HasChildren) \"/\" Projects\r\n" +
+            "* LIST (\\HasNoChildren \\Sent) \"/\" Sent\r\n" +
+            "a1 OK LIST completed\r\n");
+    }
+
+    /// <summary>
+    /// '%' does not cross the delimiter, so the grandchild is not reported at this level.
+    /// </summary>
+    [Fact]
+    public async Task A_percent_does_not_descend_past_one_level()
+    {
+        string wire = Wire(await ExecuteAsync(await ListableAsync(), "a1 LIST \"\" \"Projects/%\""));
+
+        wire.ShouldBe(
+            "* LIST (\\HasChildren) \"/\" Projects/2026\r\n" +
+            "a1 OK LIST completed\r\n");
+    }
+
+    /// <summary>
+    /// A real folder that is also a hierarchy level keeps its own attributes: it must not be
+    /// overwritten with \Noselect, because it genuinely can be selected.
+    /// </summary>
+    [Fact]
+    public async Task A_level_that_is_a_real_mailbox_is_not_marked_unselectable()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "Projects")
+            .Add(authenticator.KnownMailboxId, "Projects/2026");
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        Wire(await ExecuteAsync(processor, "a1 LIST \"\" \"%\"")).ShouldBe(
+            "* LIST (\\HasChildren) \"/\" Projects\r\n" +
+            "a1 OK LIST completed\r\n");
+    }
+
+    /// <summary>
+    /// RFC 3501 §9: list-mailbox = 1*list-char / string, and list-char admits the wildcards. A
+    /// client sending the pattern unquoted is conformant, and this is the case a reader built
+    /// only for astring would reject.
+    /// </summary>
+    [Fact]
+    public async Task An_unquoted_wildcard_pattern_is_accepted()
+    {
+        string quoted = Wire(await ExecuteAsync(await ListableAsync(), "a1 LIST \"\" \"*\""));
+        string bare = Wire(await ExecuteAsync(await ListableAsync(), "a1 LIST \"\" *"));
+
+        bare.ShouldBe(quoted);
+    }
+
+    /// <summary>
+    /// §6.3.8: the reference is prepended, and the names that come back are full names — "Any
+    /// part of the reference argument that is included in the interpreted form SHOULD prefix the
+    /// interpreted form".
+    /// </summary>
+    [Fact]
+    public async Task A_reference_is_prepended_and_the_names_come_back_in_full()
+    {
+        string wire = Wire(await ExecuteAsync(await ListableAsync(), "a1 LIST \"Projects/\" \"*\""));
+
+        wire.ShouldBe(
+            "* LIST (\\HasChildren) \"/\" Projects/2026\r\n" +
+            "* LIST (\\HasNoChildren) \"/\" Projects/2026/Q1\r\n" +
+            "a1 OK LIST completed\r\n");
+    }
+
+    [Fact]
+    public async Task A_pattern_matching_nothing_is_an_ok_with_no_data()
+    {
+        string wire = Wire(await ExecuteAsync(await ListableAsync(), "a1 LIST \"\" \"Nowhere*\""));
+
+        wire.ShouldBe("a1 OK LIST completed\r\n");
+    }
+
+    /// <summary>
+    /// LSUB reports the subscription list, so the unsubscribed folder is absent from it while
+    /// LIST reports it.
+    /// </summary>
+    [Fact]
+    public async Task Lsub_omits_a_folder_that_is_not_subscribed()
+    {
+        string wire = Wire(await ExecuteAsync(await ListableAsync(), "a1 LSUB \"\" \"*\""));
+
+        wire.ShouldNotContain("Archive");
+        wire.ShouldContain("INBOX");
+        wire.ShouldEndWith("a1 OK LSUB completed\r\n");
+    }
+
+    /// <summary>
+    /// RFC 3501 §6.3.9's MUST, and the one genuinely surprising rule in either command:
+    /// "Consider what happens if "foo/bar" […] is subscribed but "foo" is not. A "%" wildcard to
+    /// LSUB must return foo, not foo/bar, in the LSUB response, and it MUST be flagged with the
+    /// \Noselect attribute." Note that foo is a real, selectable mailbox here — in LSUB the
+    /// attribute reports absence from the subscription list, not unselectability.
+    /// </summary>
+    [Fact]
+    public async Task Lsub_flags_an_unsubscribed_ancestor_of_a_subscribed_folder_noselect()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "foo", subscribed: false)
+            .Add(authenticator.KnownMailboxId, "foo/bar", subscribed: true);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        Wire(await ExecuteAsync(processor, "a1 LSUB \"\" \"%\"")).ShouldBe(
+            "* LSUB (\\Noselect \\HasChildren) \"/\" foo\r\n" +
+            "a1 OK LSUB completed\r\n");
+    }
+
+    /// <summary>
+    /// The same mailbox through LIST, where foo is selectable and says so. §6.3.9: "the flags in
+    /// the untagged LIST are considered more authoritative."
+    /// </summary>
+    [Fact]
+    public async Task List_reports_the_same_ancestor_as_selectable()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "foo", subscribed: false)
+            .Add(authenticator.KnownMailboxId, "foo/bar", subscribed: true);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        Wire(await ExecuteAsync(processor, "a1 LIST \"\" \"%\"")).ShouldBe(
+            "* LIST (\\HasChildren) \"/\" foo\r\n" +
+            "a1 OK LIST completed\r\n");
+    }
+
+    /// <summary>
+    /// LSUB derives its hierarchy levels from the subscribed subset. Taking them from every
+    /// folder would tell a client about folders the user has not subscribed to, through the one
+    /// command that is supposed to be about the subscription list.
+    /// </summary>
+    [Fact]
+    public async Task Lsub_does_not_reveal_a_level_that_only_unsubscribed_folders_create()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "Secret/Plans", subscribed: false);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        Wire(await ExecuteAsync(processor, "a1 LSUB \"\" \"%\""))
+            .ShouldBe("a1 OK LSUB completed\r\n");
+    }
+
+    /// <summary>
+    /// The authorisation boundary: the enumeration is scoped to the authenticated mailbox, so
+    /// another mailbox's folders cannot appear however the pattern is written.
+    /// </summary>
+    [Fact]
+    public async Task Another_mailboxs_folders_are_never_listed()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+        MailboxId somebodyElse = new(Guid.NewGuid());
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX")
+            .Add(somebodyElse, "Payroll");
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        string wire = Wire(await ExecuteAsync(processor, "a1 LIST \"\" \"*\""));
+
+        wire.ShouldNotContain("Payroll");
+        mailboxes.Listed.ShouldBe([authenticator.KnownMailboxId.Value]);
+    }
+
+    [Theory]
+    [InlineData("a1 LIST")]
+    [InlineData("a1 LIST \"\"")]
+    [InlineData("a1 LIST \"\" \"*\" extra")]
+    public async Task A_malformed_list_earns_a_tagged_bad(string line)
+    {
+        string wire = Wire(await ExecuteAsync(await ListableAsync(), line));
+
+        wire.ShouldContain("a1 BAD ");
+        wire.ShouldContain("reference name and a mailbox pattern");
+    }
+
+    /// <summary>
+    /// A name that does not decode names no folder, and is refused without being quoted back:
+    /// a malformed name is the client's own text.
+    /// </summary>
+    [Fact]
+    public async Task A_pattern_that_is_not_modified_utf7_is_refused_without_being_echoed()
+    {
+        string wire = Wire(await ExecuteAsync(await ListableAsync(), "a1 LIST \"\" \"&Jj_-\""));
+
+        wire.ShouldContain("a1 NO ");
+        wire.ShouldContain("modified UTF-7");
+        wire.ShouldNotContain("&Jj_-");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // STATUS.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>RFC 3501 §6.3.10's own example, with this server's own numbers.</summary>
+    [Fact]
+    public async Task Status_reports_the_items_asked_for()
+    {
+        (ImapCommandProcessor processor, _) = await SelectableAsync(
+            existsCount: 231,
+            uidValidity: 3_857_529_045,
+            nextUid: 44_292);
+
+        Wire(await ExecuteAsync(processor, "a1 STATUS INBOX (UIDNEXT MESSAGES)")).ShouldBe(
+            "* STATUS INBOX (UIDNEXT 44292 MESSAGES 231)\r\n" +
+            "a1 OK STATUS completed\r\n");
+    }
+
+    /// <summary>
+    /// §6.3.10: STATUS "does not change the currently selected mailbox". A session that had a
+    /// mailbox open must still have it open afterwards, which is what a following command proves.
+    /// </summary>
+    [Fact]
+    public async Task Status_leaves_the_selected_mailbox_alone()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 3)
+            .Add(authenticator.KnownMailboxId, "Archive", existsCount: 9);
+
+        ImapSessionContext session = Session();
+
+        ImapCommandProcessor processor = Processor(
+            session: session,
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+
+        MailboxFolderId? before = session.SelectedFolderId;
+
+        await ExecuteAsync(processor, "a2 STATUS Archive (MESSAGES)");
+
+        session.SelectedFolderId.ShouldBe(before);
+        session.State.ShouldBe(ImapSessionState.Selected);
+    }
+
+    /// <summary>
+    /// STATUS's UNSEEN is a count and SELECT's [UNSEEN n] is a sequence number — RFC 3501
+    /// §6.3.10 against §6.3.1. The same folder answering both differently is the assertion.
+    /// </summary>
+    [Fact]
+    public async Task Status_unseen_is_a_count_where_select_unseen_is_a_position()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(
+                authenticator.KnownMailboxId,
+                "INBOX",
+                existsCount: 12,
+                firstUnseen: 12,
+                unseenCount: 1);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        Wire(await ExecuteAsync(processor, "a1 SELECT INBOX")).ShouldContain("[UNSEEN 12]");
+        Wire(await ExecuteAsync(processor, "a2 STATUS INBOX (UNSEEN)"))
+            .ShouldContain("(UNSEEN 1)");
+    }
+
+    [Fact]
+    public async Task Status_for_a_folder_that_is_not_there_is_a_tagged_no()
+    {
+        (ImapCommandProcessor processor, _) = await SelectableAsync();
+
+        string wire = Wire(await ExecuteAsync(processor, "a1 STATUS Nowhere (MESSAGES)"));
+
+        wire.ShouldContain("a1 NO ");
+        wire.ShouldContain("No such mailbox");
+    }
+
+    /// <summary>
+    /// §9 requires at least one status-att, so an empty list is a syntax error rather than a
+    /// request for nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("a1 STATUS INBOX ()")]
+    [InlineData("a1 STATUS INBOX")]
+    [InlineData("a1 STATUS INBOX (NONSENSE)")]
+    [InlineData("a1 STATUS INBOX MESSAGES")]
+    [InlineData("a1 STATUS")]
+    public async Task A_malformed_status_earns_a_tagged_bad(string line)
+    {
+        (ImapCommandProcessor processor, _) = await SelectableAsync();
+
+        Wire(await ExecuteAsync(processor, line)).ShouldContain("a1 BAD ");
+    }
+
+    /// <summary>
+    /// The mailbox is scoped to the authenticated identity, so another mailbox's folder is "no
+    /// such mailbox" rather than a set of counts.
+    /// </summary>
+    [Fact]
+    public async Task Status_cannot_read_another_mailboxs_folder()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+        MailboxId somebodyElse = new(Guid.NewGuid());
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX")
+            .Add(somebodyElse, "Payroll", existsCount: 500);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        Wire(await ExecuteAsync(processor, "a1 STATUS Payroll (MESSAGES)"))
+            .ShouldContain("No such mailbox");
     }
 }

@@ -61,6 +61,71 @@ on the non-extended `LIST`; the `SPECIAL-USE` atom is about the *extended* `LIST
 and advertising it would commit this server to that command's selection and return options. So
 the attributes are emitted and the atom is not — the whole benefit, with no promise attached.
 
+## Listing mailboxes
+
+`LIST` and `LSUB` share one handler and one matcher, because RFC 3501 §6.3.9 says their
+arguments "are in the same form as those for LIST" — what differs is which folders are eligible
+and the keyword on the untagged line.
+
+**Patterns are matched in memory, not in SQL.** `%` must not cross the hierarchy delimiter,
+which `LIKE`'s `%` cheerfully does, and a folder name may itself contain `%` or `_` — `LIKE`
+metacharacters whose `ESCAPE` syntax differs between providers. Pushing the pattern into SQL
+would mean a second, subtly different matcher living in two dialects. There is one matcher,
+`ImapMailboxPattern`, and it has tests.
+
+**The matcher is a dynamic-programming table rather than a regular expression**, which is a
+security decision. A pattern is text an authenticated client chose, and translating it into a
+regex would hand that client an exponential-backtracking denial-of-service vector. The table is
+`O(pattern x name)` with no backtracking, so the worst case is arithmetic rather than a cliff,
+and bounding the pattern's length bounds the cost.
+
+**A trailing `%` reports hierarchy levels that are not mailboxes.** RFC 3501 §6.3.8 requires it:
+a mailbox holding only `Projects/2026/Q1` answers `LIST "" "%"` with `Projects`, flagged
+`\Noselect`. Omitting it would show the client a tree with the trunk missing and the leaf
+unreachable.
+
+**`LSUB` has the same rule as a MUST, and it is stranger.** §6.3.9: if `foo/bar` is subscribed
+but `foo` is not, `LSUB "" "%"` "must return foo … and it MUST be flagged with the `\Noselect`
+attribute" — even when `foo` is a real, selectable mailbox. In `LSUB` the attribute reports
+absence from the subscription list rather than unselectability. §6.3.9 also tells clients that
+"the flags in the untagged LIST are considered more authoritative", which is the escape hatch
+that makes the overload safe.
+
+**`CHILDREN` is advertised, and it has to be.** RFC 3348 §3: "IMAP4 servers that support this
+extension MUST list the keyword CHILDREN in their CAPABILITY response." This is the opposite of
+the special-use case below — same command, two extensions, two different answers about whether
+a capability is needed. `\HasChildren` is derived once for the whole folder set rather than per
+folder, because §6.3.8 warns that "if each name requires 1 second of processing, then a list of
+1200 names would take 20 minutes!"
+
+**`\Marked` and `\Unmarked` are never sent.** Answering "interesting" needs a per-folder record
+of when each was last selected, which nothing here keeps, and §7.2.2 sanctions the omission:
+"the server SHOULD NOT send either `\Marked` or `\Unmarked`" when it cannot tell. §6.3.8 goes
+further and asks a server not to go to the trouble.
+
+**Known limitation: a subscription cannot outlive its folder.** §6.3.9 says "The server MUST NOT
+unilaterally remove an existing mailbox name from the subscription list even if a mailbox by
+that name no longer exists." Subscriptions are stored as a column on the folder row, so deleting
+a folder drops its subscription. The deviation is not reachable until `DELETE` is implemented,
+and the fix is a schema change — a subscription list of its own — rather than a handler change.
+
+## STATUS
+
+`STATUS` reports `MESSAGES`, `RECENT`, `UIDNEXT`, `UIDVALIDITY` and `UNSEEN` for a folder
+without selecting it, and touches nothing: §6.3.10 requires that it "does not change the
+currently selected mailbox, nor does it affect the state of any messages in the queried
+mailbox".
+
+**`UNSEEN` means two different things in two commands, and the server reads them with two
+queries.** §6.3.10's `UNSEEN` is "the number of messages which do not have the `\Seen` flag
+set"; §6.3.1's `* OK [UNSEEN n]` is the message *sequence number* of the first unseen message. A
+mailbox whose first eleven messages are read and whose twelfth is not reports `[UNSEEN 12]` on
+`SELECT` and `UNSEEN 1` on `STATUS`. Serving one from the other would be wrong by however many
+read messages precede the first unread one.
+
+`RECENT` is reported as a truthful zero. `\Recent` is reserved and never set by this server, so
+the count of messages carrying it is zero — a true answer rather than an unimplemented one.
+
 ## IDLE
 
 Held with a server-side timer that emits a keep-alive before the 29-minute RFC 2177 limit, and

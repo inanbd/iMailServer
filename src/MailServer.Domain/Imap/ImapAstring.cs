@@ -66,10 +66,10 @@ public readonly record struct ImapAstringToken(
 /// </para>
 /// <para>
 /// <b>Nothing here is normalised, and that is a correctness requirement rather than
-/// minimalism.</b> Mailbox names are case-sensitive (RFC 3501 §5.1, with <c>INBOX</c> the one
-/// exception, which is the caller's to apply) and a name's leading or trailing space is part of
-/// the name when it arrived inside quotes. A reader that trimmed or folded case would make
-/// two different mailboxes look like one.
+/// minimalism.</b> This server matches mailbox names exactly — RFC 3501 §5.1 leaves that open
+/// for every name but <c>INBOX</c>, whose one folding is the caller's to apply — and a name's
+/// leading or trailing space is part of the name when it arrived inside quotes. A reader that
+/// trimmed or folded case would make two different mailboxes look like one.
 /// </para>
 /// <para>Not thread-safe. One reader belongs to one command line.</para>
 /// </remarks>
@@ -146,6 +146,58 @@ public sealed class ImapAstringReader
     public bool TryReadText([NotNullWhen(true)] out string? value)
     {
         ImapAstringToken token = Read();
+
+        value = token.IsText ? token.Value : null;
+
+        return value is not null;
+    }
+
+    /// <summary>
+    /// Reads a <c>LIST</c> or <c>LSUB</c> pattern, where the wildcards are ordinary characters.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A separate method because <c>list-mailbox</c> is a separate production, and reading a
+    /// pattern as an <c>astring</c> would reject the commonest form of the commonest
+    /// command.</b> RFC 3501 §9: <c>list-mailbox = 1*list-char / string</c> and
+    /// <c>list-char = ATOM-CHAR / list-wildcards / resp-specials</c> — so <c>%</c> and <c>*</c>,
+    /// which <c>atom-specials</c> excludes from every other argument, are admitted here on
+    /// purpose. <c>LIST "" *</c> with the wildcard unquoted is conformant and widespread, and
+    /// <see cref="Read"/> would return <see cref="ImapAstringKind.Malformed"/> for it.
+    /// </para>
+    /// <para>
+    /// The quoted and literal forms are shared with <see cref="Read"/>, because
+    /// <c>list-mailbox</c>'s second branch is <c>string</c> unchanged: a pattern may always be
+    /// quoted, and a quoted <c>"*"</c> — what most clients actually send — means exactly what
+    /// the bare one does.
+    /// </para>
+    /// </remarks>
+    public ImapAstringToken ReadListMailbox()
+    {
+        SkipSpaces();
+
+        if (_position >= _text.Length)
+        {
+            return new ImapAstringToken(ImapAstringKind.None, string.Empty, default);
+        }
+
+        return _text[_position] switch
+        {
+            '"' => ReadQuoted(),
+            '{' => ReadLiteralSpecifier(),
+            _ => ReadUnquoted(IsListChar),
+        };
+    }
+
+    /// <summary>Reads a <c>LIST</c> pattern when it is usable text, and nothing else.</summary>
+    /// <remarks>
+    /// <see cref="TryReadText"/>'s counterpart for <see cref="ReadListMailbox"/>, and wanted for
+    /// the same reason: a pattern that arrived as a literal is not something the handler can
+    /// proceed with.
+    /// </remarks>
+    public bool TryReadListMailbox([NotNullWhen(true)] out string? value)
+    {
+        ImapAstringToken token = ReadListMailbox();
 
         value = token.IsText ? token.Value : null;
 
@@ -246,11 +298,13 @@ public sealed class ImapAstringReader
     /// a bare atom</b>. A mailbox genuinely named <c>Invoices]2026</c> may therefore arrive
     /// unquoted, and refusing it would refuse a conformant client.
     /// </remarks>
-    private ImapAstringToken ReadUnquoted()
+    private ImapAstringToken ReadUnquoted() => ReadUnquoted(IsAstringChar);
+
+    private ImapAstringToken ReadUnquoted(Func<char, bool> isPermitted)
     {
         int start = _position;
 
-        while (_position < _text.Length && IsAstringChar(_text[_position]))
+        while (_position < _text.Length && isPermitted(_text[_position]))
         {
             _position++;
         }
@@ -296,6 +350,17 @@ public sealed class ImapAstringReader
         // atom-specials, minus resp-specials (']'), which ASTRING-CHAR adds back.
         return c is not ('(' or ')' or '{' or '%' or '*' or '"' or '\\');
     }
+
+    /// <summary>
+    /// RFC 3501 §9's <c>list-char</c>.
+    /// </summary>
+    /// <remarks>
+    /// <c>ASTRING-CHAR</c> plus the two wildcards, which is exactly what
+    /// <c>ATOM-CHAR / list-wildcards / resp-specials</c> comes to. <c>(</c>, <c>)</c>,
+    /// <c>{</c>, <c>"</c> and <c>\</c> stay excluded: they are structural, and a pattern needing
+    /// one of them is quoted.
+    /// </remarks>
+    private static bool IsListChar(char c) => IsAstringChar(c) || c is '%' or '*';
 }
 
 /// <summary>Writing an <c>astring</c> back out.</summary>

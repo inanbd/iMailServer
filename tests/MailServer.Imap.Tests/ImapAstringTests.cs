@@ -279,6 +279,112 @@ public sealed class ImapAstringReaderTests
     [Fact]
     public void Rejects_a_null_argument_string() =>
         Should.Throw<ArgumentNullException>(() => new ImapAstringReader(null!));
+    // ---------------------------------------------------------------------------------------
+    // list-mailbox, where the wildcards are ordinary characters.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// RFC 3501 §9: list-mailbox = 1*list-char / string, and list-char admits list-wildcards.
+    /// Reading a pattern as an astring would reject the commonest form of the commonest command.
+    /// </summary>
+    [Theory]
+    [InlineData("*")]
+    [InlineData("%")]
+    [InlineData("*%*")]
+    [InlineData("INBOX*")]
+    [InlineData("Projects/%")]
+    [InlineData("%/2026")]
+    [InlineData("Invoices]2026*")]
+    public void An_unquoted_pattern_may_contain_wildcards(string pattern)
+    {
+        ImapAstringReader reader = new(pattern);
+
+        reader.TryReadListMailbox(out string? value).ShouldBeTrue();
+        value.ShouldBe(pattern);
+        reader.AtEnd.ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// The same characters in an astring are atom-specials, and that asymmetry is the reason
+    /// ReadListMailbox exists at all.
+    /// </summary>
+    [Theory]
+    [InlineData("*")]
+    [InlineData("%")]
+    public void The_same_wildcard_is_refused_by_the_astring_reader(string text) =>
+        new ImapAstringReader(text).TryReadText(out _).ShouldBeFalse();
+
+    [Fact]
+    public void A_reference_and_a_pattern_are_read_from_one_line()
+    {
+        ImapAstringReader reader = new("\"\" *");
+
+        reader.TryReadText(out string? reference).ShouldBeTrue();
+        reference.ShouldBe(string.Empty);
+
+        reader.TryReadListMailbox(out string? pattern).ShouldBeTrue();
+        pattern.ShouldBe("*");
+
+        reader.AtEnd.ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// list-mailbox's second branch is string unchanged, so a quoted wildcard means exactly what
+    /// the bare one does — and that is what most clients actually send.
+    /// </summary>
+    [Theory]
+    [InlineData("\"*\"", "*")]
+    [InlineData("\"%\"", "%")]
+    [InlineData("\"Projects/%\"", "Projects/%")]
+    [InlineData("\"\"", "")]
+    public void A_quoted_pattern_reads_the_same_as_an_unquoted_one(string wire, string expected)
+    {
+        new ImapAstringReader(wire).TryReadListMailbox(out string? value).ShouldBeTrue();
+        value.ShouldBe(expected);
+    }
+
+    /// <summary>
+    /// The structural characters stay excluded: a pattern needing one of them is quoted.
+    /// </summary>
+    [Theory]
+    [InlineData("(")]
+    [InlineData(")")]
+    public void A_structural_character_is_still_not_a_pattern(string text) =>
+        new ImapAstringReader(text).TryReadListMailbox(out _).ShouldBeFalse();
+
+    [Fact]
+    public void A_pattern_stops_at_the_space_after_it()
+    {
+        ImapAstringReader reader = new("* trailing");
+
+        reader.TryReadListMailbox(out string? value).ShouldBeTrue();
+        value.ShouldBe("*");
+        reader.AtEnd.ShouldBeFalse();
+        reader.Remainder.ShouldBe("trailing");
+    }
+
+    [Fact]
+    public void A_missing_pattern_is_not_a_pattern()
+    {
+        ImapAstringReader reader = new(string.Empty);
+
+        reader.ReadListMailbox().Kind.ShouldBe(ImapAstringKind.None);
+    }
+
+    /// <summary>
+    /// A literal is reported rather than resolved, as everywhere else in this reader: the octets
+    /// have not arrived yet, so there is nothing to match against.
+    /// </summary>
+    [Fact]
+    public void A_pattern_sent_as_a_literal_is_reported_and_not_invented()
+    {
+        ImapAstringReader reader = new("{5}");
+
+        ImapAstringToken token = reader.ReadListMailbox();
+
+        token.Kind.ShouldBe(ImapAstringKind.Literal);
+        reader.TryReadListMailbox(out _).ShouldBeFalse();
+    }
 }
 
 public sealed class ImapAstringFormatTests
