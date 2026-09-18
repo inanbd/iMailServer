@@ -744,6 +744,62 @@ public static class ImapResponses
         return ImapResponse.Data($"STATUS {encoded} ({string.Join(' ', pairs)})");
     }
 
+    /// <summary>
+    /// <c>* n FETCH (…)</c> — one message's data. RFC 3501 §7.4.2.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The number is always a message sequence number, even for <c>UID FETCH</c>.</b> §6.4.8
+    /// is explicit: "The number after the "*" in an untagged FETCH response is always a message
+    /// sequence number, not a unique identifier, even for a UID command response." A server that
+    /// echoed the UID there would have clients renumbering their caches against positions that do
+    /// not exist.
+    /// </para>
+    /// <para>
+    /// <b>The items and their values are paired here</b>, for the reason
+    /// <see cref="Status"/> gives about its own list: §9's <c>msg-att</c> is a flat run of
+    /// alternating names and values, which is the shape in which one item's value can end up
+    /// under another item's name.
+    /// </para>
+    /// <para>
+    /// An item this server cannot answer is skipped rather than guessed at — see
+    /// <see cref="ImapMessageSummary.ValueOf"/> — so a caller that failed to filter the request
+    /// emits a shorter response rather than a wrong one. The handler filters first, and a
+    /// response with nothing in it would be ungrammatical, so this refuses to build one.
+    /// </para>
+    /// </remarks>
+    /// <param name="sequenceNumber">The message's position in the folder, from 1.</param>
+    /// <param name="items">The requested items, in the order asked.</param>
+    /// <param name="summary">The message's stored values.</param>
+    public static ImapResponse Fetch(
+        long sequenceNumber,
+        IReadOnlyList<ImapFetchItem> items,
+        ImapMessageSummary summary)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+        ArgumentNullException.ThrowIfNull(summary);
+
+        List<string> pairs = new(items.Count);
+
+        foreach (ImapFetchItem item in items)
+        {
+            if (summary.ValueOf(item) is { } value)
+            {
+                pairs.Add($"{ImapFetchItems.NameOf(item)} {value}");
+            }
+        }
+
+        if (pairs.Count == 0)
+        {
+            throw new ArgumentException(
+                "A FETCH response must carry at least one data item; RFC 3501 §9's msg-att has " +
+                "no empty form.",
+                nameof(items));
+        }
+
+        return SequenceNumber(sequenceNumber, $"FETCH ({string.Join(' ', pairs)})");
+    }
+
     /// <summary><c>* FLAGS (…)</c> — the flags defined in the selected mailbox. RFC 3501 §7.2.6.</summary>
     public static ImapResponse Flags(MessageFlags flags) =>
         ImapResponse.Data($"FLAGS ({ImapFlagNames.Format(flags)})");
@@ -806,12 +862,12 @@ public static class ImapResponses
     /// rejects the line or acts on the wrong message, and this is the one response where acting
     /// on the wrong message means deleting the wrong mail.
     /// </remarks>
-    private static ImapResponse SequenceNumber(long number, string keyword)
+    private static ImapResponse SequenceNumber(long number, string text)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(number, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(number, MaxProtocolNumber);
 
         return ImapResponse.Data(
-            string.Create(CultureInfo.InvariantCulture, $"{number} {keyword}"));
+            string.Create(CultureInfo.InvariantCulture, $"{number} {text}"));
     }
 }

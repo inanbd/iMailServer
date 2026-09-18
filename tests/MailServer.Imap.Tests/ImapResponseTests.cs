@@ -718,4 +718,97 @@ public sealed class ImapResponseTests
         Should.Throw<ArgumentNullException>(
             () => ImapResponses.Status("INBOX", [ImapStatusItem.Messages], null!));
     }
+    // ---------------------------------------------------------------------------------------
+    // FETCH.
+    // ---------------------------------------------------------------------------------------
+
+    private static ImapMessageSummary MessageSummary(
+        long uid = 4_827_313,
+        MessageFlags flags = MessageFlags.Seen,
+        long sizeBytes = 44_827) =>
+        new(
+            SequenceNumber: 23,
+            uid,
+            flags,
+            new DateTimeOffset(2026, 3, 1, 9, 30, 15, TimeSpan.Zero),
+            sizeBytes);
+
+    /// <summary>
+    /// RFC 3501 §6.4.8's own example line: S: * 23 FETCH (FLAGS (\Seen) UID 4827313).
+    /// </summary>
+    [Fact]
+    public void The_rfcs_own_uid_fetch_example_line_is_reproduced() =>
+        ImapResponses
+            .Fetch(23, [ImapFetchItem.Flags, ImapFetchItem.Uid], MessageSummary())
+            .Format()
+            .ShouldBe("* 23 FETCH (FLAGS (\\Seen) UID 4827313)\r\n");
+
+    [Fact]
+    public void A_fetch_line_reports_the_items_in_the_order_asked() =>
+        ImapResponses
+            .Fetch(1, [ImapFetchItem.Uid, ImapFetchItem.Rfc822Size], MessageSummary())
+            .Format()
+            .ShouldBe("* 1 FETCH (UID 4827313 RFC822.SIZE 44827)\r\n");
+
+    [Fact]
+    public void A_fetch_line_carries_the_internaldate_quoted() =>
+        ImapResponses
+            .Fetch(1, [ImapFetchItem.InternalDate], MessageSummary())
+            .Format()
+            .ShouldBe("* 1 FETCH (INTERNALDATE \" 1-Mar-2026 09:30:15 +0000\")\r\n");
+
+    /// <summary>
+    /// §6.4.8: "The number after the "*" in an untagged FETCH response is always a message
+    /// sequence number, not a unique identifier, even for a UID command response." A server that
+    /// echoed the UID there would have clients renumbering against positions that do not exist.
+    /// </summary>
+    [Fact]
+    public void The_number_is_the_sequence_number_and_never_the_uid()
+    {
+        string formatted = ImapResponses
+            .Fetch(23, [ImapFetchItem.Uid], MessageSummary(uid: 4_827_313))
+            .Format();
+
+        formatted.ShouldStartWith("* 23 FETCH ");
+        formatted.ShouldNotStartWith("* 4827313 ");
+    }
+
+    /// <summary>
+    /// Sequence numbers are nz-number, so zero names no message — the same rule EXPUNGE's own
+    /// factory enforces, and for the same reason.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void A_fetch_line_refuses_a_sequence_number_below_one(long sequenceNumber) =>
+        Should.Throw<ArgumentOutOfRangeException>(
+            () => ImapResponses.Fetch(sequenceNumber, [ImapFetchItem.Uid], MessageSummary()));
+
+    /// <summary>
+    /// An item this server cannot answer is skipped rather than guessed at, so a caller that
+    /// failed to filter emits a shorter response rather than a wrong one.
+    /// </summary>
+    [Fact]
+    public void An_unanswerable_item_is_skipped_rather_than_invented() =>
+        ImapResponses
+            .Fetch(1, [ImapFetchItem.Uid, ImapFetchItem.Envelope], MessageSummary())
+            .Format()
+            .ShouldBe("* 1 FETCH (UID 4827313)\r\n");
+
+    /// <summary>
+    /// §9's msg-att has no empty form, so a request consisting only of unanswerable items has no
+    /// grammatical response — and building one anyway would put "* 1 FETCH ()" on the wire.
+    /// </summary>
+    [Fact]
+    public void A_response_with_nothing_answerable_in_it_is_refused_rather_than_emitted() =>
+        Should.Throw<ArgumentException>(
+            () => ImapResponses.Fetch(1, [ImapFetchItem.Envelope], MessageSummary()));
+
+    [Fact]
+    public void A_fetch_line_refuses_null_arguments()
+    {
+        Should.Throw<ArgumentNullException>(() => ImapResponses.Fetch(1, null!, MessageSummary()));
+        Should.Throw<ArgumentNullException>(
+            () => ImapResponses.Fetch(1, [ImapFetchItem.Uid], null!));
+    }
 }

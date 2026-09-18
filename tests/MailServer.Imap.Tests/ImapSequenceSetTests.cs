@@ -4,6 +4,14 @@ namespace MailServer.Imap.Tests;
 
 public sealed class ImapSequenceSetTests
 {
+    private static ImapSequenceSet Parse(string text)
+    {
+        ImapSequenceSet.TryParse(text, out ImapSequenceSet? set)
+            .ShouldBeTrue($"could not parse [{text}]");
+
+        return set!;
+    }
+
     // ---------------------------------------------------------------------------------------
     // Parsing.
     // ---------------------------------------------------------------------------------------
@@ -145,5 +153,60 @@ public sealed class ImapSequenceSetTests
         ImapSequenceSet.TryParse("1,4:7", out ImapSequenceSet? set).ShouldBeTrue();
 
         set!.Contains(candidate, maxValue: 100).ShouldBe(expected);
+    }
+    // ---------------------------------------------------------------------------------------
+    // What a reader needs before it can choose a query.
+    // ---------------------------------------------------------------------------------------
+
+    [Theory]
+    [InlineData("*")]
+    [InlineData("1:*")]
+    [InlineData("*:1")]
+    [InlineData("1,*")]
+    [InlineData("1:5,7:*")]
+    public void A_set_containing_a_star_says_so(string text)
+    {
+        Parse(text).HasWildcard.ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData("1")]
+    [InlineData("1:5")]
+    [InlineData("1,3,5")]
+    [InlineData("10:2")]
+    public void A_set_of_literals_says_so(string text)
+    {
+        Parse(text).HasWildcard.ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData("1", 1, 1)]
+    [InlineData("1:5", 1, 5)]
+    [InlineData("5:1", 1, 5)]
+    [InlineData("3,1,7", 1, 7)]
+    [InlineData("10:2,20", 2, 20)]
+    public void The_literal_bounds_span_every_range(string text, long lowest, long highest) =>
+        Parse(text).LiteralBounds.ShouldBe((lowest, highest));
+
+    /// <summary>
+    /// Asked of a set with a star, the answer would be a number a caller might narrow a query
+    /// with — and narrowing on it is exactly the bug HasWildcard exists to prevent.
+    /// </summary>
+    [Fact]
+    public void A_set_with_a_star_refuses_to_offer_literal_bounds() =>
+        Should.Throw<InvalidOperationException>(() => Parse("6:*").LiteralBounds);
+
+    /// <summary>
+    /// The case that rules out narrowing: RFC 3501 §9 treats 5:3 and 3:5 alike, so in a folder
+    /// of four messages 6:* is 6:4, which is 4:6, which includes message 4. A read narrowed to
+    /// "6 and above" because 6 was written first would return nothing at all.
+    /// </summary>
+    [Fact]
+    public void A_reversed_wildcard_range_reaches_below_its_written_start()
+    {
+        ImapSequenceSet set = Parse("6:*");
+
+        set.Contains(4, maxValue: 4).ShouldBeTrue();
+        set.Contains(3, maxValue: 4).ShouldBeFalse();
     }
 }

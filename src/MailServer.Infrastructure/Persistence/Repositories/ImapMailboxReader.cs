@@ -35,6 +35,20 @@ internal sealed class FolderStatusRow
     public long UnseenCount { get; set; }
 }
 
+/// <summary>Flat shape of one message's stored facts, as <c>FETCH</c> reports them.</summary>
+internal sealed class MessageSummaryRow
+{
+    public long Seq { get; set; }
+
+    public long Uid { get; set; }
+
+    public int Flags { get; set; }
+
+    public DateTimeOffset InternalDate { get; set; }
+
+    public long SizeBytes { get; set; }
+}
+
 /// <summary>Reads a mailbox for IMAP.</summary>
 internal sealed class ImapMailboxReader(
     IDbConnectionFactory connectionFactory,
@@ -273,5 +287,132 @@ internal sealed class ImapMailboxReader(
 
             return new ImapFolderStatus(folder, counts.MessageCount, counts.UnseenCount);
         }, cancellationToken);
+    }
+
+    /// <summary>
+    /// Every message in a folder, numbered, optionally narrowed to a span.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>ROW_NUMBER() OVER (ORDER BY Uid)</c> is the sequence number, for the reason
+    /// <see cref="SelectFolderAggregates"/> gives: RFC 3501 §2.3.1.2 makes it "the relative
+    /// position from 1 to the number of messages in the mailbox", so it is counted rather than
+    /// looked up. The window runs over the whole folder and the narrowing is applied outside it,
+    /// which is what keeps a narrowed read's numbers the same as an unnarrowed one's.
+    /// </para>
+    /// <para>
+    /// The size comes from <c>Messages</c> because a message stored once and delivered to two
+    /// folders has one size; the flags and the internal date come from <c>Deliveries</c> because
+    /// each copy carries its own.
+    /// </para>
+    /// <para>
+    /// <c>@Lowest</c> and <c>@Highest</c> are a single span rather than the set's own ranges. A
+    /// set may hold up to <see cref="ImapSequenceSet.MaxSegments"/> of them, and turning those
+    /// into a predicate would build a SQL string a client controls the length of — so the query
+    /// narrows to the one span that contains them all and the exact filtering happens in memory,
+    /// where the matcher is <see cref="ImapSequenceSet.Contains"/> and has tests. A null span
+    /// means no narrowing at all, which is what a <c>*</c> requires.
+    /// </para>
+    /// </remarks>
+    private const string SelectSummaries = """
+        SELECT  Ordered.Seq, Ordered.Uid, Ordered.Flags, Ordered.InternalDate, Ordered.SizeBytes
+        FROM    (SELECT ROW_NUMBER() OVER (ORDER BY d.Uid) AS Seq,
+                        d.Uid, d.Flags, d.InternalDate, m.SizeBytes
+                 FROM   Deliveries d
+                 JOIN   Messages m ON m.Id = d.MessageId
+                 WHERE  d.FolderId = @FolderId
+                   AND  d.MailboxId = @MailboxId) AS Ordered
+        WHERE   (@Lowest IS NULL OR @Highest IS NULL)
+             OR (CASE WHEN @ByUid = 1 THEN Ordered.Uid ELSE Ordered.Seq END
+                 BETWEEN @Lowest AND @Highest)
+        ORDER BY Ordered.Seq
+        """;
+
+    public Task<IReadOnlyList<ImapMessageSummary>> ReadSummariesAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        ImapSequenceSet set,
+        bool byUid,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(set);
+
+        // A '*' means "the largest in use", which is not known until the folder has been read -
+        // and narrowing on the literals anyway would be wrong rather than merely unhelpful, as
+        // ImapSequenceSet.HasWildcard's own remarks work through.
+        (long Lowest, long Highest)? span = set.HasWildcard ? null : set.LiteralBounds;
+
+        return ExecuteAsync(async (session, ct) =>
+        {
+            IEnumerable<MessageSummaryRow> rows = await session.Connection
+                .QueryAsync<MessageSummaryRow>(Command(
+                    session,
+                    SelectSummaries,
+                    new
+                    {
+                        FolderId = folderId.Value,
+                        MailboxId = mailboxId.Value,
+                        ByUid = byUid ? 1 : 0,
+                        Lowest = span?.Lowest,
+                        Highest = span?.Highest,
+                    },
+                    ct))
+                .ConfigureAwait(false);
+
+            return Summaries([.. rows], set, byUid);
+        }, cancellationToken);
+    }
+
+    /// <summary>
+    /// Filters the rows a span returned down to the ones the set actually names.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>What <c>*</c> resolves to is read off the rows, not queried for separately.</b> The
+    /// window ran over the whole folder, so with no narrowing the last row's sequence number is
+    /// the message count and its UID is the largest UID — the two things §9's <c>*</c> can mean,
+    /// both true of the same instant as everything else here. A second query for either would
+    /// let a delivery land between them.
+    /// </para>
+    /// <para>
+    /// When the query <i>was</i> narrowed, the last row's number is not the folder's maximum —
+    /// and nothing reads it as one, because narrowing only happens when the set holds no
+    /// <c>*</c>, and a set with no <c>*</c> resolves without consulting a maximum at all.
+    /// </para>
+    /// <para>
+    /// Zero is the right maximum for an empty folder: a set resolved against it selects nothing,
+    /// which is what an empty folder should return, and §6.4.8 is explicit that finding nothing
+    /// is not an error.
+    /// </para>
+    /// </remarks>
+    private static IReadOnlyList<ImapMessageSummary> Summaries(
+        IReadOnlyList<MessageSummaryRow> rows,
+        ImapSequenceSet set,
+        bool byUid)
+    {
+        if (rows.Count == 0)
+        {
+            return [];
+        }
+
+        MessageSummaryRow last = rows[^1];
+        long maxValue = byUid ? last.Uid : last.Seq;
+
+        List<ImapMessageSummary> summaries = [];
+
+        foreach (MessageSummaryRow row in rows)
+        {
+            if (set.Contains(byUid ? row.Uid : row.Seq, maxValue))
+            {
+                summaries.Add(new ImapMessageSummary(
+                    row.Seq,
+                    row.Uid,
+                    (MessageFlags)row.Flags,
+                    row.InternalDate,
+                    row.SizeBytes));
+            }
+        }
+
+        return summaries;
     }
 }

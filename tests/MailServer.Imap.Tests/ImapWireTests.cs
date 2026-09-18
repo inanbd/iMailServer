@@ -360,7 +360,8 @@ public sealed class ImapWireTests : IDisposable
                 firstUnseen: 2,
                 uidValidity: 3_857_529_045,
                 nextUid: 12,
-                specialUse: FolderSpecialUse.Inbox);
+                specialUse: FolderSpecialUse.Inbox)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 3, 7, 11);
 
         (TcpClient client, Task served) = await ConnectAsync(
             Options(),
@@ -403,10 +404,29 @@ public sealed class ImapWireTests : IDisposable
             select[6].ShouldBe("* OK [UIDNEXT 12] Predicted next UID");
             select[7].ShouldBe("a3 OK [READ-WRITE] SELECT completed");
 
-            // Selected state now, so a selected-state command is in sequence - and refused for
-            // the honest reason rather than as a sequencing error.
-            await WriteLineAsync(tls, "a4 FETCH 1 FLAGS");
-            (await ReadLineAsync(tls)).ShouldContain("not implemented yet");
+            // Selected state now, so a whole FETCH runs - through the real connection handler,
+            // the real line reader and the real TLS stream rather than the processor alone.
+            await WriteLineAsync(tls, "a4 FETCH 1:* (UID FLAGS)");
+            List<string> fetch = await ReadUntilTaggedAsync(tls, "a4");
+
+            fetch[0].ShouldBe("* 1 FETCH (UID 3 FLAGS (\\Seen))");
+            fetch[1].ShouldBe("* 2 FETCH (UID 7 FLAGS (\\Seen))");
+            fetch[2].ShouldBe("* 3 FETCH (UID 11 FLAGS (\\Seen))");
+            fetch[3].ShouldBe("a4 OK FETCH completed");
+
+            // A whole LIST too, including the hierarchy-delimiter probe every client opens with.
+            await WriteLineAsync(tls, "a4b LIST \"\" \"\"");
+            List<string> probe = await ReadUntilTaggedAsync(tls, "a4b");
+
+            probe[0].ShouldBe("* LIST (\\Noselect) \"/\" \"\"");
+            probe[1].ShouldBe("a4b OK LIST completed");
+
+            // And a STATUS, which must leave the selected mailbox alone.
+            await WriteLineAsync(tls, "a4c STATUS INBOX (MESSAGES UIDNEXT)");
+            List<string> status = await ReadUntilTaggedAsync(tls, "a4c");
+
+            status[0].ShouldBe("* STATUS INBOX (MESSAGES 3 UIDNEXT 12)");
+            status[1].ShouldBe("a4c OK STATUS completed");
 
             // Lower case reaches the same folder: RFC 3501 section 5.1 makes INBOX the one
             // case-insensitive mailbox name.

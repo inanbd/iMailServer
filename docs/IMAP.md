@@ -126,6 +126,48 @@ read messages precede the first unread one.
 `RECENT` is reported as a truthful zero. `\Recent` is reserved and never set by this server, so
 the count of messages carrying it is zero — a true answer rather than an unimplemented one.
 
+## FETCH
+
+Implemented for the data items that are stored columns — `FLAGS`, `UID`, `INTERNALDATE`,
+`RFC822.SIZE`, and therefore the `FAST` macro in full. `ENVELOPE`, `BODY`, `BODYSTRUCTURE`,
+`RFC822*` and `BODY[...]` need a MIME reader and are answered with a tagged `NO` naming the
+item. RFC 3501 §6.4.5 distinguishes "BAD - command unknown or arguments invalid" from "NO -
+fetch error: can't fetch that data"; a client told `BAD` for `ENVELOPE` would go looking for a
+syntax error that is not there.
+
+**`UID FETCH` is the same handler with one flag**, because §6.4.8 makes it the same command —
+only what the numbers mean changes. Two of its rules are easy to get wrong and both are tested:
+
+- *The number after the `*` is always a message sequence number*, "not a unique identifier, even
+  for a UID command response". A server that echoed the UID there would have clients renumbering
+  their caches against positions that do not exist.
+- *The UID is included whether or not it was asked for.* §6.4.8 makes it a MUST, and without it
+  a client that sent `UID FETCH 1:* FLAGS` has no way to tell which message each line is about.
+
+**A message that is not there is passed over in silence.** §6.4.8: "A non-existent unique
+identifier is ignored without any error message generated." A tagged `NO` would have a client
+report a failure for a message it had already deleted.
+
+**`INTERNALDATE` pads a single-digit day with a space, not a zero.** §9's `date-day-fixed =
+(SP DIGIT) / 2DIGIT` is a fixed-width production, so the first of January is `" 1-Jan-2026
+09:30:15 +0000"`. `"01-Jan"` is a string the grammar does not have.
+
+**The sequence set is resolved by the reader, not before it.** `*` means "the largest in use",
+and which largest depends on the command: `FETCH` resolves it against the message count and
+`UID FETCH` against the largest UID. Both are facts about the folder at the instant of the read.
+
+**A set with no `*` narrows the query; a set with one does not**, and that asymmetry is a
+correctness requirement rather than a missed optimisation. §9 treats `5:3` and `3:5` alike, so a
+folder holding four messages answers `6:*` as `6:4`, which is `4:6` — a read narrowed to "6 and
+above" because 6 was written first would return nothing. The narrowing that does happen is a
+single span covering every range, with exact filtering in memory: a set may hold up to 10,000
+ranges, and turning those into a predicate would build a SQL string a client controls the length
+of.
+
+**Known limitation: the response is materialised, not streamed.** `FETCH 1:*` over a folder with
+a million messages builds a million response objects before any of them is written. That is
+within the current `ImapCommandResult` shape and is the next thing to change for large mailboxes.
+
 ## IDLE
 
 Held with a server-side timer that emits a keep-alive before the 29-minute RFC 2177 limit, and

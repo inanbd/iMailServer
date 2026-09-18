@@ -110,4 +110,44 @@ public interface IImapMailboxReader
         MailboxId mailboxId,
         string path,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The stored facts about the messages a <c>FETCH</c> names.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The set is passed in unresolved, because only a reader can resolve it.</b> RFC 3501
+    /// §9's <c>*</c> is "the largest in use", and which largest depends on the command: a
+    /// <c>FETCH</c> resolves it against the message count and a <c>UID FETCH</c> against the
+    /// largest UID. Both are facts about the folder at the instant of the read, so resolving
+    /// them anywhere else would mean resolving them against a folder that may since have
+    /// changed.
+    /// </para>
+    /// <para>
+    /// <b>A non-existent message is not an error.</b> §6.4.8: "A non-existent unique identifier
+    /// is ignored without any error message generated. Thus, it is possible for a UID FETCH
+    /// command to return an OK without any data." The same is true of a sequence number past the
+    /// end, so this returns what exists and never reports what did not.
+    /// </para>
+    /// <para>
+    /// <b>Both ids are required, and the mailbox one is not redundant.</b> A folder id is a value
+    /// an authenticated session hands back from its own earlier <c>SELECT</c>; putting the
+    /// mailbox in the <c>WHERE</c> clause beside it is what makes a session that had somehow
+    /// acquired another mailbox's folder id unable to read that folder's mail.
+    /// </para>
+    /// </remarks>
+    /// <param name="mailboxId">The authenticated mailbox. Scopes the read; never optional.</param>
+    /// <param name="folderId">The selected folder.</param>
+    /// <param name="set">The sequence set from the command, with any <c>*</c> still unresolved.</param>
+    /// <param name="byUid">
+    /// Whether the numbers are UIDs. True for <c>UID FETCH</c> — §6.4.8: "the numbers in the
+    /// sequence set argument are unique identifiers instead of message sequence numbers".
+    /// </param>
+    /// <returns>The matching messages, in ascending sequence order.</returns>
+    Task<IReadOnlyList<ImapMessageSummary>> ReadSummariesAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        ImapSequenceSet set,
+        bool byUid,
+        CancellationToken cancellationToken);
 }

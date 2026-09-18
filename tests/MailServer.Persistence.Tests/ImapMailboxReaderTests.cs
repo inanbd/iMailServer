@@ -728,4 +728,229 @@ public sealed class ImapMailboxReaderTests
         status.ShouldNotBeNull();
         status.MessageCount.ShouldBe(1);
     }
+    // ---------------------------------------------------------------------------------------
+    // FETCH.
+    // ---------------------------------------------------------------------------------------
+
+    private static ImapSequenceSet Set(string text)
+    {
+        ImapSequenceSet.TryParse(text, out ImapSequenceSet? set)
+            .ShouldBeTrue($"could not parse sequence set [{text}]");
+
+        return set!;
+    }
+
+    /// <summary>
+    /// A folder with gaps in its UIDs, because UIDs are never reused and any folder that has been
+    /// expunged has them. Sequence numbers are positions in what remains.
+    /// </summary>
+    private static async Task<(SqliteTestDatabase Database, MailboxId Mailbox, MailboxFolderId Folder)>
+        SeedMessagesAsync(SqliteTestDatabase database, DbConnection connection)
+    {
+        (MailboxId mailbox, MailboxFolderId folder) = await SeedFolderAsync(connection);
+
+        await DeliverAsync(connection, mailbox, folder, uid: 3, flags: MessageFlags.Seen);
+        await DeliverAsync(connection, mailbox, folder, uid: 7);
+        await DeliverAsync(connection, mailbox, folder, uid: 11, flags: MessageFlags.Flagged);
+        await DeliverAsync(connection, mailbox, folder, uid: 19);
+
+        return (database, mailbox, folder);
+    }
+
+    [Fact]
+    public async Task Sequence_numbers_are_positions_in_uid_order()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        IReadOnlyList<ImapMessageSummary> summaries = await database.CreateScope().ImapMailboxes
+            .ReadSummariesAsync(mailbox, folder, Set("1:*"), byUid: false, CancellationToken.None);
+
+        summaries.Select(s => s.SequenceNumber).ShouldBe([1, 2, 3, 4]);
+        summaries.Select(s => s.Uid).ShouldBe([3, 7, 11, 19]);
+    }
+
+    [Fact]
+    public async Task A_narrowed_read_numbers_its_rows_the_same_way_an_unnarrowed_one_does()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        IReadOnlyList<ImapMessageSummary> summaries = await database.CreateScope().ImapMailboxes
+            .ReadSummariesAsync(mailbox, folder, Set("3"), byUid: false, CancellationToken.None);
+
+        summaries.Count.ShouldBe(1);
+        summaries[0].SequenceNumber.ShouldBe(3);
+        summaries[0].Uid.ShouldBe(11);
+    }
+
+    [Fact]
+    public async Task Uid_reads_select_by_uid_and_still_report_the_sequence_number()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        IReadOnlyList<ImapMessageSummary> summaries = await database.CreateScope().ImapMailboxes
+            .ReadSummariesAsync(mailbox, folder, Set("11"), byUid: true, CancellationToken.None);
+
+        summaries.Count.ShouldBe(1);
+        summaries[0].Uid.ShouldBe(11);
+        summaries[0].SequenceNumber.ShouldBe(3);
+    }
+
+    /// <summary>
+    /// RFC 3501 §9's own note that 5:3 and 3:5 are the same range, applied through the wildcard:
+    /// a folder holding four messages answers 6:* as 6:4, which is 4:6, which includes message 4.
+    /// A read that narrowed to "from 6 upwards" because 6 was written first would return nothing.
+    /// </summary>
+    [Fact]
+    public async Task A_reversed_wildcard_range_still_finds_the_messages_below_it()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        IReadOnlyList<ImapMessageSummary> summaries = await database.CreateScope().ImapMailboxes
+            .ReadSummariesAsync(mailbox, folder, Set("6:*"), byUid: false, CancellationToken.None);
+
+        summaries.Select(s => s.SequenceNumber).ShouldBe([4]);
+    }
+
+    /// <summary>The wildcard means the largest UID under UID FETCH, not the message count.</summary>
+    [Fact]
+    public async Task The_wildcard_resolves_against_uids_for_a_uid_read()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        IReadOnlyList<ImapMessageSummary> summaries = await database.CreateScope().ImapMailboxes
+            .ReadSummariesAsync(mailbox, folder, Set("*"), byUid: true, CancellationToken.None);
+
+        summaries.Select(s => s.Uid).ShouldBe([19]);
+    }
+
+    /// <summary>The same star under a plain FETCH means the last position, which is a different row.</summary>
+    [Fact]
+    public async Task The_wildcard_resolves_against_positions_for_a_plain_read()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        IReadOnlyList<ImapMessageSummary> summaries = await database.CreateScope().ImapMailboxes
+            .ReadSummariesAsync(mailbox, folder, Set("*"), byUid: false, CancellationToken.None);
+
+        summaries.Select(s => s.SequenceNumber).ShouldBe([4]);
+        summaries.Select(s => s.Uid).ShouldBe([19]);
+    }
+
+    [Fact]
+    public async Task A_disjoint_set_selects_only_what_it_names()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        IReadOnlyList<ImapMessageSummary> summaries = await database.CreateScope().ImapMailboxes
+            .ReadSummariesAsync(mailbox, folder, Set("1,4"), byUid: false, CancellationToken.None);
+
+        summaries.Select(s => s.Uid).ShouldBe([3, 19]);
+    }
+
+    /// <summary>
+    /// §6.4.8: "A non-existent unique identifier is ignored without any error message generated."
+    /// </summary>
+    [Theory]
+    [InlineData("5", true)]
+    [InlineData("100:200", true)]
+    [InlineData("99", false)]
+    public async Task A_number_naming_no_message_returns_nothing_rather_than_failing(
+        string text,
+        bool byUid)
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        (await database.CreateScope().ImapMailboxes
+            .ReadSummariesAsync(mailbox, folder, Set(text), byUid, CancellationToken.None))
+            .ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task An_empty_folder_returns_nothing_for_any_set()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, MailboxFolderId folder) = await SeedFolderAsync(connection);
+
+        (await database.CreateScope().ImapMailboxes
+            .ReadSummariesAsync(mailbox, folder, Set("1:*"), byUid: false, CancellationToken.None))
+            .ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task The_stored_flags_and_size_come_back_with_the_message()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        IReadOnlyList<ImapMessageSummary> summaries = await database.CreateScope().ImapMailboxes
+            .ReadSummariesAsync(mailbox, folder, Set("1:*"), byUid: false, CancellationToken.None);
+
+        summaries[0].Flags.ShouldBe(MessageFlags.Seen);
+        summaries[1].Flags.ShouldBe(MessageFlags.None);
+        summaries[2].Flags.ShouldBe(MessageFlags.Flagged);
+
+        // Every seeded message is 100 octets; the size is read from Messages, not Deliveries,
+        // because one stored message delivered to two folders has one size.
+        summaries.ShouldAllBe(s => s.SizeBytes == 100);
+    }
+
+    /// <summary>
+    /// The authorisation boundary on the command that returns actual mail. A folder id is a value
+    /// an authenticated session hands back, so it must not be enough on its own.
+    /// </summary>
+    [Fact]
+    public async Task Another_mailboxs_folder_id_reads_no_messages()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId alice, _) = await SeedFolderAsync(connection);
+
+        (MailboxId bob, MailboxFolderId bobsFolder) = await SeedFolderAsync(
+            connection,
+            address: "bob@example.net");
+
+        await DeliverAsync(connection, bob, bobsFolder, uid: 1);
+
+        (await database.CreateScope().ImapMailboxes
+            .ReadSummariesAsync(alice, bobsFolder, Set("1:*"), byUid: false, CancellationToken.None))
+            .ShouldBeEmpty();
+    }
 }

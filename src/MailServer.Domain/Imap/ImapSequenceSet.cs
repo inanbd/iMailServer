@@ -149,6 +149,73 @@ public sealed class ImapSequenceSet
         return resolved;
     }
 
+    /// <summary>
+    /// Whether any <c>*</c> appears in this set, and the answer therefore depends on the folder.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A reader has to know this before it can choose what to query. Without a <c>*</c> the
+    /// literal bounds are known up front, so the read can be narrowed to them; with one, they are
+    /// not — and narrowing anyway is a bug rather than an optimisation, because
+    /// <see cref="Resolve"/> normalises a reversed range. A folder holding three messages
+    /// answers <c>5:*</c> as <c>5:3</c>, which is <c>3:5</c>, which includes message 3 — so a
+    /// read that started at 5 because 5 was written first would miss the only message the client
+    /// asked about.
+    /// </para>
+    /// <para>
+    /// Exposed rather than inferred from <see cref="Resolve"/>'s output, because once resolved a
+    /// <c>*</c> is indistinguishable from a literal that happened to equal the maximum.
+    /// </para>
+    /// </remarks>
+    public bool HasWildcard
+    {
+        get
+        {
+            foreach ((SeqNumber start, SeqNumber end) in _ranges)
+            {
+                if (start.Value is null || end.Value is null)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The lowest and highest literal values in this set.
+    /// </summary>
+    /// <remarks>
+    /// Only meaningful when <see cref="HasWildcard"/> is false, which is why it says so in an
+    /// exception rather than returning something a caller might narrow a query with.
+    /// </remarks>
+    public (long Lowest, long Highest) LiteralBounds
+    {
+        get
+        {
+            if (HasWildcard)
+            {
+                throw new InvalidOperationException(
+                    "A set containing '*' has no literal bounds; resolve it against the folder " +
+                    "first. See HasWildcard.");
+            }
+
+            long lowest = long.MaxValue;
+            long highest = long.MinValue;
+
+            // The maxValue is irrelevant with no wildcard to resolve, and Resolve has already
+            // put every range the right way round.
+            foreach ((long start, long end) in Resolve(0))
+            {
+                lowest = Math.Min(lowest, start);
+                highest = Math.Max(highest, end);
+            }
+
+            return (lowest, highest);
+        }
+    }
+
     /// <summary>Whether <paramref name="number"/> falls in any of this set's ranges.</summary>
     /// <remarks>
     /// For filtering one already-known value — a specific message sequence number, which is

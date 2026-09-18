@@ -226,6 +226,7 @@ public sealed class ImapCommandProcessor
             ImapVerb.List => await ListAsync(command, subscribedOnly: false, cancellationToken).ConfigureAwait(false),
             ImapVerb.Lsub => await ListAsync(command, subscribedOnly: true, cancellationToken).ConfigureAwait(false),
             ImapVerb.Status => await StatusAsync(command, cancellationToken).ConfigureAwait(false),
+            ImapVerb.Fetch => await FetchAsync(command, cancellationToken).ConfigureAwait(false),
             _ => NotImplemented(command),
         };
     }
@@ -988,6 +989,122 @@ public sealed class ImapCommandProcessor
                 ImapResponses.Ok(command.Tag, "STATUS completed"),
             ],
             ImapSessionAction.Continue);
+    }
+
+    /// <summary>
+    /// <c>FETCH</c> and <c>UID FETCH</c> — RFC 3501 §6.4.5 and §6.4.8.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The UID form is the same handler with one flag, because §6.4.8 makes it the same
+    /// command.</b> "In the first form, it takes as its arguments a COPY, FETCH, or STORE command
+    /// with arguments appropriate for the associated command. However, the numbers in the
+    /// sequence set argument are unique identifiers instead of message sequence numbers." What
+    /// changes is what the numbers mean, and nothing else.
+    /// </para>
+    /// <para>
+    /// <b>The UID is added to the response whether or not it was asked for.</b> §6.4.8: "server
+    /// implementations MUST implicitly include the UID message data item as part of any FETCH
+    /// response caused by a UID command, regardless of whether a UID was specified as a message
+    /// data item to the FETCH." A client that sent <c>UID FETCH 1:* FLAGS</c> has no other way to
+    /// know which message each line is about — the number after the <c>*</c> is a sequence
+    /// number, which is exactly what it was avoiding by using UIDs.
+    /// </para>
+    /// <para>
+    /// <b>Messages that are not there are passed over in silence.</b> §6.4.8: "A non-existent
+    /// unique identifier is ignored without any error message generated. Thus, it is possible for
+    /// a UID FETCH command to return an OK without any data." A tagged <c>NO</c> would be wrong
+    /// here, and a client that treated it as one would report a failure to the user for a
+    /// message it had simply already deleted.
+    /// </para>
+    /// <para>
+    /// <b>Items this server cannot answer yet earn a tagged <c>NO</c> naming them.</b> §6.4.5
+    /// distinguishes "BAD - command unknown or arguments invalid" from "NO - fetch error: can't
+    /// fetch that data", and <c>ENVELOPE</c> is the second: the request was well-formed and this
+    /// server cannot serve it. Answering a partial response instead would be worse than either,
+    /// because a client cannot tell a missing item from an item the message does not have.
+    /// </para>
+    /// </remarks>
+    private async ValueTask<ImapCommandResult> FetchAsync(
+        ImapCommand command,
+        CancellationToken cancellationToken)
+    {
+        if (_mailboxes is null)
+        {
+            return NotImplemented(command);
+        }
+
+        if (_session.AuthenticatedMailboxId is null || _session.SelectedFolderId is null)
+        {
+            // Unreachable through the state machine, which admits FETCH only in the selected
+            // state. Answered rather than asserted, as elsewhere.
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, "No mailbox is selected"));
+        }
+
+        string argument = command.Argument.Trim();
+        int split = argument.IndexOf(' ', StringComparison.Ordinal);
+
+        if (split <= 0)
+        {
+            return ImapCommandResult.Single(ImapResponses.Bad(
+                command.Tag,
+                "FETCH expects a sequence set and one or more data items"));
+        }
+
+        if (!ImapSequenceSet.TryParse(argument[..split], out ImapSequenceSet? set))
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, "FETCH sequence set is not valid"));
+        }
+
+        if (!ImapFetchItems.TryParseRequest(argument[split..], out IReadOnlyList<ImapFetchItem> items))
+        {
+            return ImapCommandResult.Single(ImapResponses.Bad(
+                command.Tag,
+                "FETCH expects a data item, a macro, or a parenthesised list of data items"));
+        }
+
+        foreach (ImapFetchItem item in items)
+        {
+            if (!ImapFetchItems.Available.Contains(item))
+            {
+                return ImapCommandResult.Single(ImapResponses.No(
+                    command.Tag,
+                    $"FETCH of {ImapFetchItems.NameOf(item)} is not implemented yet"));
+            }
+        }
+
+        IReadOnlyList<ImapMessageSummary> summaries = await _mailboxes
+            .ReadSummariesAsync(
+                _session.AuthenticatedMailboxId.Value,
+                _session.SelectedFolderId.Value,
+                set,
+                command.IsUid,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        // The §6.4.8 MUST, applied once rather than per message so that the order is the same on
+        // every line: the client's own items first, then the UID it did not ask for.
+        List<ImapFetchItem> reported = [.. items];
+
+        if (command.IsUid && !reported.Contains(ImapFetchItem.Uid))
+        {
+            reported.Add(ImapFetchItem.Uid);
+        }
+
+        List<ImapResponse> responses = [];
+
+        foreach (ImapMessageSummary summary in summaries)
+        {
+            responses.Add(ImapResponses.Fetch(summary.SequenceNumber, reported, summary));
+        }
+
+        responses.Add(ImapResponses.Ok(
+            command.Tag,
+            command.IsUid ? "UID FETCH completed" : "FETCH completed"));
+
+        return new ImapCommandResult(responses, ImapSessionAction.Continue);
     }
 
     private static ImapCommandResult NotImplemented(ImapCommand command) =>

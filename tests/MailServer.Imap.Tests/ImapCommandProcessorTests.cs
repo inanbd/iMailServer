@@ -179,6 +179,81 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader
 
         return Task.FromResult<IReadOnlyList<ImapFolderListing>>(listings);
     }
+
+    /// <summary>Messages, keyed by the folder they were put in.</summary>
+    private readonly Dictionary<(Guid Mailbox, string Path), List<ImapMessageSummary>> _messages = [];
+
+    /// <summary>
+    /// Puts messages in a folder, numbered from 1 in UID order.
+    /// </summary>
+    /// <remarks>
+    /// The sequence numbers are assigned here rather than passed in, because RFC 3501 §2.3.1.2
+    /// makes them positions: a test that chose them independently of the UID order could assert
+    /// a pairing the real reader can never produce.
+    /// </remarks>
+    public ScriptedImapMailboxReader Deliver(
+        MailboxId mailboxId,
+        string path,
+        params long[] uids)
+    {
+        List<ImapMessageSummary> summaries = [];
+
+        long sequenceNumber = 1;
+
+        foreach (long uid in uids.OrderBy(u => u))
+        {
+            summaries.Add(new ImapMessageSummary(
+                sequenceNumber++,
+                uid,
+                MessageFlags.Seen,
+                new DateTimeOffset(2026, 3, 1, 9, 30, 15, TimeSpan.Zero),
+                SizeBytes: 100 * uid));
+        }
+
+        _messages[(mailboxId.Value, path)] = summaries;
+
+        return this;
+    }
+
+    /// <summary>The mailbox and folder every summary read was scoped to.</summary>
+    public List<(Guid Mailbox, Guid Folder)> Read { get; } = [];
+
+    public Task<IReadOnlyList<ImapMessageSummary>> ReadSummariesAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        ImapSequenceSet set,
+        bool byUid,
+        CancellationToken cancellationToken)
+    {
+        Read.Add((mailboxId.Value, folderId.Value));
+
+        // Found by folder id, the way the real reader's WHERE clause finds it - so a test that
+        // selected one folder and fetched from another would fail here too.
+        KeyValuePair<(Guid Mailbox, string Path), Entry> owner = _folders
+            .FirstOrDefault(pair =>
+                pair.Value.Folder.Id.Value == folderId.Value &&
+                pair.Key.Mailbox == mailboxId.Value);
+
+        if (owner.Value is null ||
+            !_messages.TryGetValue(owner.Key, out List<ImapMessageSummary>? all))
+        {
+            return Task.FromResult<IReadOnlyList<ImapMessageSummary>>([]);
+        }
+
+        if (all.Count == 0)
+        {
+            return Task.FromResult<IReadOnlyList<ImapMessageSummary>>([]);
+        }
+
+        long maxValue = byUid ? all[^1].Uid : all[^1].SequenceNumber;
+
+        List<ImapMessageSummary> matched =
+        [
+            .. all.Where(s => set.Contains(byUid ? s.Uid : s.SequenceNumber, maxValue)),
+        ];
+
+        return Task.FromResult<IReadOnlyList<ImapMessageSummary>>(matched);
+    }
 }
 
 public sealed class ImapCommandProcessorTests
@@ -1510,5 +1585,210 @@ public sealed class ImapCommandProcessorTests
 
         Wire(await ExecuteAsync(processor, "a1 STATUS Payroll (MESSAGES)"))
             .ShouldContain("No such mailbox");
+    }
+    // ---------------------------------------------------------------------------------------
+    // FETCH.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>A session with INBOX selected and four messages in it, at non-contiguous UIDs.</summary>
+    /// <remarks>
+    /// The gaps are deliberate. UIDs are never reused, so a folder that has ever been expunged
+    /// has them — and a sequence number is a position in what remains rather than a UID, which is
+    /// the distinction every FETCH assertion below depends on.
+    /// </remarks>
+    private static async Task<ImapCommandProcessor> FetchableAsync()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 4)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 3, 7, 11, 19);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+
+        return processor;
+    }
+
+    [Fact]
+    public async Task Fetch_reports_one_line_per_message_in_sequence_order()
+    {
+        string wire = Wire(await ExecuteAsync(await FetchableAsync(), "a2 FETCH 1:* UID"));
+
+        wire.ShouldBe(
+            "* 1 FETCH (UID 3)\r\n" +
+            "* 2 FETCH (UID 7)\r\n" +
+            "* 3 FETCH (UID 11)\r\n" +
+            "* 4 FETCH (UID 19)\r\n" +
+            "a2 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// A sequence number is a position, so FETCH 2 is the second message however far its UID is
+    /// from 2.
+    /// </summary>
+    [Fact]
+    public async Task A_sequence_number_names_a_position_and_not_a_uid()
+    {
+        string wire = Wire(await ExecuteAsync(await FetchableAsync(), "a2 FETCH 2 UID"));
+
+        wire.ShouldBe("* 2 FETCH (UID 7)\r\na2 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// RFC 3501 §6.4.8: "the numbers in the sequence set argument are unique identifiers instead
+    /// of message sequence numbers". The same number means a different message under UID FETCH.
+    /// </summary>
+    [Fact]
+    public async Task Uid_fetch_reads_the_numbers_as_uids()
+    {
+        string wire = Wire(await ExecuteAsync(await FetchableAsync(), "a2 UID FETCH 7 FLAGS"));
+
+        wire.ShouldBe("* 2 FETCH (FLAGS (\\Seen) UID 7)\r\na2 OK UID FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.8's MUST: "server implementations MUST implicitly include the UID message data item
+    /// as part of any FETCH response caused by a UID command, regardless of whether a UID was
+    /// specified as a message data item to the FETCH." Without it a client using UIDs has no way
+    /// to tell which message a line is about.
+    /// </summary>
+    [Fact]
+    public async Task Uid_fetch_includes_the_uid_even_when_it_was_not_asked_for()
+    {
+        string wire = Wire(await ExecuteAsync(await FetchableAsync(), "a2 UID FETCH 1:* FLAGS"));
+
+        wire.ShouldContain("* 1 FETCH (FLAGS (\\Seen) UID 3)");
+        wire.ShouldContain("* 4 FETCH (FLAGS (\\Seen) UID 19)");
+    }
+
+    /// <summary>The plain form adds nothing the client did not ask for.</summary>
+    [Fact]
+    public async Task Plain_fetch_does_not_add_a_uid()
+    {
+        string wire = Wire(await ExecuteAsync(await FetchableAsync(), "a2 FETCH 1 FLAGS"));
+
+        wire.ShouldBe("* 1 FETCH (FLAGS (\\Seen))\r\na2 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.8: "A non-existent unique identifier is ignored without any error message generated.
+    /// Thus, it is possible for a UID FETCH command to return an OK without any data." A tagged
+    /// NO would have a client report a failure for a message it had already deleted.
+    /// </summary>
+    [Theory]
+    [InlineData("a2 UID FETCH 5 FLAGS")]
+    [InlineData("a2 UID FETCH 100:200 FLAGS")]
+    [InlineData("a2 FETCH 99 FLAGS")]
+    public async Task A_message_that_is_not_there_is_passed_over_in_silence(string line)
+    {
+        string wire = Wire(await ExecuteAsync(await FetchableAsync(), line));
+
+        wire.ShouldNotContain(" FETCH (");
+        wire.ShouldContain(" OK ");
+    }
+
+    /// <summary>
+    /// §6.4.5: "FAST — Macro equivalent to: (FLAGS INTERNALDATE RFC822.SIZE)", and every item in
+    /// it is a stored column, so it is answerable today.
+    /// </summary>
+    [Fact]
+    public async Task The_fast_macro_is_answered_in_full()
+    {
+        string wire = Wire(await ExecuteAsync(await FetchableAsync(), "a2 FETCH 1 FAST"));
+
+        wire.ShouldBe(
+            "* 1 FETCH (FLAGS (\\Seen) INTERNALDATE \" 1-Mar-2026 09:30:15 +0000\" " +
+            "RFC822.SIZE 300)\r\n" +
+            "a2 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.5 distinguishes "BAD - command unknown or arguments invalid" from "NO - fetch error:
+    /// can't fetch that data". ENVELOPE is the second, and saying so by name beats a partial
+    /// response a client cannot tell from a message with no envelope.
+    /// </summary>
+    [Theory]
+    [InlineData("a2 FETCH 1 ENVELOPE", "ENVELOPE")]
+    [InlineData("a2 FETCH 1 BODYSTRUCTURE", "BODYSTRUCTURE")]
+    [InlineData("a2 FETCH 1 RFC822", "RFC822")]
+    [InlineData("a2 FETCH 1 (FLAGS ENVELOPE)", "ENVELOPE")]
+    [InlineData("a2 FETCH 1 ALL", "ENVELOPE")]
+    [InlineData("a2 FETCH 1 FULL", "ENVELOPE")]
+    public async Task An_item_needing_a_mime_reader_is_refused_by_name(string line, string item)
+    {
+        string wire = Wire(await ExecuteAsync(await FetchableAsync(), line));
+
+        wire.ShouldContain("a2 NO ");
+        wire.ShouldContain(item);
+        wire.ShouldContain("not implemented yet");
+        wire.ShouldNotContain(" FETCH (");
+    }
+
+    [Fact]
+    public async Task A_body_section_is_refused_by_name()
+    {
+        string wire = Wire(await ExecuteAsync(await FetchableAsync(), "a2 FETCH 1 BODY[HEADER]"));
+
+        wire.ShouldContain("a2 NO ");
+        wire.ShouldContain("not implemented yet");
+    }
+
+    [Theory]
+    [InlineData("a2 FETCH")]
+    [InlineData("a2 FETCH 1")]
+    [InlineData("a2 FETCH 1 ()")]
+    [InlineData("a2 FETCH 1 (FAST)")]
+    [InlineData("a2 FETCH 1 NONSENSE")]
+    [InlineData("a2 FETCH nonsense FLAGS")]
+    [InlineData("a2 FETCH 0 FLAGS")]
+    public async Task A_malformed_fetch_earns_a_tagged_bad(string line) =>
+        Wire(await ExecuteAsync(await FetchableAsync(), line)).ShouldContain("a2 BAD ");
+
+    /// <summary>
+    /// FETCH is a selected-state command, and the state machine refuses it earlier — so this is
+    /// about the handler's own second line of defence rather than the ordinary path.
+    /// </summary>
+    [Fact]
+    public async Task Fetch_without_a_selected_mailbox_is_refused()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: new ScriptedImapMailboxReader().Add(authenticator.KnownMailboxId, "INBOX"));
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        Wire(await ExecuteAsync(processor, "a1 FETCH 1 FLAGS")).ShouldContain(" BAD ");
+    }
+
+    /// <summary>
+    /// The read is scoped to the authenticated mailbox as well as the selected folder — a folder
+    /// id alone is a value a session hands back, and must not be enough to reach mail.
+    /// </summary>
+    [Fact]
+    public async Task A_fetch_is_scoped_to_the_authenticated_mailbox()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 1)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 3);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+        await ExecuteAsync(processor, "a2 FETCH 1 UID");
+
+        mailboxes.Read.ShouldAllBe(r => r.Mailbox == authenticator.KnownMailboxId.Value);
+        mailboxes.Read.ShouldNotBeEmpty();
     }
 }
