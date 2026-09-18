@@ -985,12 +985,16 @@ public sealed class ImapCommandProcessor
             return ImapCommandResult.Single(ImapResponses.No(command.Tag, "No such mailbox"));
         }
 
-        // Echoed as the client spelled it, not as the folder is stored. The two differ only for
-        // the inbox, whose case the client may have chosen - and a client matching the response
-        // against the name it sent should find them equal.
+        // The DECODED name, not the wire token. ImapResponses.Status encodes what it is given,
+        // and modified UTF-7 is not idempotent - '&' opens a shift sequence and is itself written
+        // "&-", so encoding an already-encoded name escapes every '&' a second time and the
+        // client cannot match the response against the command it sent. Decoding preserves the
+        // client's own spelling of everything directly representable, so echoing the decoded name
+        // still returns the inbox in whatever case the client asked for. LIST has always passed a
+        // decoded path, which is why only STATUS was wrong.
         return new ImapCommandResult(
             [
-                ImapResponses.Status(wireName, items, status),
+                ImapResponses.Status(path, items, status),
                 ImapResponses.Ok(command.Tag, "STATUS completed"),
             ],
             ImapSessionAction.Continue);

@@ -92,8 +92,9 @@ public sealed class ImapStatusTests
     }
 
     /// <summary>
-    /// RFC 3501 §6.3.10's own example, so the order is the order asked rather than the order
-    /// the enum happens to declare.
+    /// The order asked, rather than the order the enum happens to declare. §9's status-att-list
+    /// imposes no order and §6.3.10's own example in fact reorders, so this is a legibility
+    /// choice this server makes and not a conformance requirement.
     /// </summary>
     [Fact]
     public void The_requested_order_is_kept()

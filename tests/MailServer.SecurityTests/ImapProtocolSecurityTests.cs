@@ -53,14 +53,24 @@ public sealed class ImapProtocolSecurityTests
         string domainRoot = Path.Combine(directory.FullName, "src", "MailServer.Domain", "Imap");
         string infrastructureRoot = Path.Combine(directory.FullName, "src", "MailServer.Infrastructure", "Imap");
 
+        // The IMAP repositories live under Persistence rather than under Imap, so a scan of the
+        // two Imap folders alone missed them - and they are the files that build SQL and carry the
+        // authorisation boundary, which is precisely what these scans exist to watch. Found by an
+        // adversarial review of the LIST/FETCH/STORE work, not by the scans themselves.
+        string repositoryRoot = Path.Combine(
+            directory.FullName, "src", "MailServer.Infrastructure", "Persistence", "Repositories");
+
         Directory.Exists(domainRoot).ShouldBeTrue($"Expected IMAP domain sources at {domainRoot}.");
         Directory.Exists(infrastructureRoot).ShouldBeTrue(
             $"Expected IMAP infrastructure sources at {infrastructureRoot}.");
+        Directory.Exists(repositoryRoot).ShouldBeTrue(
+            $"Expected IMAP repository sources at {repositoryRoot}.");
 
         List<string> files =
         [
             .. Directory.EnumerateFiles(domainRoot, "*.cs", SearchOption.AllDirectories),
             .. Directory.EnumerateFiles(infrastructureRoot, "*.cs", SearchOption.AllDirectories),
+            .. Directory.EnumerateFiles(repositoryRoot, "Imap*.cs", SearchOption.TopDirectoryOnly),
         ];
 
         files.ShouldNotBeEmpty();
@@ -94,6 +104,12 @@ public sealed class ImapProtocolSecurityTests
         files.Count.ShouldBeGreaterThan(4);
         files.ShouldContain(f => Path.GetFileName(f) == "ImapCommand.cs");
         files.ShouldContain(f => Path.GetFileName(f) == "ImapLineReader.cs");
+
+        // Named explicitly because they sit outside the two Imap folders and were missed once
+        // already. A scan that quietly stopped covering the files that build SQL would keep
+        // passing.
+        files.ShouldContain(f => Path.GetFileName(f) == "ImapMailboxReader.cs");
+        files.ShouldContain(f => Path.GetFileName(f) == "ImapMailboxWriter.cs");
     }
 
     // ---------------------------------------------------------------------------------------

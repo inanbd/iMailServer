@@ -228,7 +228,9 @@ public sealed class ImapMailboxReaderTests
     [InlineData("Projects/2026", "projects/2026")]
     public async Task Every_other_folder_name_is_case_sensitive(string stored, string asked)
     {
-        // The other half of section 5.1: "Other mailbox names are case-sensitive." A server that
+        // Section 5.1 takes no position on non-INBOX names - "The interpretation of all other
+        // names is implementation-dependent" - and this server matches them exactly, which is one
+        // of the three dispositions it lists. A server that
         // folded every name would merge two folders a user deliberately made different.
         await using SqliteTestDatabase database = new();
         await using DbConnection connection = await MigratedAsync(database);

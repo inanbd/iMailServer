@@ -310,7 +310,8 @@ public sealed class ImapCommandTests
     [Fact]
     public void Keeps_the_argument_text_exactly_as_it_arrived()
     {
-        // Mailbox names are case-sensitive (RFC 3501 section 5.1) and a trailing space inside a
+        // This server matches mailbox names exactly (RFC 3501 section 5.1 leaves that open) and a
+        // trailing space inside a
         // quoted name is part of the name, so nothing here is normalised.
         ImapCommand.TryParse("A001 SELECT \"My Folder \"", out ImapCommand? command, out _)
             .ShouldBeTrue();

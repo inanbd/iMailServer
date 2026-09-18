@@ -2050,4 +2050,112 @@ public sealed class ImapCommandProcessorTests
         store.Stored.ShouldNotBeEmpty();
         store.Stored.ShouldAllBe(s => s.Mailbox == authenticator.KnownMailboxId.Value);
     }
+    // ---------------------------------------------------------------------------------------
+    // Regressions found by adversarial review.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// STATUS used to echo the client's already-encoded wire name straight back into the
+    /// encoder. Modified UTF-7 is not idempotent — RFC 3501 §5.1.3 gives '&amp;' the two-octet
+    /// form "&amp;-" and makes it the shift-sequence opener — so a second pass escapes every
+    /// '&amp;' again and the client cannot match the untagged line against the command it sent.
+    /// LIST was always right, which is what made the divergence invisible.
+    /// </summary>
+    [Theory]
+    [InlineData("Jänner", "J&AOQ-nner")]
+    [InlineData("Sales&Marketing", "Sales&-Marketing")]
+    [InlineData("Résumé", "R&AOk-sum&AOk-")]
+    public async Task Status_echoes_the_mailbox_name_encoded_exactly_once(
+        string path,
+        string wire)
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, path, existsCount: 3);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        string status = Wire(await ExecuteAsync(processor, $"a1 STATUS {wire} (MESSAGES)"));
+
+        status.ShouldBe($"* STATUS {wire} (MESSAGES 3)\r\na1 OK STATUS completed\r\n");
+    }
+
+    /// <summary>
+    /// The same name through LIST and through STATUS must be spelled the same way, or a client
+    /// keying its folder cache by name drops one of the two.
+    /// </summary>
+    [Fact]
+    public async Task List_and_status_spell_the_same_mailbox_the_same_way()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "Jänner", existsCount: 1);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        string list = Wire(await ExecuteAsync(processor, "a1 LIST \"\" \"*\""));
+        string status = Wire(await ExecuteAsync(processor, "a2 STATUS J&AOQ-nner (MESSAGES)"));
+
+        list.ShouldContain("J&AOQ-nner");
+        status.ShouldContain("J&AOQ-nner");
+        status.ShouldNotContain("J&-AOQ-nner");
+    }
+
+    /// <summary>
+    /// A section specifier may contain a space — RFC 3501 §9's
+    /// <c>section-msgtext = … "HEADER.FIELDS" [".NOT"] SP header-list …</c> with
+    /// <c>header-list = "(" header-fld-name *(SP header-fld-name) ")"</c> — so the data-item
+    /// argument cannot be split on spaces. It used to be, which turned the commonest real client
+    /// request into a protocol syntax error instead of the "can't fetch that data" §6.4.5
+    /// provides for.
+    /// </summary>
+    [Theory]
+    [InlineData("a2 FETCH 1 BODY[HEADER.FIELDS (DATE FROM)]")]
+    [InlineData("a2 FETCH 1 BODY.PEEK[HEADER.FIELDS (DATE FROM SUBJECT)]")]
+    [InlineData("a2 FETCH 1 BODY[HEADER.FIELDS.NOT (RECEIVED)]")]
+    [InlineData("a2 UID FETCH 1:* (UID RFC822.SIZE FLAGS BODY.PEEK[HEADER.FIELDS (From To)])")]
+    [InlineData("a2 FETCH 1 (FLAGS BODY[HEADER.FIELDS (DATE)])")]
+    public async Task A_section_specifier_containing_a_space_is_refused_by_name_not_as_a_syntax_error(
+        string line)
+    {
+        string wire = Wire(await ExecuteAsync(await FetchableAsync(), line));
+
+        wire.ShouldContain("a2 NO ");
+        wire.ShouldContain("not implemented yet");
+        wire.ShouldNotContain("BAD");
+    }
+
+    /// <summary>
+    /// Bracket awareness must not swallow a genuinely malformed argument: an unbalanced bracket
+    /// is a syntax error, and still earns BAD.
+    /// </summary>
+    [Theory]
+    [InlineData("a2 FETCH 1 BODY[HEADER.FIELDS (DATE FROM)")]
+    [InlineData("a2 FETCH 1 BODY[HEADER.FIELDS (DATE FROM]")]
+    [InlineData("a2 FETCH 1 (FLAGS BODY[HEADER)")]
+    [InlineData("a2 FETCH 1 BODY]")]
+    public async Task An_unbalanced_bracket_is_still_a_syntax_error(string line) =>
+        Wire(await ExecuteAsync(await FetchableAsync(), line)).ShouldContain("a2 BAD ");
+
+    /// <summary>
+    /// The items that are stored columns still work when a bracketed item sits beside them in
+    /// the same list — the tokeniser must not disturb the ordinary case.
+    /// </summary>
+    [Fact]
+    public async Task An_ordinary_item_list_is_unaffected_by_bracket_awareness()
+    {
+        string wire = Wire(await ExecuteAsync(await FetchableAsync(), "a2 FETCH 1 (UID FLAGS)"));
+
+        wire.ShouldBe("* 1 FETCH (UID 3 FLAGS (\\Seen))\r\na2 OK FETCH completed\r\n");
+    }
 }

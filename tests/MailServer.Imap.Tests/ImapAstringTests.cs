@@ -270,7 +270,8 @@ public sealed class ImapAstringReaderTests
     [Fact]
     public void Nothing_is_normalised()
     {
-        // Mailbox names are case-sensitive (RFC 3501 section 5.1), and INBOX's exception is the
+        // This server matches mailbox names exactly - RFC 3501 section 5.1 leaves that open for
+        // every name but INBOX - and INBOX's exception is the
         // caller's to apply. A reader that folded case would make two mailboxes look like one.
         new ImapAstringReader("inbox").Read().Value.ShouldBe("inbox");
         new ImapAstringReader("MyFolder").Read().Value.ShouldBe("MyFolder");

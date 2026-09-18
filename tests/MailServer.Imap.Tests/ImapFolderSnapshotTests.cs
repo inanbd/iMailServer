@@ -43,7 +43,8 @@ public sealed class ImapMailboxPathTests
     [InlineData("Entwürfe")]
     public void Every_other_name_is_returned_exactly_as_it_arrived(string path)
     {
-        // The other half of section 5.1: "Other mailbox names are case-sensitive." A folder name
+        // Section 5.1 settles only INBOX; for everything else "The interpretation of all other
+        // names is implementation-dependent". This server matches exactly. A folder name
         // is the user's own text, and this server has no business deciding two spellings of it
         // are the same folder.
         ImapMailboxPath.Canonical(path).ShouldBe(path);

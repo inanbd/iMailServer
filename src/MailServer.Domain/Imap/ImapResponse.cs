@@ -749,10 +749,13 @@ public static class ImapResponses
     /// doing the pairing in one place makes that mismatch unexpressible.
     /// </para>
     /// <para>
-    /// Only the items asked for are reported, in the order asked. §6.3.10's own example does the
-    /// same — <c>C: A042 STATUS blurdybloop (UIDNEXT MESSAGES)</c> is answered
-    /// <c>S: * STATUS blurdybloop (MESSAGES 231 UIDNEXT 44292)</c> — so a server may reorder,
-    /// but there is nothing to gain by it.
+    /// Only the items asked for are reported, and in the order asked — which is this server's
+    /// choice rather than a requirement, because §9's <c>status-att-list</c> imposes no order.
+    /// <b>§6.3.10's own example in fact reorders</b>: <c>C: A042 STATUS blurdybloop (UIDNEXT
+    /// MESSAGES)</c> is answered <c>S: * STATUS blurdybloop (MESSAGES 231 UIDNEXT 44292)</c>, the
+    /// other way round. So reordering is plainly permitted; echoing the requested order is done
+    /// because it makes a packet capture legible beside the command that prompted it, and for no
+    /// other reason.
     /// </para>
     /// </remarks>
     /// <param name="name">The mailbox, as the client named it. Encoded and quoted here.</param>

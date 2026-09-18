@@ -168,6 +168,31 @@ of.
 a million messages builds a million response objects before any of them is written. That is
 within the current `ImapCommandResult` shape and is the next thing to change for large mailboxes.
 
+## Known divergence: folder-name case depends on the database provider
+
+**On SQLite folder names are matched exactly; on a default-collation SQL Server they are not.**
+This server's design is exact matching — RFC 3501 §5.1 takes no position on non-`INBOX` names
+("The interpretation of all other names is implementation-dependent") and this product chooses
+the case-sensitive one of the three dispositions §5.1 lists, because a folder name is the user's
+own text. That choice is true of SQLite, whose default `TEXT` collation is `BINARY`. It is not
+true of SQL Server: `MailboxFolders.Path` is declared `NVARCHAR(512)` with no `COLLATE` clause,
+so it inherits the database collation, and the common installation default is case-**in**sensitive.
+
+Two observable consequences on SQL Server:
+
+- `SELECT receipts` opens a folder called `Receipts`, where SQLite answers `NO`.
+- `Receipts` and `receipts` cannot both exist, because `UX_MailboxFolders_Path` is unique and
+  folds them together. The same pair is legal on SQLite, so a mailbox created there can fail to
+  import.
+
+**Not fixed here, deliberately.** The fix is `COLLATE Latin1_General_BIN2` on the column and its
+unique index, which means altering an existing table — and this repository refuses to apply a
+migration marked `@Destructive` until the backup subsystem lands in Milestone 13, while leaving
+such a migration unmarked would misdescribe it. Tightening case-insensitive to case-sensitive
+cannot lose rows (the existing unique index already forbade the colliding pairs), so the change
+is safe whenever it is scheduled; it is a deployment decision rather than a code one. Recorded
+here so the claim "this server matches folder names exactly" is not read as unconditional.
+
 ## STORE
 
 Implemented for `FLAGS`, `+FLAGS` and `-FLAGS`, each with the optional `.SILENT` suffix — the
@@ -175,10 +200,17 @@ only data item RFC 3501 §6.4.6 defines for the command.
 
 **The untagged `FETCH` responses report what was written, not what was asked for.** §6.4.6: "The
 new value of the flags is returned as if a FETCH of those flags was done." The write reads the
-result back inside the same transaction, which is what closes the race the RFC's own note names:
-"The intent is that the status of the flags is determinate without a race condition." A message
-already in the requested state is skipped for the write and still reported, because the response
-is the new value rather than a list of what changed.
+result back inside the same transaction it wrote in, so the value reported is the value stored
+rather than the value asked for — those differ whenever a flag was already set or could not be
+stored at all. A message already in the requested state is skipped for the write and still
+reported, because the response is the new value rather than a list of what changed.
+
+§6.4.6 has a separate note that this server does **not** yet satisfy: "Regardless of whether or
+not the `.SILENT` suffix was used, the server SHOULD send an untagged FETCH response if a change
+to a message's flags from an external source is observed. The intent is that the status of the
+flags is determinate without a race condition." Observing an external change needs a notification
+path that does not exist until `IDLE` lands, so the SHOULD is unmet and recorded here rather than
+claimed. The transaction above is a different guarantee and does not discharge it.
 
 **`\Recent` survives every mode, including `FLAGS`.** §6.4.6 puts the exception inside the
 sentence — "Replace the flags for the message (other than `\Recent`) with the argument" — and

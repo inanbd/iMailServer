@@ -281,12 +281,15 @@ public static class ImapFetchItems
 
         if (trimmed[0] != '(')
         {
-            // Bare: a macro, or exactly one data item. Anything after it is a second argument the
-            // grammar has nowhere to put.
-            if (trimmed.Contains(' '))
+            // Bare: a macro, or exactly one data item. A space does not settle it - a section
+            // specifier may contain one - so the argument is tokenised and must come to exactly
+            // one token.
+            if (!TryTokenise(trimmed, out List<string> bare) || bare.Count != 1)
             {
                 return false;
             }
+
+            trimmed = bare[0];
 
             if (TryParseMacro(trimmed, out IReadOnlyList<ImapFetchItem> expanded))
             {
@@ -308,9 +311,8 @@ public static class ImapFetchItems
             return false;
         }
 
-        string[] names = trimmed[1..^1].Split(' ', StringSplitOptions.RemoveEmptyEntries);
-
-        if (names.Length is 0 or > MaxItemCount)
+        if (!TryTokenise(trimmed[1..^1], out List<string> names) ||
+            names.Count is 0 or > MaxItemCount)
         {
             return false;
         }
@@ -333,6 +335,94 @@ public static class ImapFetchItems
         }
 
         items = parsed;
+        return true;
+    }
+
+    /// <summary>
+    /// Splits a data-item argument into <c>fetch-att</c> tokens.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A space is not always a separator, which is why this is not a <c>Split</c>.</b> RFC 3501
+    /// §9 puts a space inside a single <c>fetch-att</c>: <c>section-msgtext = "HEADER" /
+    /// "HEADER.FIELDS" [".NOT"] SP header-list / "TEXT"</c>, and
+    /// <c>header-list = "(" header-fld-name *(SP header-fld-name) ")"</c>. So
+    /// <c>BODY[HEADER.FIELDS (DATE FROM)]</c> is one item containing two spaces and a nested
+    /// list — and it is the shape a real client sends on every folder open. Splitting on spaces
+    /// tears it into fragments that parse as nothing, which turns a request this server merely
+    /// cannot serve into a protocol syntax error: §6.4.5 separates "NO - fetch error: can't fetch
+    /// that data" from "BAD - command unknown or arguments invalid", and a client told <c>BAD</c>
+    /// goes looking for a fault that is not there.
+    /// </para>
+    /// <para>
+    /// Brackets are tracked because only they can contain a separator-space; parentheses are
+    /// tracked only inside brackets, because that is the one place §9 nests them within an item.
+    /// An unbalanced bracket is a malformed argument rather than an unsupported one, and is
+    /// refused.
+    /// </para>
+    /// </remarks>
+    private static bool TryTokenise(string text, out List<string> tokens)
+    {
+        tokens = [];
+
+        int brackets = 0;
+        int parens = 0;
+        int start = 0;
+
+        for (int i = 0; i < text.Length; i++)
+        {
+            char c = text[i];
+
+            switch (c)
+            {
+                case '[':
+                    brackets++;
+                    break;
+
+                case ']':
+                    if (--brackets < 0)
+                    {
+                        return false;
+                    }
+
+                    break;
+
+                case '(' when brackets > 0:
+                    parens++;
+                    break;
+
+                case ')' when brackets > 0:
+                    if (--parens < 0)
+                    {
+                        return false;
+                    }
+
+                    break;
+
+                case ' ' when brackets == 0:
+                    if (i > start)
+                    {
+                        tokens.Add(text[start..i]);
+                    }
+
+                    start = i + 1;
+                    break;
+
+                default:
+                    break;
+            }
+        }
+
+        if (brackets != 0 || parens != 0)
+        {
+            return false;
+        }
+
+        if (start < text.Length)
+        {
+            tokens.Add(text[start..]);
+        }
+
         return true;
     }
 }

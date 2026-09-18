@@ -643,11 +643,29 @@ public sealed class ImapResponseTests
     }
 
     /// <summary>
-    /// RFC 3501 §6.3.10's own example, verbatim: C: A042 STATUS blurdybloop (UIDNEXT MESSAGES)
-    /// answered S: * STATUS blurdybloop (MESSAGES 231 UIDNEXT 44292).
+    /// RFC 3501 §6.3.10's own exchange is <c>C: A042 STATUS blurdybloop (UIDNEXT MESSAGES)</c>
+    /// answered <c>S: * STATUS blurdybloop (MESSAGES 231 UIDNEXT 44292)</c> — note that the
+    /// example <b>reorders</b>. This server keeps the requested order instead, so its answer to
+    /// that command differs from the example's and both are conformant: §9's
+    /// <c>status-att-list</c> imposes no order. Asserted against the command rather than against
+    /// the example's response, so the test says what this server actually does.
     /// </summary>
     [Fact]
-    public void The_rfcs_own_status_example_is_reproduced() =>
+    public void The_rfcs_own_status_command_is_answered_in_the_order_asked() =>
+        ImapResponses
+            .Status(
+                "blurdybloop",
+                [ImapStatusItem.UidNext, ImapStatusItem.Messages],
+                StatusOf(messageCount: 231, nextUid: 44_292))
+            .Format()
+            .ShouldBe("* STATUS blurdybloop (UIDNEXT 44292 MESSAGES 231)\r\n");
+
+    /// <summary>
+    /// The example's own response shape is still reachable — it is what a client asking in that
+    /// order gets — so the numbers themselves are pinned to the RFC's.
+    /// </summary>
+    [Fact]
+    public void The_rfcs_own_status_numbers_are_reported_as_it_writes_them() =>
         ImapResponses
             .Status(
                 "blurdybloop",

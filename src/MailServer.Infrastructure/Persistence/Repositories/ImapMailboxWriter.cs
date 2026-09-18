@@ -39,11 +39,11 @@ internal sealed class ImapMailboxWriter(
     /// <remarks>
     /// <para>
     /// The new value is computed in C# and written as a literal rather than derived in SQL with
-    /// <c>|</c> and <c>&amp;~</c>. Bitwise operators are the one piece of arithmetic whose
-    /// spelling and precedence differ most between SQLite and SQL Server — SQL Server has no
-    /// <c>~</c> for a signed <c>int</c> in the same shape, and its <c>&amp;</c> binds differently
-    /// from SQLite's — and the values here are already known per message, so there is nothing to
-    /// gain by pushing the arithmetic down and a dialect divergence to lose.
+    /// <c>|</c> and <c>&amp;~</c>. Not because the operators are unavailable — both providers have
+    /// them — but because there is nothing left for the database to work out:
+    /// <see cref="ImapStoreRequest.Apply"/> has already produced each message's final value, and
+    /// that value is what <c>STORE</c> must report back. Deriving it a second time in SQL would be
+    /// a second implementation of the one rule that must not differ, in a dialect where it could.
     /// </para>
     /// <para>
     /// <c>MailboxId</c> is in the <c>WHERE</c> clause beside <c>FolderId</c>, as in every read:

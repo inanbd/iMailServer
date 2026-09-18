@@ -381,7 +381,8 @@ public sealed class ImapMailboxPatternTests
     }
 
     /// <summary>
-    /// RFC 3501 §5.1 makes folder names case-sensitive apart from INBOX, so Work/Q1 says nothing
+    /// This server matches folder names exactly — RFC 3501 §5.1 leaves that open for every name
+    /// but INBOX — so Work/Q1 says nothing
     /// about a folder called work.
     /// </summary>
     [Fact]

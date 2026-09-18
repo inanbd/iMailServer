@@ -359,7 +359,7 @@ internal sealed class ImapMailboxReader(
                     ct))
                 .ConfigureAwait(false);
 
-            return Summaries([.. rows], set, byUid);
+            return Summaries(rows as IReadOnlyList<MessageSummaryRow> ?? [.. rows], set, byUid);
         }, cancellationToken);
     }
 
@@ -398,11 +398,18 @@ internal sealed class ImapMailboxReader(
         MessageSummaryRow last = rows[^1];
         long maxValue = byUid ? last.Uid : last.Seq;
 
+        // Resolved ONCE for the whole folder rather than once per message. ImapSequenceSet.Contains
+        // resolves internally on every call, allocating an array the size of the set - so asking it
+        // per message turns a set the client chose the size of into an allocation multiplied by the
+        // number of messages, which is a client-controlled amplifier rather than a constant. The set
+        // is bounded at ImapSequenceSet.MaxSegments and the folder is not.
+        IReadOnlyList<(long Start, long End)> ranges = set.Resolve(maxValue);
+
         List<ImapMessageSummary> summaries = [];
 
         foreach (MessageSummaryRow row in rows)
         {
-            if (set.Contains(byUid ? row.Uid : row.Seq, maxValue))
+            if (Contains(ranges, byUid ? row.Uid : row.Seq))
             {
                 summaries.Add(new ImapMessageSummary(
                     row.Seq,
@@ -414,5 +421,19 @@ internal sealed class ImapMailboxReader(
         }
 
         return summaries;
+    }
+
+    /// <summary>Whether an already-resolved set of ranges contains a number.</summary>
+    private static bool Contains(IReadOnlyList<(long Start, long End)> ranges, long number)
+    {
+        foreach ((long start, long end) in ranges)
+        {
+            if (number >= start && number <= end)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
