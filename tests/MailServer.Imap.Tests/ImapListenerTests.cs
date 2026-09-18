@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using MailServer.Application.Abstractions.Certificates;
+using MailServer.Application.Abstractions.Repositories;
 using MailServer.Application.Abstractions.Smtp;
 using MailServer.Domain.Enums;
 using MailServer.Infrastructure.Imap;
@@ -32,6 +33,7 @@ public sealed class ImapListenerTests : IAsyncDisposable
         services.AddLogging(b => b.AddProvider(NullLoggerProvider.Instance));
         services.AddSingleton<ITlsCertificateProvider>(_certificates);
         services.AddSingleton<IMailboxAuthenticator, ScriptedImapAuthenticator>();
+        services.AddSingleton<IImapMailboxReader, ScriptedImapMailboxReader>();
         services.AddScoped<ImapConnectionHandler>();
 
         _services = services.BuildServiceProvider();

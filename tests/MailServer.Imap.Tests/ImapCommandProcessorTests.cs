@@ -1,4 +1,6 @@
+using MailServer.Application.Abstractions.Repositories;
 using MailServer.Application.Abstractions.Smtp;
+using MailServer.Domain.Entities;
 using MailServer.Domain.Enums;
 using MailServer.Domain.Imap;
 using MailServer.Domain.Smtp;
@@ -50,6 +52,63 @@ internal sealed class ScriptedImapAuthenticator : IMailboxAuthenticator
     }
 }
 
+/// <summary>A mailbox reader answering from an in-memory set of folders.</summary>
+/// <remarks>
+/// The real reader is covered against a real SQLite database in
+/// <c>MailServer.Persistence.Tests</c>. This one exists so the command surface can be driven
+/// over every folder shape that matters — empty, all read, some unseen, belonging to somebody
+/// else — without a database standing between the test and what it is asserting.
+/// </remarks>
+internal sealed class ScriptedImapMailboxReader : IImapMailboxReader
+{
+    private readonly Dictionary<(Guid Mailbox, string Path), ImapFolderSnapshot> _folders = [];
+
+    /// <summary>Every (mailbox, path) pair this reader was asked for.</summary>
+    public List<(Guid Mailbox, string Path)> Asked { get; } = [];
+
+    public ScriptedImapMailboxReader Add(
+        MailboxId mailboxId,
+        string path,
+        long existsCount = 0,
+        long? firstUnseen = null,
+        long uidValidity = 3_857_529_045,
+        long nextUid = 1,
+        FolderSpecialUse specialUse = FolderSpecialUse.None)
+    {
+        MailboxFolder folder = new(
+            new MailboxFolderId(Guid.NewGuid()),
+            mailboxId,
+            path,
+            specialUse,
+            uidValidity,
+            nextUid,
+            isSubscribed: true,
+            DateTimeOffset.UnixEpoch,
+            null);
+
+        _folders[(mailboxId.Value, path)] = new ImapFolderSnapshot(folder, existsCount, firstUnseen);
+
+        return this;
+    }
+
+    public Task<ImapFolderSnapshot?> OpenFolderAsync(
+        MailboxId mailboxId,
+        string path,
+        CancellationToken cancellationToken)
+    {
+        // The real reader applies the INBOX rule in its WHERE clause; this applies it here, so
+        // both agree about what a client's name refers to.
+        string canonical = ImapMailboxPath.Canonical(path);
+
+        Asked.Add((mailboxId.Value, canonical));
+
+        return Task.FromResult(
+            _folders.TryGetValue((mailboxId.Value, canonical), out ImapFolderSnapshot? snapshot)
+                ? snapshot
+                : null);
+    }
+}
+
 public sealed class ImapCommandProcessorTests
 {
     private static readonly DateTimeOffset Start = new(2026, 3, 1, 9, 0, 0, TimeSpan.Zero);
@@ -62,12 +121,14 @@ public sealed class ImapCommandProcessorTests
         ImapListenerRole role = ImapListenerRole.ImplicitTls,
         bool authAvailable = true,
         IMailboxAuthenticator? authenticator = null,
-        int maxAttempts = 3) =>
+        int maxAttempts = 3,
+        IImapMailboxReader? mailboxes = null) =>
         new(
             session ?? Session(),
             new ImapProcessorOptions("AetherMail", role, authAvailable, maxAttempts),
             NullLogger.Instance,
-            authenticator);
+            authenticator,
+            mailboxes);
 
     private static ImapCommand Parse(string line)
     {
@@ -251,6 +312,273 @@ public sealed class ImapCommandProcessorTests
         capabilities.ShouldNotContain("NAMESPACE");
         capabilities.ShouldNotContain("UNSELECT");
         capabilities.ShouldNotContain("MOVE");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // SELECT and EXAMINE. RFC 3501 sections 6.3.1 and 6.3.2.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>An authenticated processor with one folder in the authenticated mailbox.</summary>
+    private static async Task<(ImapCommandProcessor Processor, ScriptedImapMailboxReader Mailboxes)>
+        SelectableAsync(
+            string path = "INBOX",
+            long existsCount = 0,
+            long? firstUnseen = null,
+            long uidValidity = 3_857_529_045,
+            long nextUid = 1)
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, path, existsCount, firstUnseen, uidValidity, nextUid);
+
+        ImapCommandProcessor processor = Processor(authenticator: authenticator, mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        return (processor, mailboxes);
+    }
+
+    [Fact]
+    public async Task Select_emits_the_responses_rfc_3501_asks_for_in_order()
+    {
+        (ImapCommandProcessor processor, _) = await SelectableAsync(
+            existsCount: 172,
+            firstUnseen: 12,
+            uidValidity: 3_857_529_045,
+            nextUid: 4392);
+
+        ImapCommandResult result = await ExecuteAsync(processor, "a1 SELECT INBOX");
+
+        string[] lines = [.. result.Responses.Select(r => r.Format().TrimEnd('\r', '\n'))];
+
+        lines.ShouldBe(
+        [
+            "* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)",
+            "* 172 EXISTS",
+            "* 0 RECENT",
+            "* OK [UNSEEN 12] First unseen message",
+            "* OK [PERMANENTFLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)] Flags permitted",
+            "* OK [UIDVALIDITY 3857529045] UIDs valid",
+            "* OK [UIDNEXT 4392] Predicted next UID",
+            "a1 OK [READ-WRITE] SELECT completed",
+        ]);
+    }
+
+    [Fact]
+    public async Task Select_moves_the_session_into_the_selected_state()
+    {
+        (ImapCommandProcessor processor, _) = await SelectableAsync(uidValidity: 999);
+
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+
+        processor.Session.State.ShouldBe(ImapSessionState.Selected);
+        processor.Session.SelectedFolderId.ShouldNotBeNull();
+        processor.Session.SelectedFolderUidValidity.ShouldBe(999);
+        processor.Session.IsSelectedReadOnly.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task Examine_opens_the_same_mailbox_read_only()
+    {
+        // RFC 3501 section 6.3.2: "identical to SELECT and returns the same output; however, the
+        // selected mailbox is identified as read-only".
+        (ImapCommandProcessor processor, _) = await SelectableAsync(existsCount: 2);
+
+        ImapCommandResult result = await ExecuteAsync(processor, "a1 EXAMINE INBOX");
+
+        string wire = Wire(result);
+
+        wire.ShouldContain("* 2 EXISTS");
+        wire.ShouldContain("[PERMANENTFLAGS ()]");
+        wire.ShouldContain("a1 OK [READ-ONLY] EXAMINE completed");
+        processor.Session.IsSelectedReadOnly.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task An_empty_permanentflags_list_is_what_read_only_means()
+    {
+        // Empty and meaningful: nothing may be changed, so nothing persists.
+        (ImapCommandProcessor processor, _) = await SelectableAsync();
+
+        Wire(await ExecuteAsync(processor, "a1 EXAMINE INBOX"))
+            .ShouldContain("* OK [PERMANENTFLAGS ()] Flags permitted");
+    }
+
+    [Fact]
+    public async Task The_unseen_line_is_omitted_when_nothing_is_unseen()
+    {
+        // RFC 3501 section 9 types the code's argument as an nz-number, so there is no way to
+        // say "none": the whole line goes rather than being sent as an ungrammatical [UNSEEN 0].
+        (ImapCommandProcessor processor, _) = await SelectableAsync(existsCount: 4, firstUnseen: null);
+
+        string wire = Wire(await ExecuteAsync(processor, "a1 SELECT INBOX"));
+
+        wire.ShouldNotContain("UNSEEN");
+        wire.ShouldContain("* 4 EXISTS");
+    }
+
+    [Fact]
+    public async Task An_empty_mailbox_selects_and_reports_zero()
+    {
+        (ImapCommandProcessor processor, _) = await SelectableAsync(existsCount: 0);
+
+        string wire = Wire(await ExecuteAsync(processor, "a1 SELECT INBOX"));
+
+        wire.ShouldContain("* 0 EXISTS");
+        wire.ShouldContain("* 0 RECENT");
+        wire.ShouldNotContain("UNSEEN");
+        processor.Session.State.ShouldBe(ImapSessionState.Selected);
+    }
+
+    [Fact]
+    public async Task Recent_is_always_zero()
+    {
+        // \Recent is reserved and never set, so zero is what this server's own state says - a
+        // deliberate deviation from RFC 3501 section 2.3.2's SHOULD, not conformance to it.
+        (ImapCommandProcessor processor, _) = await SelectableAsync(existsCount: 9, firstUnseen: 1);
+
+        Wire(await ExecuteAsync(processor, "a1 SELECT INBOX")).ShouldContain("* 0 RECENT");
+    }
+
+    [Fact]
+    public async Task Selecting_a_mailbox_that_is_not_there_is_refused_and_selects_nothing()
+    {
+        // RFC 3501 section 6.3.1: "if a SELECT command that fails is attempted, no mailbox is
+        // selected." A session left with its old folder open would have a following FETCH
+        // silently read the wrong one.
+        (ImapCommandProcessor processor, _) = await SelectableAsync();
+
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+        processor.Session.State.ShouldBe(ImapSessionState.Selected);
+
+        ImapCommandResult result = await ExecuteAsync(processor, "a2 SELECT Nonexistent");
+
+        Wire(result).ShouldBe("a2 NO No such mailbox\r\n");
+        processor.Session.State.ShouldBe(ImapSessionState.Authenticated);
+        processor.Session.SelectedFolderId.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task A_failed_select_does_not_offer_trycreate()
+    {
+        // RFC 3501 sections 6.3.11 and 6.4.7 attach that code to APPEND and COPY, where creating
+        // the mailbox and retrying is the recovery. A client cannot recover from selecting a
+        // folder that is not there by creating one - it wanted the mail that was in it.
+        (ImapCommandProcessor processor, _) = await SelectableAsync();
+
+        Wire(await ExecuteAsync(processor, "a1 SELECT Nonexistent")).ShouldNotContain("TRYCREATE");
+    }
+
+    [Fact]
+    public async Task Switching_mailboxes_deselects_the_old_one_first()
+    {
+        // RFC 3501 section 6.3.1: "the SELECT command automatically deselects any currently
+        // selected mailbox before attempting the new selection". Unlike CLOSE, this never
+        // expunges.
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", uidValidity: 111)
+            .Add(authenticator.KnownMailboxId, "Archive", uidValidity: 222);
+
+        ImapCommandProcessor processor = Processor(authenticator: authenticator, mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+        processor.Session.SelectedFolderUidValidity.ShouldBe(111);
+
+        await ExecuteAsync(processor, "a2 SELECT Archive");
+        processor.Session.SelectedFolderUidValidity.ShouldBe(222);
+        processor.Session.State.ShouldBe(ImapSessionState.Selected);
+    }
+
+    [Theory]
+    [InlineData("inbox")]
+    [InlineData("InBoX")]
+    [InlineData("INBOX")]
+    public async Task The_inbox_is_reachable_in_any_case(string asked)
+    {
+        (ImapCommandProcessor processor, _) = await SelectableAsync();
+
+        Wire(await ExecuteAsync(processor, $"a1 SELECT {asked}")).ShouldContain("a1 OK [READ-WRITE]");
+    }
+
+    [Fact]
+    public async Task A_quoted_mailbox_name_is_read_correctly()
+    {
+        (ImapCommandProcessor processor, _) = await SelectableAsync("My Folder");
+
+        Wire(await ExecuteAsync(processor, "a1 SELECT \"My Folder\""))
+            .ShouldContain("a1 OK [READ-WRITE]");
+    }
+
+    [Fact]
+    public async Task A_modified_utf7_mailbox_name_is_decoded_before_the_lookup()
+    {
+        // The wire form is modified UTF-7 (RFC 3501 section 5.1.3); the stored path is the
+        // decoded name. A lookup on the undecoded form would never find a non-ASCII folder.
+        (ImapCommandProcessor processor, ScriptedImapMailboxReader mailboxes) =
+            await SelectableAsync("Entw\u00fcrfe");
+
+        Wire(await ExecuteAsync(processor, "a1 SELECT Entw&APw-rfe"))
+            .ShouldContain("a1 OK [READ-WRITE]");
+
+        mailboxes.Asked.ShouldContain(a => a.Path == "Entw\u00fcrfe");
+    }
+
+    [Fact]
+    public async Task A_mailbox_name_that_is_not_modified_utf7_is_refused_without_being_echoed()
+    {
+        (ImapCommandProcessor processor, _) = await SelectableAsync();
+
+        string wire = Wire(await ExecuteAsync(processor, "a1 SELECT &AAA-secret&"));
+
+        wire.ShouldContain(" NO ");
+        wire.ShouldNotContain("secret");
+    }
+
+    [Theory]
+    [InlineData("a1 SELECT")]
+    [InlineData("a1 SELECT INBOX Archive")]
+    [InlineData("a1 SELECT \"unterminated")]
+    public async Task A_malformed_select_earns_a_bad(string line)
+    {
+        (ImapCommandProcessor processor, _) = await SelectableAsync();
+
+        string wire = Wire(await ExecuteAsync(processor, line));
+
+        wire.ShouldContain(" BAD ");
+        wire.ShouldContain("one mailbox name");
+    }
+
+    [Fact]
+    public async Task Select_only_ever_asks_for_the_authenticated_mailbox()
+    {
+        // The authorisation boundary as the processor sees it: the mailbox id comes from the
+        // session, never from the command, so there is nothing a client can send that would make
+        // this ask about somebody else's mail.
+        (ImapCommandProcessor processor, ScriptedImapMailboxReader mailboxes) = await SelectableAsync();
+
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+        await ExecuteAsync(processor, "a2 SELECT Archive");
+
+        Guid authenticated = processor.Session.AuthenticatedMailboxId!.Value.Value;
+
+        mailboxes.Asked.ShouldAllBe(a => a.Mailbox == authenticated);
+    }
+
+    [Fact]
+    public async Task Select_without_a_reader_configured_says_it_is_not_implemented()
+    {
+        // Null is a legitimate configuration rather than a missing dependency, and this is what
+        // makes the refusal honest rather than a stub that looks like success.
+        ImapCommandProcessor processor = Processor(authenticator: new ScriptedImapAuthenticator());
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        Wire(await ExecuteAsync(processor, "a1 SELECT INBOX")).ShouldContain("not implemented yet");
     }
 
     // ---------------------------------------------------------------------------------------

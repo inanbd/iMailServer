@@ -3,6 +3,7 @@ using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using MailServer.Application.Abstractions.Certificates;
+using MailServer.Application.Abstractions.Repositories;
 using MailServer.Application.Abstractions.Smtp;
 using MailServer.Domain.Enums;
 using MailServer.Domain.Imap;
@@ -66,6 +67,7 @@ public sealed record ImapConnectionOptions(
 public sealed class ImapConnectionHandler(
     ITlsCertificateProvider certificates,
     IMailboxAuthenticator authenticator,
+    IImapMailboxReader mailboxes,
     ILogger<ImapConnectionHandler> logger)
 {
     /// <summary>Handles one connection to completion.</summary>
@@ -109,7 +111,8 @@ public sealed class ImapConnectionHandler(
 
             ImapSessionContext session = new(remoteAddress, startedAt, implicitTls);
 
-            ImapCommandProcessor processor = new(session, options.Processor, logger, authenticator);
+            ImapCommandProcessor processor =
+                new(session, options.Processor, logger, authenticator, mailboxes);
 
             ImapLineReader reader = new(stream, options.MaxLineOctets);
 

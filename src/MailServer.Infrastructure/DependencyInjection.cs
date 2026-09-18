@@ -188,6 +188,10 @@ public static class DependencyInjection
         services.TryAddSingleton<IMessageStore, FileSystemMessageStore>();
 
         services.TryAddScoped<IDeliveryRepository, DeliveryRepository>();
+
+        // The read side, separate from the write side because the two have different callers:
+        // local delivery writes and never reads, an IMAP session reads constantly.
+        services.TryAddScoped<IImapMailboxReader, ImapMailboxReader>();
         services.TryAddScoped<ILocalDeliveryService, LocalDeliveryService>();
         services.TryAddScoped<SmtpDataReceiver>();
         services.TryAddScoped<SmtpConnectionHandler>();

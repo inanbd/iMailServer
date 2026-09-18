@@ -5,6 +5,8 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using MailServer.Application.Abstractions.Certificates;
+using MailServer.Application.Abstractions.Repositories;
+using MailServer.Application.Abstractions.Smtp;
 using MailServer.Domain.Enums;
 using MailServer.Domain.ValueObjects;
 using MailServer.Infrastructure.Imap;
@@ -101,6 +103,8 @@ public sealed class ImapWireTests : IDisposable
     private async Task<(TcpClient Client, Task Served)> ConnectAsync(
         ImapConnectionOptions options,
         ITlsCertificateProvider? certificates = null,
+        IImapMailboxReader? mailboxes = null,
+        IMailboxAuthenticator? authenticator = null,
         CancellationToken cancellationToken = default)
     {
         TcpListener listener = new(IPAddress.Loopback, 0);
@@ -118,7 +122,8 @@ public sealed class ImapWireTests : IDisposable
 
         ImapConnectionHandler handler = new(
             certificates ?? _certificates,
-            new ScriptedImapAuthenticator(),
+            authenticator ?? new ScriptedImapAuthenticator(),
+            mailboxes ?? new ScriptedImapMailboxReader(),
             NullLogger<ImapConnectionHandler>.Instance);
 
         Task served = Task.Run(
@@ -343,9 +348,24 @@ public sealed class ImapWireTests : IDisposable
     }
 
     [Fact]
-    public async Task Login_succeeds_inside_the_upgraded_tunnel()
+    public async Task Login_then_select_works_inside_the_upgraded_tunnel()
     {
-        (TcpClient client, Task served) = await ConnectAsync(Options());
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(
+                authenticator.KnownMailboxId,
+                "INBOX",
+                existsCount: 3,
+                firstUnseen: 2,
+                uidValidity: 3_857_529_045,
+                nextUid: 12,
+                specialUse: FolderSpecialUse.Inbox);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
 
         using (client)
         {
@@ -368,13 +388,36 @@ public sealed class ImapWireTests : IDisposable
             completion.ShouldStartWith("a2 OK ");
             completion.ShouldContain("[CAPABILITY IMAP4rev1");
 
-            // In the authenticated state now, so a mailbox command is in sequence - and refused
-            // for the honest reason rather than as a sequencing error.
+            // A whole SELECT, over a real TLS connection, in the order RFC 3501 section 6.3.1's
+            // own example gives.
             await WriteLineAsync(tls, "a3 SELECT INBOX");
+            List<string> select = await ReadUntilTaggedAsync(tls, "a3");
+
+            select[0].ShouldBe("* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)");
+            select[1].ShouldBe("* 3 EXISTS");
+            select[2].ShouldBe("* 0 RECENT");
+            select[3].ShouldBe("* OK [UNSEEN 2] First unseen message");
+            select[4].ShouldBe(
+                "* OK [PERMANENTFLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)] Flags permitted");
+            select[5].ShouldBe("* OK [UIDVALIDITY 3857529045] UIDs valid");
+            select[6].ShouldBe("* OK [UIDNEXT 12] Predicted next UID");
+            select[7].ShouldBe("a3 OK [READ-WRITE] SELECT completed");
+
+            // Selected state now, so a selected-state command is in sequence - and refused for
+            // the honest reason rather than as a sequencing error.
+            await WriteLineAsync(tls, "a4 FETCH 1 FLAGS");
             (await ReadLineAsync(tls)).ShouldContain("not implemented yet");
 
-            await WriteLineAsync(tls, "a4 LOGOUT");
-            await ReadUntilTaggedAsync(tls, "a4");
+            // Lower case reaches the same folder: RFC 3501 section 5.1 makes INBOX the one
+            // case-insensitive mailbox name.
+            await WriteLineAsync(tls, "a5 EXAMINE inbox");
+            List<string> examine = await ReadUntilTaggedAsync(tls, "a5");
+
+            examine.ShouldContain("* OK [PERMANENTFLAGS ()] Flags permitted");
+            examine[^1].ShouldBe("a5 OK [READ-ONLY] EXAMINE completed");
+
+            await WriteLineAsync(tls, "a6 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a6");
         }
 
         await served;
@@ -592,6 +635,7 @@ public sealed class ImapWireTests : IDisposable
         ImapConnectionHandler handler = new(
             _certificates,
             new ScriptedImapAuthenticator(),
+            new ScriptedImapMailboxReader(),
             NullLogger<ImapConnectionHandler>.Instance);
 
         await Should.ThrowAsync<ArgumentNullException>(async () => await handler.HandleAsync(

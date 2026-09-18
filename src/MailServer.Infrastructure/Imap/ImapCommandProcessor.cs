@@ -1,3 +1,4 @@
+using MailServer.Application.Abstractions.Repositories;
 using MailServer.Application.Abstractions.Smtp;
 using MailServer.Domain.Enums;
 using MailServer.Domain.Imap;
@@ -111,6 +112,7 @@ public sealed class ImapCommandProcessor
     private readonly ImapProcessorOptions _options;
     private readonly ILogger _logger;
     private readonly IMailboxAuthenticator _authenticator;
+    private readonly IImapMailboxReader? _mailboxes;
 
     /// <summary>The mechanism mid-exchange, or null when no <c>AUTHENTICATE</c> is in flight.</summary>
     private ISaslMechanism? _mechanism;
@@ -128,7 +130,8 @@ public sealed class ImapCommandProcessor
         ImapSessionContext session,
         ImapProcessorOptions options,
         ILogger logger,
-        IMailboxAuthenticator? authenticator = null)
+        IMailboxAuthenticator? authenticator = null,
+        IImapMailboxReader? mailboxes = null)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(options);
@@ -141,6 +144,11 @@ public sealed class ImapCommandProcessor
         // Optional so a test can build a processor for the many paths that never authenticate.
         // A session that reaches LOGIN without one is refused, not crashed.
         _authenticator = authenticator ?? UnavailableAuthenticator.Instance;
+
+        // Null is a legitimate configuration rather than a missing dependency, and it is what
+        // makes the "not implemented yet" answers below honest rather than a stub: a processor
+        // built without a reader refuses every mailbox command instead of pretending.
+        _mailboxes = mailboxes;
     }
 
     /// <summary>The session this processor drives.</summary>
@@ -213,6 +221,8 @@ public sealed class ImapCommandProcessor
             ImapVerb.StartTls => StartTls(command.Tag),
             ImapVerb.Login => await LoginAsync(command, cancellationToken).ConfigureAwait(false),
             ImapVerb.Authenticate => await AuthenticateAsync(command, cancellationToken).ConfigureAwait(false),
+            ImapVerb.Select => await SelectAsync(command, readOnly: false, cancellationToken).ConfigureAwait(false),
+            ImapVerb.Examine => await SelectAsync(command, readOnly: true, cancellationToken).ConfigureAwait(false),
             _ => NotImplemented(command),
         };
     }
@@ -545,6 +555,126 @@ public sealed class ImapCommandProcessor
         _mechanism?.Dispose();
         _mechanism = null;
         _authenticatingTag = null;
+    }
+
+    /// <summary>
+    /// <c>SELECT</c> and <c>EXAMINE</c>. RFC 3501 §6.3.1 and §6.3.2.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// One method for both, because §6.3.2 defines <c>EXAMINE</c> as "identical to SELECT and
+    /// returns the same output; however, the selected mailbox is identified as read-only". Two
+    /// methods would be the same eight responses written twice, with the read-only flag as the
+    /// only difference and two places for it to be got wrong.
+    /// </para>
+    /// <para>
+    /// <b>The deselect happens first, and it happens even when the selection fails.</b>
+    /// §6.3.1: "if a SELECT command that fails is attempted, no mailbox is selected." A session
+    /// that had Inbox open and then asked for a folder that does not exist is left with nothing
+    /// open — not with Inbox still open. Leaving the old selection in place would mean a
+    /// following <c>FETCH</c> silently reads the wrong folder, which is the quiet,
+    /// wrong-mail-to-the-user failure this subsystem is most dangerous for.
+    /// </para>
+    /// <para>
+    /// The responses are in the order §6.3.1's own example gives, with the tagged completion
+    /// last — which the RFC does require. <c>RECENT</c> is emitted as a truthful zero and
+    /// <c>[UNSEEN]</c> is omitted when there is nothing unseen, both for the reasons
+    /// <see cref="ImapResponses.Recent"/> and <see cref="ImapFolderSnapshot.HasUnseen"/> give.
+    /// </para>
+    /// </remarks>
+    private async ValueTask<ImapCommandResult> SelectAsync(
+        ImapCommand command,
+        bool readOnly,
+        CancellationToken cancellationToken)
+    {
+        // Before anything can fail, so that every exit below leaves no mailbox selected unless
+        // it selected one itself.
+        _session.Deselect();
+
+        if (_mailboxes is null)
+        {
+            return NotImplemented(command);
+        }
+
+        if (_session.AuthenticatedMailboxId is null)
+        {
+            // Unreachable through the state machine, which refuses both commands before
+            // authentication. Answered rather than asserted because a caller bug must not be a
+            // dropped connection.
+            return ImapCommandResult.Single(ImapResponses.Bad(command.Tag, "Not authenticated"));
+        }
+
+        ImapAstringReader reader = new(command.Argument);
+
+        if (!reader.TryReadText(out string? wireName) || !reader.AtEnd)
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, $"{Describe(command.Verb)} expects one mailbox name"));
+        }
+
+        if (!ImapMailboxName.TryDecode(wireName, out string? path))
+        {
+            // The name did not decode, so it names no folder. Refused without being echoed:
+            // a malformed name is client text, and the one thing a refusal must not do is quote
+            // it back.
+            return ImapCommandResult.Single(
+                ImapResponses.No(command.Tag, "Mailbox name is not valid modified UTF-7"));
+        }
+
+        ImapFolderSnapshot? snapshot = await _mailboxes
+            .OpenFolderAsync(_session.AuthenticatedMailboxId.Value, path, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (snapshot is null)
+        {
+            // No [TRYCREATE]: RFC 3501 §6.3.11 and §6.4.7 attach that code to APPEND and COPY,
+            // where creating the mailbox and retrying is the recovery. A client cannot recover
+            // from selecting a folder that is not there by creating one - it wanted the mail
+            // that was supposed to be in it.
+            return ImapCommandResult.Single(ImapResponses.No(command.Tag, "No such mailbox"));
+        }
+
+        _session.Select(snapshot.FolderId, snapshot.UidValidity, readOnly);
+
+        List<ImapResponse> responses =
+        [
+            ImapResponses.Flags(ImapFlagNames.Settable),
+            ImapResponses.Exists(snapshot.ExistsCount),
+            ImapResponses.Recent(0),
+        ];
+
+        if (snapshot.HasUnseen)
+        {
+            responses.Add(ImapResponse.Untagged(
+                ImapResponseStatus.Ok,
+                "First unseen message",
+                ImapResponseCode.Unseen(snapshot.FirstUnseenSequenceNumber!.Value)));
+        }
+
+        responses.Add(ImapResponse.Untagged(
+            ImapResponseStatus.Ok,
+            "Flags permitted",
+
+            // Empty for EXAMINE, and meaningfully so: nothing may be changed, so nothing
+            // persists. RFC 3501 §6.3.2.
+            ImapResponseCode.PermanentFlags(readOnly ? MessageFlags.None : ImapFlagNames.Settable)));
+
+        responses.Add(ImapResponse.Untagged(
+            ImapResponseStatus.Ok,
+            "UIDs valid",
+            ImapResponseCode.UidValidity(snapshot.UidValidity)));
+
+        responses.Add(ImapResponse.Untagged(
+            ImapResponseStatus.Ok,
+            "Predicted next UID",
+            ImapResponseCode.UidNext(snapshot.UidNext)));
+
+        responses.Add(ImapResponses.Ok(
+            command.Tag,
+            $"{Describe(command.Verb)} completed",
+            readOnly ? ImapResponseCode.ReadOnly : ImapResponseCode.ReadWrite));
+
+        return new ImapCommandResult(responses);
     }
 
     /// <summary>

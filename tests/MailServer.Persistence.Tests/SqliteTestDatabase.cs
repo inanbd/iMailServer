@@ -166,6 +166,11 @@ public sealed class SqliteTestDatabase : IAsyncDisposable
                 database.ConnectionFactory,
                 AmbientSession,
                 database.Dialect);
+
+            ImapMailboxes = new ImapMailboxReader(
+                database.ConnectionFactory,
+                AmbientSession,
+                database.Dialect);
         }
 
         internal AmbientDbSession AmbientSession { get; }
@@ -183,6 +188,8 @@ public sealed class SqliteTestDatabase : IAsyncDisposable
         public IOutboundQueueRepository Outbound { get; }
 
         public IDeliveryRepository Deliveries { get; }
+
+        public IImapMailboxReader ImapMailboxes { get; }
     }
 }
 
