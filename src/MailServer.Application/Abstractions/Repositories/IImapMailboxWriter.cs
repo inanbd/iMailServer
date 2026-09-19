@@ -203,6 +203,54 @@ public interface IImapMailboxWriter
     /// in the requested state, not that it changed.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Copies messages into another folder, optionally removing them from this one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>One method for <c>COPY</c> and <c>MOVE</c>, because RFC 6851 defines the second in
+    /// terms of the first.</b> §3.3: a move "has the same effect for each message as this
+    /// sequence: 1. [UID] COPY 2. [UID] STORE +FLAGS.SILENT \DELETED 3. UID EXPUNGE" — and then
+    /// rules out the middle step's visible traces: "response codes for a STORE MUST NOT be
+    /// generated and the <c>\DELETED</c> flag MUST NOT be set for any message." So the removal
+    /// here is a deletion, never a flag.
+    /// </para>
+    /// <para>
+    /// <b>The copy gets a new UID and keeps everything else.</b> RFC 3501 §6.4.7: messages go
+    /// "to the end of the specified destination mailbox. The flags and internal date of the
+    /// message(s) SHOULD be preserved, and the Recent flag SHOULD be set, in the copy." The flags
+    /// and date are preserved; <c>\Recent</c> is not set, because this server never sets it
+    /// anywhere and a copy is no place to start.
+    /// </para>
+    /// <para>
+    /// <b>All of it in one transaction, which both RFCs demand in their own words.</b> §6.4.7:
+    /// "If the COPY command is unsuccessful for any reason, server implementations MUST restore
+    /// the destination mailbox to its state before the COPY attempt." RFC 6851 §3.3 is stricter
+    /// still for a move: "The server MUST leave each message in a state where it is in at least
+    /// one of the source or target mailboxes (no message can be lost or orphaned)." A half-done
+    /// move is the one outcome that loses mail.
+    /// </para>
+    /// <para>
+    /// The message content is not duplicated. A copy is another <c>Deliveries</c> row against the
+    /// same <c>Messages</c> row, which is what makes copying a large message cheap and what the
+    /// stored-once-delivered-many schema was shaped for.
+    /// </para>
+    /// </remarks>
+    /// <param name="removeFromSource">True for <c>MOVE</c>, false for <c>COPY</c>.</param>
+    /// <returns>
+    /// The outcome, and — for a move — the source sequence numbers that were removed, descending,
+    /// ready to be reported as untagged <c>EXPUNGE</c> responses.
+    /// </returns>
+    Task<ImapCopyResult> CopyAsync(
+        MailboxId mailboxId,
+        MailboxFolderId sourceFolderId,
+        ImapSequenceSet set,
+        bool byUid,
+        string targetPath,
+        bool removeFromSource,
+        DateTimeOffset now,
+        CancellationToken cancellationToken);
+
     Task<ImapFolderMutation> SetSubscriptionAsync(
         MailboxId mailboxId,
         string path,
@@ -210,6 +258,20 @@ public interface IImapMailboxWriter
         DateTimeOffset now,
         CancellationToken cancellationToken);
 }
+
+/// <summary>
+/// What a <c>COPY</c> or <c>MOVE</c> did.
+/// </summary>
+/// <param name="Outcome">Whether it ran, and why not if it did not.</param>
+/// <param name="RemovedSequenceNumbers">
+/// For a move, the source positions that went, highest first — the order RFC 3501 §7.4.1 permits
+/// and the one that needs no renumbering arithmetic. Always empty for a copy.
+/// </param>
+/// <param name="CopiedCount">How many messages were copied.</param>
+public sealed record ImapCopyResult(
+    ImapFolderMutation Outcome,
+    IReadOnlyList<long> RemovedSequenceNumbers,
+    int CopiedCount);
 
 /// <summary>
 /// What a folder-shaped command did, or why it did nothing.

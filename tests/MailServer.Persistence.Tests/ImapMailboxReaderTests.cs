@@ -1761,4 +1761,182 @@ public sealed class ImapMailboxReaderTests
             .Select(l => l.Path)
             .ShouldContain("Payroll");
     }
+    // ---------------------------------------------------------------------------------------
+    // COPY and MOVE against the real schema.
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task Copying_shares_the_stored_message_rather_than_duplicating_it()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId inbox) =
+            await SeedMessagesAsync(database, connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        await scope.ImapWrites.CreateFolderAsync(mailbox, "Archive", Moment, CancellationToken.None);
+
+        ImapCopyResult result = await scope.ImapWrites.CopyAsync(
+            mailbox,
+            inbox,
+            Set("1:*"),
+            byUid: false,
+            "Archive",
+            removeFromSource: false,
+            Moment,
+            CancellationToken.None);
+
+        result.Outcome.ShouldBe(ImapFolderMutation.Done);
+        result.CopiedCount.ShouldBe(4);
+
+        // Eight deliveries now, still four messages: a copy is another Deliveries row against the
+        // same Messages row, which is what makes copying a large message cheap.
+        (await connection.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM Deliveries")).ShouldBe(8);
+        (await connection.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM Messages")).ShouldBe(4);
+    }
+
+    /// <summary>
+    /// RFC 3501 §6.4.7: copies go "to the end of the specified destination mailbox", so they take
+    /// that mailbox's next UIDs and the counter moves.
+    /// </summary>
+    [Fact]
+    public async Task Copies_take_new_uids_from_the_destination_and_advance_its_counter()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId inbox) =
+            await SeedMessagesAsync(database, connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        await scope.ImapWrites.CreateFolderAsync(mailbox, "Archive", Moment, CancellationToken.None);
+
+        await scope.ImapWrites.CopyAsync(
+            mailbox, inbox, Set("1:2"), byUid: false, "Archive", false, Moment, CancellationToken.None);
+
+        ImapFolderSnapshot? archive = await scope.ImapMailboxes
+            .OpenFolderAsync(mailbox, "Archive", CancellationToken.None);
+
+        IReadOnlyList<ImapMessageSummary> copied = await scope.ImapMailboxes.ReadSummariesAsync(
+            mailbox, archive!.FolderId, Set("1:*"), byUid: false, CancellationToken.None);
+
+        copied.Select(m => m.Uid).ShouldBe([1, 2]);
+        archive.UidNext.ShouldBe(3);
+
+        // A second copy continues from there rather than reusing 1 and 2.
+        await scope.ImapWrites.CopyAsync(
+            mailbox, inbox, Set("3"), byUid: false, "Archive", false, Moment, CancellationToken.None);
+
+        IReadOnlyList<ImapMessageSummary> after = await scope.ImapMailboxes.ReadSummariesAsync(
+            mailbox, archive.FolderId, Set("1:*"), byUid: false, CancellationToken.None);
+
+        after.Select(m => m.Uid).ShouldBe([1, 2, 3]);
+    }
+
+    [Fact]
+    public async Task Copying_preserves_the_flags_and_internal_date()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId inbox) =
+            await SeedMessagesAsync(database, connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        await scope.ImapWrites.CreateFolderAsync(mailbox, "Archive", Moment, CancellationToken.None);
+
+        // Source message 3 carries \Flagged from the seeding helper.
+        await scope.ImapWrites.CopyAsync(
+            mailbox, inbox, Set("3"), byUid: false, "Archive", false, Moment, CancellationToken.None);
+
+        ImapFolderSnapshot? archive = await scope.ImapMailboxes
+            .OpenFolderAsync(mailbox, "Archive", CancellationToken.None);
+
+        IReadOnlyList<ImapMessageSummary> copied = await scope.ImapMailboxes.ReadSummariesAsync(
+            mailbox, archive!.FolderId, Set("1:*"), byUid: false, CancellationToken.None);
+
+        copied[0].Flags.ShouldBe(MessageFlags.Flagged);
+    }
+
+    /// <summary>
+    /// §6.4.7's MUST: "If the COPY command is unsuccessful for any reason, server implementations
+    /// MUST restore the destination mailbox to its state before the COPY attempt." A missing
+    /// destination is detected before anything is written, so there is nothing to restore.
+    /// </summary>
+    [Fact]
+    public async Task A_missing_destination_writes_nothing()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId inbox) =
+            await SeedMessagesAsync(database, connection);
+
+        ImapCopyResult result = await database.CreateScope().ImapWrites.CopyAsync(
+            mailbox, inbox, Set("1:*"), byUid: false, "Nowhere", false, Moment, CancellationToken.None);
+
+        result.Outcome.ShouldBe(ImapFolderMutation.NotFound);
+
+        (await connection.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM Deliveries")).ShouldBe(4);
+    }
+
+    /// <summary>
+    /// RFC 6851 §3.3: "The server MUST leave each message in a state where it is in at least one
+    /// of the source or target mailboxes (no message can be lost or orphaned)" and "SHOULD NOT
+    /// leave any message in both". After a move the count is unchanged and each is in one place.
+    /// </summary>
+    [Fact]
+    public async Task Moving_leaves_each_message_in_exactly_one_mailbox()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId inbox) =
+            await SeedMessagesAsync(database, connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        await scope.ImapWrites.CreateFolderAsync(mailbox, "Archive", Moment, CancellationToken.None);
+
+        ImapCopyResult result = await scope.ImapWrites.CopyAsync(
+            mailbox, inbox, Set("2:3"), byUid: false, "Archive", removeFromSource: true, Moment,
+            CancellationToken.None);
+
+        result.RemovedSequenceNumbers.ShouldBe([3, 2]);
+
+        // Four deliveries still - two in each folder, none lost and none duplicated.
+        (await connection.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM Deliveries")).ShouldBe(4);
+
+        IReadOnlyList<ImapMessageSummary> remaining = await scope.ImapMailboxes.ReadSummariesAsync(
+            mailbox, inbox, Set("1:*"), byUid: false, CancellationToken.None);
+
+        remaining.Select(m => m.Uid).ShouldBe([3, 19]);
+    }
+
+    [Fact]
+    public async Task Another_mailboxs_folder_cannot_be_copied_into()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId alice, MailboxFolderId aliceInbox) =
+            await SeedMessagesAsync(database, connection);
+
+        (MailboxId bob, _) = await SeedFolderAsync(connection, address: "bob@example.net");
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        await scope.ImapWrites.CreateFolderAsync(bob, "Payroll", Moment, CancellationToken.None);
+
+        // Alice names Bob's folder: scoped by MailboxId, so it does not exist for her.
+        ImapCopyResult result = await scope.ImapWrites.CopyAsync(
+            alice, aliceInbox, Set("1:*"), byUid: false, "Payroll", false, Moment,
+            CancellationToken.None);
+
+        result.Outcome.ShouldBe(ImapFolderMutation.NotFound);
+    }
 }

@@ -258,6 +258,8 @@ public sealed class ImapCommandProcessor
             ImapVerb.Rename => await FolderAsync(command, ImapFolderCommand.Rename, cancellationToken).ConfigureAwait(false),
             ImapVerb.Subscribe => await FolderAsync(command, ImapFolderCommand.Subscribe, cancellationToken).ConfigureAwait(false),
             ImapVerb.Unsubscribe => await FolderAsync(command, ImapFolderCommand.Unsubscribe, cancellationToken).ConfigureAwait(false),
+            ImapVerb.Copy => await CopyAsync(command, move: false, cancellationToken).ConfigureAwait(false),
+            ImapVerb.Move => await CopyAsync(command, move: true, cancellationToken).ConfigureAwait(false),
             _ => NotImplemented(command),
         };
     }
@@ -1683,6 +1685,115 @@ public sealed class ImapCommandProcessor
         _ => "Command failed",
     };
 
+    /// <summary>
+    /// <c>COPY</c> and <c>MOVE</c>, and their <c>UID</c> forms — RFC 3501 §6.4.7 and RFC 6851 §3.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A missing destination earns <c>[TRYCREATE]</c>, and that is a MUST.</b> §6.4.7: "Unless
+    /// it is certain that the destination mailbox can not be created, the server MUST send the
+    /// response code "[TRYCREATE]" as the prefix of the text of the tagged NO response. This
+    /// gives a hint to the client that it can attempt a CREATE command and retry the COPY if the
+    /// CREATE is successful." RFC 6851 §4 extends it to <c>MOVE</c>: "Response codes such as
+    /// TRYCREATE […] are sent as appropriate." This is the one place in this server where the
+    /// code appears — <c>SELECT</c> deliberately does not use it, because a client cannot recover
+    /// from opening a missing folder by creating an empty one.
+    /// </para>
+    /// <para>
+    /// <b><c>MOVE</c> reports untagged <c>EXPUNGE</c> and never a <c>FETCH</c>.</b> RFC 6851
+    /// §3.3 describes the move as equivalent to a copy, a <c>STORE +FLAGS.SILENT \Deleted</c> and
+    /// an expunge, then forbids the middle step's traces: "response codes for a STORE MUST NOT be
+    /// generated and the <c>\Deleted</c> flag MUST NOT be set for any message." So nothing is
+    /// flagged and nothing is echoed; the expunges are sent because the messages genuinely left.
+    /// </para>
+    /// <para>
+    /// A set naming nothing that exists is an <c>OK</c> with no data, per §6.4.8 — the same rule
+    /// <c>FETCH</c> and <c>STORE</c> follow.
+    /// </para>
+    /// </remarks>
+    private async ValueTask<ImapCommandResult> CopyAsync(
+        ImapCommand command,
+        bool move,
+        CancellationToken cancellationToken)
+    {
+        if (_writer is null)
+        {
+            return NotImplemented(command);
+        }
+
+        if (_session.AuthenticatedMailboxId is null || _session.SelectedFolderId is null)
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, "No mailbox is selected"));
+        }
+
+        string verb = move ? "MOVE" : "COPY";
+        string argument = command.Argument.Trim();
+        int split = argument.IndexOf(' ', StringComparison.Ordinal);
+
+        if (split <= 0)
+        {
+            return ImapCommandResult.Single(ImapResponses.Bad(
+                command.Tag,
+                $"{verb} expects a sequence set and a mailbox name"));
+        }
+
+        if (!ImapSequenceSet.TryParse(argument[..split], out ImapSequenceSet? set))
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, $"{verb} sequence set is not valid"));
+        }
+
+        ImapAstringReader reader = new(argument[(split + 1)..]);
+
+        if (!reader.TryReadText(out string? wireName) || !reader.AtEnd)
+        {
+            return ImapCommandResult.Single(ImapResponses.Bad(
+                command.Tag,
+                $"{verb} expects one destination mailbox name"));
+        }
+
+        if (!ImapMailboxName.TryDecode(wireName, out string? path))
+        {
+            return ImapCommandResult.Single(ImapResponses.No(
+                command.Tag,
+                "Mailbox name is not valid modified UTF-7"));
+        }
+
+        ImapCopyResult result = await _writer
+            .CopyAsync(
+                _session.AuthenticatedMailboxId.Value,
+                _session.SelectedFolderId.Value,
+                set,
+                command.IsUid,
+                path,
+                removeFromSource: move,
+                _clock.UtcNow,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result.Outcome == ImapFolderMutation.NotFound)
+        {
+            return ImapCommandResult.Single(ImapResponses.No(
+                command.Tag,
+                "No such destination mailbox",
+                ImapResponseCode.TryCreate));
+        }
+
+        List<ImapResponse> responses = [];
+
+        foreach (long sequenceNumber in result.RemovedSequenceNumbers)
+        {
+            responses.Add(ImapResponses.Expunge(sequenceNumber));
+        }
+
+        responses.Add(ImapResponses.Ok(
+            command.Tag,
+            command.IsUid ? $"UID {verb} completed" : $"{verb} completed"));
+
+        return new ImapCommandResult(responses, ImapSessionAction.Continue);
+    }
+
     private static ImapCommandResult NotImplemented(ImapCommand command) =>
         ImapCommandResult.Single(ImapResponses.No(
             command.Tag,
@@ -1734,5 +1845,11 @@ public sealed class ImapCommandProcessor
         // 'UNSELECT'". Advertising both is required in one case and the only way a client can
         // discover the command in the other.
         IsNamespaceAvailable: true,
-        IsUnselectAvailable: true);
+        IsUnselectAvailable: true,
+
+        // RFC 6851 §1: "The MOVE extension is present in any IMAP implementation that returns
+        // "MOVE" as one of the supported capabilities to the CAPABILITY command." Tied to the
+        // writer, because without one every MOVE is refused as unimplemented - and the atom is
+        // the only thing that makes the command present.
+        IsMoveAvailable: _writer is not null);
 }

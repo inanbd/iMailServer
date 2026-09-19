@@ -223,6 +223,40 @@ UIDs restarting at 1, and a client would serve cached mail under UIDs that now n
 messages. Migration 0012 therefore adds `MailboxUidValidity`, a per-mailbox high-water mark that
 outlives the folder, and every issued value is `max(clock, high-water + 1)`.
 
+## COPY and MOVE
+
+`COPY` duplicates messages into another folder; `MOVE` (RFC 6851) does the same and removes the
+originals. One repository method serves both, because §3.3 defines the second in terms of the
+first — a move "has the same effect for each message as this sequence: 1. [UID] COPY 2. [UID]
+STORE +FLAGS.SILENT `\DELETED` 3. UID EXPUNGE" — and then forbids the middle step's traces:
+"response codes for a STORE MUST NOT be generated and the `\DELETED` flag MUST NOT be set for
+any message." So a move deletes; it never flags.
+
+**A missing destination earns `[TRYCREATE]`, and that is a MUST.** RFC 3501 §6.4.7: "Unless it is
+certain that the destination mailbox can not be created, the server MUST send the response code
+"[TRYCREATE]" as the prefix of the text of the tagged NO response." This is the only place the
+code appears — `SELECT` deliberately does not use it, because a client cannot recover from
+opening a missing folder by creating an empty one.
+
+**The copy takes a new UID and keeps everything else.** §6.4.7: messages go "to the end of the
+specified destination mailbox. The flags and internal date of the message(s) SHOULD be preserved,
+and the Recent flag SHOULD be set, in the copy." Flags and date are preserved. `\Recent` is not
+set, because this server never sets it anywhere and a copy is no place to start.
+
+**The stored message is shared, not duplicated.** A copy is a second `Deliveries` row against the
+same `Messages` row, which is what makes copying a large message cheap — and is the shape the
+store-once-deliver-many schema was built for.
+
+**Everything happens in one transaction**, which both RFCs demand in their own words. §6.4.7:
+"If the COPY command is unsuccessful for any reason, server implementations MUST restore the
+destination mailbox to its state before the COPY attempt." RFC 6851 §3.3 is stricter for a move:
+"The server MUST leave each message in a state where it is in at least one of the source or
+target mailboxes (no message can be lost or orphaned)." A half-done move is the one outcome that
+loses mail.
+
+`COPYUID` is not sent. RFC 6851 §4.3 asks for it only of "Servers supporting UIDPLUS", and this
+server does not advertise UIDPLUS.
+
 ## Known divergence: folder-name case depends on the database provider
 
 **On SQLite folder names are matched exactly; on a default-collation SQL Server they are not.**

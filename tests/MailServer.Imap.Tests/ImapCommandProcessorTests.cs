@@ -495,6 +495,78 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
         return Task.FromResult(ImapFolderMutation.Done);
     }
 
+    public Task<ImapCopyResult> CopyAsync(
+        MailboxId mailboxId,
+        MailboxFolderId sourceFolderId,
+        ImapSequenceSet set,
+        bool byUid,
+        string targetPath,
+        bool removeFromSource,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        string canonical = ImapMailboxPath.Canonical(targetPath);
+
+        if (!_folders.ContainsKey((mailboxId.Value, canonical)))
+        {
+            return Task.FromResult(new ImapCopyResult(ImapFolderMutation.NotFound, [], 0));
+        }
+
+        KeyValuePair<(Guid Mailbox, string Path), Entry> owner = _folders
+            .FirstOrDefault(pair =>
+                pair.Value.Folder.Id.Value == sourceFolderId.Value &&
+                pair.Key.Mailbox == mailboxId.Value);
+
+        if (owner.Value is null ||
+            !_messages.TryGetValue(owner.Key, out List<ImapMessageSummary>? all) ||
+            all.Count == 0)
+        {
+            return Task.FromResult(new ImapCopyResult(ImapFolderMutation.Done, [], 0));
+        }
+
+        long maxValue = byUid ? all[^1].Uid : all[^1].SequenceNumber;
+
+        List<ImapMessageSummary> selected =
+            [.. all.Where(m => set.Contains(byUid ? m.Uid : m.SequenceNumber, maxValue))];
+
+        if (!_messages.TryGetValue((mailboxId.Value, canonical), out List<ImapMessageSummary>? target))
+        {
+            target = [];
+            _messages[(mailboxId.Value, canonical)] = target;
+        }
+
+        long nextUid = target.Count == 0 ? 1 : target[^1].Uid + 1;
+        long nextSeq = target.Count + 1;
+
+        foreach (ImapMessageSummary message in selected)
+        {
+            // A new UID in the destination; flags and internal date preserved.
+            target.Add(message with { Uid = nextUid++, SequenceNumber = nextSeq++ });
+        }
+
+        if (!removeFromSource)
+        {
+            return Task.FromResult(
+                new ImapCopyResult(ImapFolderMutation.Done, [], selected.Count));
+        }
+
+        List<long> removed = [.. selected.Select(m => m.SequenceNumber).OrderByDescending(n => n)];
+
+        List<ImapMessageSummary> survivors = [.. all.Except(selected)];
+
+        all.Clear();
+
+        long renumbered = 1;
+
+        foreach (ImapMessageSummary survivor in survivors.OrderBy(m => m.Uid))
+        {
+            all.Add(survivor with { SequenceNumber = renumbered++ });
+        }
+
+        return Task.FromResult(
+            new ImapCopyResult(ImapFolderMutation.Done, removed, selected.Count));
+    }
+
     /// <summary>Every folder this fake was asked to expunge.</summary>
     public List<(Guid Mailbox, Guid Folder)> Expunged { get; } = [];
 
@@ -3088,5 +3160,177 @@ public sealed class ImapCommandProcessorTests
 
         wire.ShouldContain("a1 NO ");
         wire.ShouldNotContain("&Jj_-");
+    }
+    // ---------------------------------------------------------------------------------------
+    // COPY and MOVE. RFC 3501 §6.4.7 and RFC 6851 §3.
+    // ---------------------------------------------------------------------------------------
+
+    private static async Task<ImapCommandProcessor> CopyableAsync()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 4, specialUse: FolderSpecialUse.Inbox)
+            .Add(authenticator.KnownMailboxId, "Archive")
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 3, 7, 11, 19);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+
+        return processor;
+    }
+
+    [Fact]
+    public async Task Copy_puts_the_messages_in_the_destination_and_leaves_the_source()
+    {
+        ImapCommandProcessor processor = await CopyableAsync();
+
+        Wire(await ExecuteAsync(processor, "a2 COPY 2:3 Archive"))
+            .ShouldBe("a2 OK COPY completed\r\n");
+
+        // Still four in the source...
+        Wire(await ExecuteAsync(processor, "a3 FETCH 1:* UID"))
+            .ShouldContain("* 4 FETCH (UID 19)");
+
+        // ...and two in the destination, with new UIDs starting from 1.
+        await ExecuteAsync(processor, "a4 SELECT Archive");
+        Wire(await ExecuteAsync(processor, "a5 FETCH 1:* UID")).ShouldBe(
+            "* 1 FETCH (UID 1)\r\n" +
+            "* 2 FETCH (UID 2)\r\n" +
+            "a5 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.7: "The flags and internal date of the message(s) SHOULD be preserved […] in the
+    /// copy."
+    /// </summary>
+    [Fact]
+    public async Task Copy_preserves_the_flags_and_internal_date()
+    {
+        ImapCommandProcessor processor = await CopyableAsync();
+
+        await ExecuteAsync(processor, @"a2 STORE 1 +FLAGS.SILENT (\Flagged)");
+        await ExecuteAsync(processor, "a3 COPY 1 Archive");
+        await ExecuteAsync(processor, "a4 SELECT Archive");
+
+        Wire(await ExecuteAsync(processor, "a5 FETCH 1 (FLAGS INTERNALDATE)")).ShouldBe(
+            "* 1 FETCH (FLAGS (\\Seen \\Flagged) INTERNALDATE \" 1-Mar-2026 09:30:15 +0000\")\r\n" +
+            "a5 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.7's MUST: "Unless it is certain that the destination mailbox can not be created, the
+    /// server MUST send the response code "[TRYCREATE]" as the prefix of the text of the tagged
+    /// NO response." It is the hint that lets a client create the folder and retry.
+    /// </summary>
+    [Theory]
+    [InlineData("a2 COPY 1 Nowhere")]
+    [InlineData("a2 MOVE 1 Nowhere")]
+    [InlineData("a2 UID COPY 3 Nowhere")]
+    public async Task A_missing_destination_earns_trycreate(string line)
+    {
+        string wire = Wire(await ExecuteAsync(await CopyableAsync(), line));
+
+        wire.ShouldContain("a2 NO [TRYCREATE]");
+    }
+
+    /// <summary>
+    /// RFC 6851 §3.3: a move is a copy plus a removal, and the removal is reported with untagged
+    /// EXPUNGE — "though the COPY and EXPUNGE response codes will be returned, response codes for
+    /// a STORE MUST NOT be generated and the \Deleted flag MUST NOT be set for any message."
+    /// </summary>
+    [Fact]
+    public async Task Move_reports_expunges_and_never_a_fetch()
+    {
+        ImapCommandProcessor processor = await CopyableAsync();
+
+        string wire = Wire(await ExecuteAsync(processor, "a2 MOVE 2:3 Archive"));
+
+        wire.ShouldBe(
+            "* 3 EXPUNGE\r\n" +
+            "* 2 EXPUNGE\r\n" +
+            "a2 OK MOVE completed\r\n");
+
+        wire.ShouldNotContain("FETCH");
+        wire.ShouldNotContain("Deleted");
+    }
+
+    /// <summary>
+    /// §3.3: "a new message is created in the target mailbox with a new UID, the original message
+    /// is removed from the source mailbox". Both halves, observed.
+    /// </summary>
+    [Fact]
+    public async Task Move_removes_from_the_source_and_creates_in_the_target()
+    {
+        ImapCommandProcessor processor = await CopyableAsync();
+
+        await ExecuteAsync(processor, "a2 MOVE 2:3 Archive");
+
+        Wire(await ExecuteAsync(processor, "a3 FETCH 1:* UID")).ShouldBe(
+            "* 1 FETCH (UID 3)\r\n" +
+            "* 2 FETCH (UID 19)\r\n" +
+            "a3 OK FETCH completed\r\n");
+
+        await ExecuteAsync(processor, "a4 SELECT Archive");
+
+        Wire(await ExecuteAsync(processor, "a5 FETCH 1:* UID")).ShouldBe(
+            "* 1 FETCH (UID 1)\r\n" +
+            "* 2 FETCH (UID 2)\r\n" +
+            "a5 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.8: under the UID form "the numbers in the sequence set argument are unique
+    /// identifiers instead of message sequence numbers".
+    /// </summary>
+    [Fact]
+    public async Task Uid_copy_reads_the_numbers_as_uids()
+    {
+        ImapCommandProcessor processor = await CopyableAsync();
+
+        Wire(await ExecuteAsync(processor, "a2 UID COPY 11 Archive"))
+            .ShouldBe("a2 OK UID COPY completed\r\n");
+
+        await ExecuteAsync(processor, "a3 SELECT Archive");
+
+        Wire(await ExecuteAsync(processor, "a4 FETCH 1:* UID"))
+            .ShouldBe("* 1 FETCH (UID 1)\r\na4 OK FETCH completed\r\n");
+    }
+
+    /// <summary>§6.4.8: a number naming no message is ignored without an error.</summary>
+    [Theory]
+    [InlineData("a2 COPY 99 Archive")]
+    [InlineData("a2 UID MOVE 500 Archive")]
+    public async Task Copying_nothing_is_an_ok_with_no_data(string line)
+    {
+        string wire = Wire(await ExecuteAsync(await CopyableAsync(), line));
+
+        wire.ShouldContain(" OK ");
+        wire.ShouldNotContain("EXPUNGE");
+    }
+
+    [Theory]
+    [InlineData("a2 COPY")]
+    [InlineData("a2 COPY 1")]
+    [InlineData("a2 MOVE nonsense Archive")]
+    [InlineData("a2 COPY 1 Archive extra")]
+    [InlineData("a2 COPY 0 Archive")]
+    public async Task A_malformed_copy_earns_a_tagged_bad(string line) =>
+        Wire(await ExecuteAsync(await CopyableAsync(), line)).ShouldContain("a2 BAD ");
+
+    /// <summary>
+    /// RFC 6851 §1: "The MOVE extension is present in any IMAP implementation that returns "MOVE"
+    /// as one of the supported capabilities to the CAPABILITY command."
+    /// </summary>
+    [Fact]
+    public async Task Move_is_advertised()
+    {
+        ImapCommandProcessor processor = await CopyableAsync();
+
+        Wire(await ExecuteAsync(processor, "a2 CAPABILITY")).ShouldContain("MOVE");
     }
 }

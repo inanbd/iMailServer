@@ -744,6 +744,196 @@ internal sealed class ImapMailboxWriter(
         return new HashSet<string>(paths, StringComparer.Ordinal);
     }
 
+    /// <summary>The columns a copy carries over, for the source messages a set names.</summary>
+    /// <remarks>
+    /// <c>MessageId</c> is the point: a copy is a second <c>Deliveries</c> row against the same
+    /// <c>Messages</c> row, so the stored content is never duplicated however large it is.
+    /// </remarks>
+    private const string SelectDeliveriesForCopy = """
+        SELECT  Uid, MessageId, Flags, InternalDate
+        FROM    Deliveries
+        WHERE   FolderId = @FolderId
+          AND   MailboxId = @MailboxId
+          AND   Uid IN @Uids
+        ORDER BY Uid
+        """;
+
+    private const string InsertDelivery = """
+        INSERT INTO Deliveries
+                    (Id, MessageId, MailboxId, FolderId, Uid, Flags, InternalDate, CreatedUtc)
+        VALUES      (@Id, @MessageId, @MailboxId, @FolderId, @Uid, @Flags, @InternalDate, @Now)
+        """;
+
+    private const string SelectFolderNextUid = """
+        SELECT  NextUid
+        FROM    MailboxFolders
+        WHERE   MailboxId = @MailboxId
+          AND   Path = @Path
+        """;
+
+    private const string UpdateFolderNextUid = """
+        UPDATE  MailboxFolders
+        SET     NextUid = @NextUid, ModifiedUtc = @Now
+        WHERE   Id = @Id
+          AND   MailboxId = @MailboxId
+        """;
+
+    /// <summary>One source delivery, as a copy needs to see it.</summary>
+    private sealed class CopySourceRow
+    {
+        public long Uid { get; set; }
+
+        public Guid MessageId { get; set; }
+
+        public int Flags { get; set; }
+
+        public DateTimeOffset InternalDate { get; set; }
+    }
+
+    public Task<ImapCopyResult> CopyAsync(
+        MailboxId mailboxId,
+        MailboxFolderId sourceFolderId,
+        ImapSequenceSet set,
+        bool byUid,
+        string targetPath,
+        bool removeFromSource,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(set);
+        ArgumentNullException.ThrowIfNull(targetPath);
+
+        string canonical = ImapMailboxPath.Canonical(targetPath);
+
+        return transactions.ExecuteScopedAsync(
+            async ct =>
+            {
+                IReadOnlyList<ImapMessageSummary> selected = await reader
+                    .ReadSummariesAsync(mailboxId, sourceFolderId, set, byUid, ct)
+                    .ConfigureAwait(false);
+
+                return await ExecuteAsync(
+                    async (session, inner) =>
+                    {
+                        Guid? targetId = await session.Connection
+                            .QuerySingleOrDefaultAsync<Guid?>(Command(
+                                session,
+                                SelectFolderIdByPath,
+                                new { MailboxId = mailboxId.Value, Path = canonical },
+                                inner))
+                            .ConfigureAwait(false);
+
+                        if (targetId is null)
+                        {
+                            // Checked before anything is written, so the destination is untouched
+                            // - RFC 3501 §6.4.7's "MUST restore the destination mailbox to its
+                            // state before the COPY attempt" is trivially satisfied by never
+                            // having started. The handler turns this into [TRYCREATE].
+                            return new ImapCopyResult(ImapFolderMutation.NotFound, [], 0);
+                        }
+
+                        if (selected.Count == 0)
+                        {
+                            // §6.4.8: a set naming nothing that exists "is ignored without any
+                            // error message generated".
+                            return new ImapCopyResult(ImapFolderMutation.Done, [], 0);
+                        }
+
+                        long[] uids = [.. selected.Select(m => m.Uid)];
+
+                        IEnumerable<CopySourceRow> rows = await session.Connection
+                            .QueryAsync<CopySourceRow>(Command(
+                                session,
+                                SelectDeliveriesForCopy,
+                                new
+                                {
+                                    FolderId = sourceFolderId.Value,
+                                    MailboxId = mailboxId.Value,
+                                    Uids = uids,
+                                },
+                                inner))
+                            .ConfigureAwait(false);
+
+                        List<CopySourceRow> sources = [.. rows];
+
+                        long nextUid = await session.Connection
+                            .ExecuteScalarAsync<long>(Command(
+                                session,
+                                SelectFolderNextUid,
+                                new { MailboxId = mailboxId.Value, Path = canonical },
+                                inner))
+                            .ConfigureAwait(false);
+
+                        foreach (CopySourceRow source in sources)
+                        {
+                            await session.Connection.ExecuteAsync(Command(
+                                session,
+                                InsertDelivery,
+                                new
+                                {
+                                    Id = Guid.NewGuid(),
+                                    source.MessageId,
+                                    MailboxId = mailboxId.Value,
+                                    FolderId = targetId.Value,
+                                    Uid = nextUid++,
+
+                                    // Flags and internal date preserved, per §6.4.7's SHOULD.
+                                    // \Recent is not set: this server never sets it, and a copy
+                                    // is no place to start claiming otherwise.
+                                    source.Flags,
+                                    source.InternalDate,
+                                    Now = now,
+                                },
+                                inner)).ConfigureAwait(false);
+                        }
+
+                        // UIDs are never reused, so the counter moves even though the messages
+                        // are copies - the destination's UID space is its own.
+                        await session.Connection.ExecuteAsync(Command(
+                            session,
+                            UpdateFolderNextUid,
+                            new
+                            {
+                                Id = targetId.Value,
+                                MailboxId = mailboxId.Value,
+                                NextUid = nextUid,
+                                Now = now,
+                            },
+                            inner)).ConfigureAwait(false);
+
+                        if (!removeFromSource)
+                        {
+                            return new ImapCopyResult(ImapFolderMutation.Done, [], sources.Count);
+                        }
+
+                        for (int offset = 0; offset < uids.Length; offset += UidBatchSize)
+                        {
+                            long[] batch = [.. uids.Skip(offset).Take(UidBatchSize)];
+
+                            await session.Connection.ExecuteAsync(Command(
+                                session,
+                                DeleteDeliveries,
+                                new
+                                {
+                                    FolderId = sourceFolderId.Value,
+                                    MailboxId = mailboxId.Value,
+                                    Uids = batch,
+                                },
+                                inner)).ConfigureAwait(false);
+                        }
+
+                        // Descending, as EXPUNGE reports them - every number still valid when
+                        // sent, because only higher positions have gone.
+                        List<long> removed =
+                            [.. selected.Select(m => m.SequenceNumber).OrderByDescending(n => n)];
+
+                        return new ImapCopyResult(ImapFolderMutation.Done, removed, sources.Count);
+                    },
+                    ct).ConfigureAwait(false);
+            },
+            cancellationToken);
+    }
+
     private const string InsertSubscription = """
         INSERT INTO MailboxSubscriptions (MailboxId, Path, CreatedUtc)
         VALUES (@MailboxId, @Path, @Now)
