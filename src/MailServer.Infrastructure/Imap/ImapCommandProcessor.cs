@@ -266,6 +266,7 @@ public sealed class ImapCommandProcessor
             ImapVerb.Copy => await CopyAsync(command, move: false, cancellationToken).ConfigureAwait(false),
             ImapVerb.Move => await CopyAsync(command, move: true, cancellationToken).ConfigureAwait(false),
             ImapVerb.Append => AppendRefusal(command),
+            ImapVerb.Search => await SearchAsync(command, cancellationToken).ConfigureAwait(false),
             _ => NotImplemented(command),
         };
     }
@@ -2113,6 +2114,110 @@ public sealed class ImapCommandProcessor
             : ImapCommandResult.Single(ImapResponses.Bad(
                 command.Tag,
                 "APPEND requires a message literal"));
+
+    /// <summary>
+    /// <c>SEARCH</c> and <c>UID SEARCH</c> — RFC 3501 §6.4.4.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The numbers reported differ by form.</b> §7.2.5: "For SEARCH, these are message
+    /// sequence numbers; for UID SEARCH, these are unique identifiers." That is the only
+    /// difference between the two commands' output — the criteria mean the same thing in both.
+    /// </para>
+    /// <para>
+    /// <b>Message content is loaded only when the criteria need it.</b> A search for
+    /// <c>UNSEEN</c> is answered from stored columns and opens nothing;
+    /// <c>BODY "quarterly"</c> reads every message in the folder. §6.4.4 warns that search "is
+    /// not guaranteed to be fast", but a client asking about flags should not pay for that — see
+    /// <see cref="ImapSearchKey.NeedsContent"/>.
+    /// </para>
+    /// <para>
+    /// <b>A search never marks anything read.</b> Nothing here writes, and the section
+    /// specifiers the evaluator uses are built peeking, so the property holds wherever they are
+    /// used rather than wherever someone remembered.
+    /// </para>
+    /// <para>
+    /// An unsupported <c>CHARSET</c> is a tagged <c>NO</c>, which is what §6.4.4 provides for:
+    /// "NO - search error: can't search that [CHARSET] or criteria".
+    /// </para>
+    /// </remarks>
+    private async ValueTask<ImapCommandResult> SearchAsync(
+        ImapCommand command,
+        CancellationToken cancellationToken)
+    {
+        if (_mailboxes is null)
+        {
+            return NotImplemented(command);
+        }
+
+        if (_session.AuthenticatedMailboxId is null || _session.SelectedFolderId is null)
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, "No mailbox is selected"));
+        }
+
+        if (!ImapSearch.TryParse(command.Argument, out ImapSearchKey? key, out bool badCharset))
+        {
+            return ImapCommandResult.Single(badCharset
+                ? ImapResponses.No(command.Tag, "Unsupported CHARSET; this server searches US-ASCII and UTF-8")
+                : ImapResponses.Bad(command.Tag, "SEARCH criteria are not valid"));
+        }
+
+        MailboxId mailboxId = _session.AuthenticatedMailboxId.Value;
+        MailboxFolderId folderId = _session.SelectedFolderId.Value;
+
+        // The whole folder: a search has no sequence set of its own, and any criterion may match
+        // any message. §6.4.4's own warning about speed is about exactly this.
+        ImapSequenceSet.TryParse("1:*", out ImapSequenceSet? everything);
+
+        IReadOnlyList<ImapMessageSummary> summaries = await _mailboxes
+            .ReadSummariesAsync(mailboxId, folderId, everything!, byUid: false, cancellationToken)
+            .ConfigureAwait(false);
+
+        IReadOnlyDictionary<long, StoredMessageId> located =
+            key.NeedsContent && _messages is not null
+                ? await _mailboxes
+                    .ReadMessageIdsAsync(
+                        mailboxId,
+                        folderId,
+                        [.. summaries.Select(m => m.Uid)],
+                        cancellationToken)
+                    .ConfigureAwait(false)
+                : new Dictionary<long, StoredMessageId>();
+
+        long maxValue = summaries.Count == 0 ? 0 : summaries[^1].SequenceNumber;
+        long maxUid = summaries.Count == 0 ? 0 : summaries[^1].Uid;
+
+        List<long> matched = [];
+
+        foreach (ImapMessageSummary summary in summaries)
+        {
+            ReadOnlyMemory<byte> content = ReadOnlyMemory<byte>.Empty;
+
+            if (located.TryGetValue(summary.Uid, out StoredMessageId messageId))
+            {
+                content = await ReadMessageAsync(messageId, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (ImapSearchEvaluator.Matches(
+                key,
+                new ImapSearchCandidate(summary, content),
+                maxValue,
+                maxUid))
+            {
+                matched.Add(command.IsUid ? summary.Uid : summary.SequenceNumber);
+            }
+        }
+
+        return new ImapCommandResult(
+            [
+                ImapResponses.Search(matched),
+                ImapResponses.Ok(
+                    command.Tag,
+                    command.IsUid ? "UID SEARCH completed" : "SEARCH completed"),
+            ],
+            ImapSessionAction.Continue);
+    }
 
     private static ImapCommandResult NotImplemented(ImapCommand command) =>
         ImapCommandResult.Single(ImapResponses.No(

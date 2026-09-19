@@ -1062,6 +1062,36 @@ public static class ImapResponses
         return ImapResponse.Segmented(segments);
     }
 
+    /// <summary>
+    /// <c>* SEARCH …</c> — the messages a search matched. RFC 3501 §7.2.5.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// §7.2.5: "The SEARCH response occurs as a result of a SEARCH or UID SEARCH command. The
+    /// number(s) refer to those messages that match the search criteria. For SEARCH, these are
+    /// message sequence numbers; for UID SEARCH, these are unique identifiers."
+    /// </para>
+    /// <para>
+    /// <b>A search matching nothing still sends the line.</b> §9's <c>mailbox-data</c> is
+    /// <c>"SEARCH" *(SP nz-number)</c> — the numbers are a possibly-empty repetition, so
+    /// <c>* SEARCH</c> with none is grammatical and is how a server says "none", as distinct
+    /// from saying nothing at all.
+    /// </para>
+    /// </remarks>
+    public static ImapResponse Search(IReadOnlyList<long> numbers)
+    {
+        ArgumentNullException.ThrowIfNull(numbers);
+
+        StringBuilder builder = new("SEARCH");
+
+        foreach (long number in numbers)
+        {
+            builder.Append(' ').Append(number.ToString(CultureInfo.InvariantCulture));
+        }
+
+        return ImapResponse.Data(builder.ToString());
+    }
+
     /// <summary><c>* FLAGS (…)</c> — the flags defined in the selected mailbox. RFC 3501 §7.2.6.</summary>
     public static ImapResponse Flags(MessageFlags flags) =>
         ImapResponse.Data($"FLAGS ({ImapFlagNames.Format(flags)})");

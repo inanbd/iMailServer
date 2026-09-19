@@ -3875,4 +3875,277 @@ public sealed class ImapCommandProcessorTests
 
         Wire(await ExecuteAsync(processor, "a4 FETCH 1 FLAGS")).ShouldContain("(FLAGS (\\Seen))");
     }
+    // ---------------------------------------------------------------------------------------
+    // SEARCH. RFC 3501 §6.4.4.
+    // ---------------------------------------------------------------------------------------
+
+    private static async Task<ImapCommandProcessor> SearchableAsync()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 3, specialUse: FolderSpecialUse.Inbox)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 5, 9, 14);
+
+        mailboxes.WithContent(
+            authenticator.KnownMailboxId,
+            "INBOX",
+            uid: 5,
+            "From: Alice <alice@example.com>\r\n" +
+            "Subject: quarterly report\r\n" +
+            "Date: Mon, 2 Feb 2026 10:00:00 +0000\r\n" +
+            "\r\n" +
+            "The numbers are attached.\r\n");
+
+        mailboxes.WithContent(
+            authenticator.KnownMailboxId,
+            "INBOX",
+            uid: 9,
+            "From: Bob <bob@example.net>\r\n" +
+            "Subject: lunch\r\n" +
+            "Date: Tue, 3 Mar 2026 10:00:00 +0000\r\n" +
+            "\r\n" +
+            "Are you free?\r\n");
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+
+        return processor;
+    }
+
+    [Fact]
+    public async Task Search_all_returns_every_sequence_number()
+    {
+        Wire(await ExecuteAsync(await SearchableAsync(), "a2 SEARCH ALL")).ShouldBe(
+            "* SEARCH 1 2 3\r\na2 OK SEARCH completed\r\n");
+    }
+
+    /// <summary>
+    /// §9's mailbox-data is "SEARCH" *(SP nz-number): the numbers are a possibly-empty
+    /// repetition, so a search matching nothing still sends the line.
+    /// </summary>
+    [Fact]
+    public async Task A_search_matching_nothing_still_sends_the_line()
+    {
+        Wire(await ExecuteAsync(await SearchableAsync(), "a2 SEARCH UNSEEN")).ShouldBe(
+            "* SEARCH\r\na2 OK SEARCH completed\r\n");
+    }
+
+    /// <summary>
+    /// §7.2.5: "For SEARCH, these are message sequence numbers; for UID SEARCH, these are unique
+    /// identifiers."
+    /// </summary>
+    [Fact]
+    public async Task Uid_search_reports_uids()
+    {
+        Wire(await ExecuteAsync(await SearchableAsync(), "a2 UID SEARCH ALL")).ShouldBe(
+            "* SEARCH 5 9 14\r\na2 OK UID SEARCH completed\r\n");
+    }
+
+    [Theory]
+    [InlineData("SEEN", "1 2 3")]
+    [InlineData("UNSEEN", "")]
+    [InlineData("UNDELETED", "1 2 3")]
+    [InlineData("DELETED", "")]
+    [InlineData("OLD", "1 2 3")]
+    [InlineData("RECENT", "")]
+    [InlineData("NEW", "")]
+    public async Task Flag_keys_are_answered_from_the_stored_columns(string key, string expected)
+    {
+        string wire = Wire(await ExecuteAsync(await SearchableAsync(), $"a2 SEARCH {key}"));
+
+        wire.ShouldStartWith(expected.Length == 0 ? "* SEARCH\r\n" : $"* SEARCH {expected}\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.4: "Messages that have a header with the specified field-name […] and that contains
+    /// the specified string in the text of the header (what comes after the colon)."
+    /// </summary>
+    [Theory]
+    [InlineData("FROM alice", "1")]
+    [InlineData("FROM bob", "2")]
+    [InlineData("SUBJECT lunch", "2")]
+    [InlineData("SUBJECT \"quarterly report\"", "1")]
+    [InlineData("HEADER Subject quarterly", "1")]
+    public async Task Header_keys_search_the_value_and_not_the_field_name(
+        string criteria,
+        string expected)
+    {
+        Wire(await ExecuteAsync(await SearchableAsync(), $"a2 SEARCH {criteria}"))
+            .ShouldStartWith($"* SEARCH {expected}\r\n");
+    }
+
+    /// <summary>
+    /// A search for a header by its own field name must not match every message that has it —
+    /// the value is searched, not the whole line.
+    /// </summary>
+    [Fact]
+    public async Task Searching_a_header_for_its_own_name_matches_nothing()
+    {
+        Wire(await ExecuteAsync(await SearchableAsync(), "a2 SEARCH HEADER Subject Subject"))
+            .ShouldStartWith("* SEARCH\r\n");
+    }
+
+    [Theory]
+    [InlineData("BODY attached", "1")]
+    [InlineData("BODY free", "2")]
+    [InlineData("TEXT quarterly", "1")]
+    public async Task Body_and_text_keys_search_content(string criteria, string expected)
+    {
+        Wire(await ExecuteAsync(await SearchableAsync(), $"a2 SEARCH {criteria}"))
+            .ShouldStartWith($"* SEARCH {expected}\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.4: BODY is "in the body of the message" and TEXT is "in the header or body" — so a
+    /// word that appears only in a header is found by one and not the other.
+    /// </summary>
+    [Fact]
+    public async Task Body_excludes_the_header_where_text_includes_it()
+    {
+        ImapCommandProcessor processor = await SearchableAsync();
+
+        Wire(await ExecuteAsync(processor, "a2 SEARCH BODY quarterly")).ShouldStartWith("* SEARCH\r\n");
+        Wire(await ExecuteAsync(processor, "a3 SEARCH TEXT quarterly")).ShouldStartWith("* SEARCH 1\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.4: "When multiple keys are specified, the result is the intersection (AND function)
+    /// of all the messages that match those keys."
+    /// </summary>
+    [Fact]
+    public async Task Several_keys_intersect()
+    {
+        Wire(await ExecuteAsync(await SearchableAsync(), "a2 SEARCH SEEN FROM alice"))
+            .ShouldStartWith("* SEARCH 1\r\n");
+    }
+
+    [Fact]
+    public async Task Or_takes_the_union_of_two_keys()
+    {
+        Wire(await ExecuteAsync(await SearchableAsync(), "a2 SEARCH OR FROM alice FROM bob"))
+            .ShouldStartWith("* SEARCH 1 2\r\n");
+    }
+
+    [Fact]
+    public async Task Not_inverts_a_key()
+    {
+        Wire(await ExecuteAsync(await SearchableAsync(), "a2 SEARCH NOT FROM alice"))
+            .ShouldStartWith("* SEARCH 2 3\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.4: "A search key can also be a parenthesized list of one or more search keys (e.g.,
+    /// for use with the OR and NOT keys)." Without that a client could not express this at all.
+    /// </summary>
+    [Fact]
+    public async Task A_parenthesised_list_groups_keys()
+    {
+        Wire(await ExecuteAsync(
+            await SearchableAsync(),
+            "a2 SEARCH OR (FROM alice SEEN) (FROM bob UNSEEN)"))
+            .ShouldStartWith("* SEARCH 1\r\n");
+    }
+
+    [Theory]
+    [InlineData("1:2", "1 2")]
+    [InlineData("2:*", "2 3")]
+    [InlineData("UID 9", "2")]
+    [InlineData("UID 5:9", "1 2")]
+    public async Task Sequence_and_uid_sets_are_search_keys(string criteria, string expected)
+    {
+        Wire(await ExecuteAsync(await SearchableAsync(), $"a2 SEARCH {criteria}"))
+            .ShouldStartWith($"* SEARCH {expected}\r\n");
+    }
+
+    [Theory]
+    [InlineData("LARGER 600", "2 3")]
+    [InlineData("SMALLER 600", "1")]
+    public async Task Size_keys_compare_the_stored_size(string criteria, string expected)
+    {
+        Wire(await ExecuteAsync(await SearchableAsync(), $"a2 SEARCH {criteria}"))
+            .ShouldStartWith($"* SEARCH {expected}\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.4 says of every internal-date key "disregarding time and timezone", so the comparison
+    /// is on the date alone.
+    /// </summary>
+    [Theory]
+    [InlineData("BEFORE 2-Mar-2026", "1 2 3")]
+    [InlineData("BEFORE 1-Mar-2026", "")]
+    [InlineData("SINCE 1-Mar-2026", "1 2 3")]
+    [InlineData("SINCE 2-Mar-2026", "")]
+    [InlineData("ON 1-Mar-2026", "1 2 3")]
+    [InlineData("ON 2-Mar-2026", "")]
+    public async Task Internal_date_keys_disregard_the_time(string criteria, string expected)
+    {
+        string wire = Wire(await ExecuteAsync(await SearchableAsync(), $"a2 SEARCH {criteria}"));
+
+        wire.ShouldStartWith(expected.Length == 0 ? "* SEARCH\r\n" : $"* SEARCH {expected}\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.4's SENT* keys are "Messages whose [RFC-2822] Date: header", which is a different
+    /// date from the internal one — and a message with no Date: header matches none of them.
+    /// </summary>
+    [Theory]
+    [InlineData("SENTON 2-Feb-2026", "1")]
+    [InlineData("SENTSINCE 1-Mar-2026", "2")]
+    [InlineData("SENTBEFORE 1-Mar-2026", "1")]
+    public async Task Sent_date_keys_read_the_date_header(string criteria, string expected)
+    {
+        Wire(await ExecuteAsync(await SearchableAsync(), $"a2 SEARCH {criteria}"))
+            .ShouldStartWith($"* SEARCH {expected}\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.4: "US-ASCII MUST be supported; other [CHARSET]s MAY be supported." One this server
+    /// cannot decode earns the NO the same section provides for, rather than wrong results.
+    /// </summary>
+    [Theory]
+    [InlineData("a2 SEARCH CHARSET US-ASCII ALL", " OK ")]
+    [InlineData("a2 SEARCH CHARSET UTF-8 ALL", " OK ")]
+    [InlineData("a2 SEARCH CHARSET KOI8-R ALL", " NO ")]
+    public async Task An_unsupported_charset_is_refused(string line, string expected) =>
+        Wire(await ExecuteAsync(await SearchableAsync(), line)).ShouldContain(expected);
+
+    [Theory]
+    [InlineData("a2 SEARCH")]
+    [InlineData("a2 SEARCH NONSENSE")]
+    [InlineData("a2 SEARCH NOT")]
+    [InlineData("a2 SEARCH OR FROM alice")]
+    [InlineData("a2 SEARCH (FROM alice")]
+    [InlineData("a2 SEARCH LARGER abc")]
+    [InlineData("a2 SEARCH BEFORE nonsense")]
+    public async Task A_malformed_search_earns_a_tagged_bad(string line) =>
+        Wire(await ExecuteAsync(await SearchableAsync(), line)).ShouldContain("a2 BAD ");
+
+    /// <summary>A search must never mark a message read.</summary>
+    [Fact]
+    public async Task Searching_content_does_not_set_seen()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 1)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 1);
+
+        mailboxes.WithContent(authenticator.KnownMailboxId, "INBOX", 1, "From: a@b\r\n\r\nhello\r\n");
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+        await ExecuteAsync(processor, @"a2 STORE 1 -FLAGS.SILENT (\Seen)");
+        await ExecuteAsync(processor, "a3 SEARCH BODY hello");
+
+        Wire(await ExecuteAsync(processor, "a4 FETCH 1 FLAGS")).ShouldContain("(FLAGS ())");
+    }
 }

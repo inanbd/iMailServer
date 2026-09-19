@@ -339,6 +339,46 @@ than a row naming a file that does not exist. The row carries the digest the sto
 the schema's truncated-or-altered check works for an appended message as it does for a received
 one.
 
+## SEARCH
+
+All of RFC 3501 §6.4.4's search keys, as a tree: `OR` and `NOT` take keys as arguments and "A
+search key can also be a parenthesized list of one or more search keys", so a flat list could not
+express `OR (FROM alice SEEN) (FROM bob UNSEEN)` — which is an ordinary thing for a client to
+send. Keys side by side intersect, per §6.4.4: "the result is the intersection (AND function) of
+all the messages that match those keys."
+
+**Content is loaded only when the criteria need it.** A search for `UNSEEN` is answered from
+stored columns and opens nothing; `BODY "quarterly"` reads every message in the folder. §6.4.4
+warns that search "is not guaranteed to be fast", but a client asking about flags should not pay
+for that.
+
+**A search never marks anything read.** Nothing in the path writes, and the section specifiers
+the evaluator uses are built peeking — so the property holds wherever they are used rather than
+wherever someone remembered.
+
+**Three keys have one answer each, and that is honest rather than lazy.** `\Recent` is never set
+here, so `RECENT` and `NEW` match nothing and `OLD` matches everything — §6.4.4 defines `NEW` as
+"functionally equivalent to `(RECENT UNSEEN)`" and `OLD` as "`NOT RECENT`". `KEYWORD` likewise
+matches nothing and `UNKEYWORD` everything, because no keyword is ever stored. Answering them
+truthfully beats refusing perfectly ordinary criteria.
+
+**`HEADER` searches the value, not the line.** §6.4.4: the message must have "a header with the
+specified field-name […] and that contains the specified string in the text of the header (what
+comes after the colon)". A search for `HEADER Subject Subject` must not match every message that
+has one.
+
+**`BODY` excludes the header where `TEXT` includes it** — §6.4.4's own distinction, and tested
+against a word that appears only in a header.
+
+**Internal-date keys disregard time and zone**, as §6.4.4 says of each; the `SENT*` keys read the
+`Date:` header instead, and a message without a readable one matches none of them rather than
+falling back to the internal date.
+
+`CHARSET` is accepted for US-ASCII and UTF-8 and refused otherwise with the tagged `NO` §6.4.4
+provides for — "NO - search error: can't search that [CHARSET] or criteria". Claiming to search
+in a charset this server does not decode would return wrong results rather than an honest
+refusal.
+
 ## Known divergence: folder-name case depends on the database provider
 
 **On SQLite folder names are matched exactly; on a default-collation SQL Server they are not.**

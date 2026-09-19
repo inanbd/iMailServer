@@ -332,7 +332,12 @@ public sealed class ImapListenerTests : IAsyncDisposable
     [Fact]
     public async Task A_client_that_connects_and_vanishes_does_not_stop_the_listener()
     {
-        await using ImapListener listener = Listener();
+        // A limiter generous enough that the per-address cap cannot be what refuses the last
+        // connection. This test is about a rude client not wedging the accept loop; the limiter
+        // has its own tests, and leaving its cap in the way made this one fail intermittently on
+        // whether ten abandoned sessions had finished releasing their slots yet.
+        await using ImapListener listener = Listener(
+            new SmtpConnectionLimiter(maxTotal: 64, maxPerAddress: 64));
 
         _ = listener.StartAsync(CancellationToken.None);
 
