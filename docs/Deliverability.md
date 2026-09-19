@@ -77,7 +77,11 @@ entirely verifiable before you send anything.
 ### The eight authentication checks
 
 Implemented in `AuthenticationChecks` (Domain, pure). Sixteen points, normalised to the
-category's thirty.
+category's thirty. `AuthenticationProbe` (Infrastructure) does the looking-up — three names, one
+TXT query each: the domain, `_dmarc` beneath it, and `selector._domainkey.domain` per configured
+selector. It carries back *every* TXT record at each name rather than the one that looks
+relevant, because "two `v=spf1` records" is a finding and a probe that filtered would make it
+undetectable. Choosing among records is a rule, and the rules are all in the Domain half.
 
 | Id | W | Judged on |
 |---|---|---|

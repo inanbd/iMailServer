@@ -261,6 +261,7 @@ public static class DependencyInjection
             })));
         services.TryAddSingleton<IDnsDiagnosticsService, DnsDiagnosticsService>();
         services.TryAddScoped<IdentityProbe>();
+        services.TryAddScoped<AuthenticationProbe>();
         services.TryAddScoped<IOutboundDeliveryClient, OutboundSmtpClient>();
         services.TryAddScoped<IDsnComposer, PlainTextDsnComposer>();
 
