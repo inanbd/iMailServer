@@ -31,6 +31,12 @@ namespace MailServer.Infrastructure.Imap;
 /// stops being checked when a second caller appears.
 /// </param>
 /// <param name="CertificatePurpose">Which certificate this listener presents.</param>
+/// <param name="IdlePollInterval">
+/// How often an idling connection looks at its folder, or null for the default. Short enough
+/// that "immediate mailbox updates" — RFC 2177 §3's own phrase for what <c>IDLE</c> buys a
+/// client — is honest, and long enough that a thousand idle connections are a thousand cheap
+/// counts a few seconds apart rather than a busy loop.
+/// </param>
 public sealed record ImapConnectionOptions(
     ImapListenerRole Role,
     ImapProcessorOptions Processor,
@@ -38,7 +44,8 @@ public sealed record ImapConnectionOptions(
     int MaxLineOctets,
     TimeSpan PreAuthenticationTimeout,
     TimeSpan InactivityTimeout,
-    CertificatePurpose CertificatePurpose);
+    CertificatePurpose CertificatePurpose,
+    TimeSpan? IdlePollInterval = null);
 
 /// <summary>
 /// Drives one IMAP connection from greeting to close.
@@ -590,12 +597,21 @@ public sealed class ImapConnectionHandler(
     /// than it otherwise would.
     /// </para>
     /// <para>
-    /// <b>Only growth is pushed.</b> An <c>EXISTS</c> is an absolute count and is always true,
-    /// but a shrink means another session expunged something, and reporting that correctly needs
-    /// the sequence numbers that went — which this poll does not know. Guessing would make a
-    /// client renumber onto the wrong message, which in this response is how mail gets deleted
-    /// on the client. So a shrink is absorbed silently and the client learns of it on its next
-    /// command, which is late but never wrong.
+    /// <b>Only growth is pushed, and the baseline is what the client was told rather than what
+    /// the folder held a moment ago.</b> An <c>EXISTS</c> is an absolute count, but a shrink
+    /// means another session expunged something, and RFC 2180 §4.1's worked example shows a
+    /// falling count being sent as <c>EXPUNGE</c> lines first and the lower <c>EXISTS</c> after
+    /// — sequence numbers the poll does not know. So a shrink is absorbed silently and the
+    /// client learns of it on its next command, which is late but never wrong.
+    /// </para>
+    /// <para>
+    /// <b>Absorbing it must not move the baseline down.</b> If a folder of ten loses two and
+    /// then gains one, the client — which was told ten and nothing since — must not be sent
+    /// <c>* 9 EXISTS</c>: that is a decrement without the <c>EXPUNGE</c> lines §7.4.1 pairs it
+    /// with, and the client would renumber onto the wrong messages. Tracking
+    /// <see cref="ImapSessionContext.ReportedExists"/> instead of a local count is what makes
+    /// that impossible, and it also means a message that arrived between <c>SELECT</c> and
+    /// <c>IDLE</c> is pushed rather than silently adopted as the starting point.
     /// </para>
     /// <para>
     /// <b>The inactivity timeout still applies.</b> §3 permits it outright: "The server MAY
@@ -620,9 +636,6 @@ public sealed class ImapConnectionHandler(
         ImapCommand command,
         CancellationToken cancellationToken)
     {
-        long reported = await processor.CountSelectedAsync(cancellationToken).ConfigureAwait(false)
-            ?? 0;
-
         DateTimeOffset deadline = clock.UtcNow + CurrentTimeout(processor.Session, options);
 
         while (true)
@@ -638,7 +651,9 @@ public sealed class ImapConnectionHandler(
             }
 
             ImapLineResult line = await reader
-                .ReadLineAsync(IdlePollInterval, cancellationToken)
+                .ReadLineAsync(
+                    options.IdlePollInterval ?? DefaultIdlePollInterval,
+                    cancellationToken)
                 .ConfigureAwait(false);
 
             if (line.Status == ImapLineStatus.EndOfStream)
@@ -658,15 +673,16 @@ public sealed class ImapConnectionHandler(
                     return false;
                 }
 
-                if (current > reported)
+                if (current > processor.Session.ReportedExists)
                 {
                     await WriteAsync(
                         stream,
                         [ImapResponses.Exists(current.Value)],
                         cancellationToken).ConfigureAwait(false);
+
+                    processor.Session.ReportExists(current.Value);
                 }
 
-                reported = current.Value;
                 continue;
             }
 
@@ -696,15 +712,8 @@ public sealed class ImapConnectionHandler(
         }
     }
 
-    /// <summary>
-    /// How often an idling connection looks at its folder.
-    /// </summary>
-    /// <remarks>
-    /// Short enough that "immediate mailbox updates" — RFC 2177 §3's own phrase for what IDLE
-    /// buys a client — is honest, and long enough that a thousand idle connections are a
-    /// thousand cheap counts a few seconds apart rather than a busy loop.
-    /// </remarks>
-    private static readonly TimeSpan IdlePollInterval = TimeSpan.FromSeconds(5);
+    /// <summary>How often an idling connection looks at its folder, when nothing says.</summary>
+    private static readonly TimeSpan DefaultIdlePollInterval = TimeSpan.FromSeconds(5);
 
     private static async Task WriteAsync(
         Stream stream,

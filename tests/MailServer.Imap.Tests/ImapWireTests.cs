@@ -88,7 +88,8 @@ public sealed class ImapWireTests : IDisposable
         bool authAvailable = true,
         int maxLineOctets = 8_000,
         long maxAppendOctets = 1_000_000,
-        int preAuthSeconds = 30) =>
+        int preAuthSeconds = 30,
+        int? idlePollMilliseconds = null) =>
         new(
             role,
             new ImapProcessorOptions("AetherMail", role, authAvailable, MaxAuthenticationAttempts: 3),
@@ -100,7 +101,13 @@ public sealed class ImapWireTests : IDisposable
             // Both IMAP listeners present the same certificate: MailboxAccess is the purpose
             // for 143 and 993 alike, since a STARTTLS upgrade on 143 ends up serving exactly
             // what 993 serves from the first octet.
-            CertificatePurpose.MailboxAccess);
+            CertificatePurpose.MailboxAccess,
+
+            // The IDLE tests drive several polls, and at the production five seconds each one
+            // would cost the suite a quarter of a minute of waiting for a timer.
+            idlePollMilliseconds is null
+                ? null
+                : TimeSpan.FromMilliseconds(idlePollMilliseconds.Value));
 
     /// <summary>Accepts one connection, hands it to the handler, and returns the client end.</summary>
     private async Task<(TcpClient Client, Task Served)> ConnectAsync(
@@ -985,7 +992,7 @@ public sealed class ImapWireTests : IDisposable
             .Deliver(authenticator.KnownMailboxId, "INBOX", 1);
 
         (TcpClient client, Task served) = await ConnectAsync(
-            Options(),
+            Options(idlePollMilliseconds: 200),
             mailboxes: mailboxes,
             authenticator: authenticator);
 
@@ -1004,6 +1011,107 @@ public sealed class ImapWireTests : IDisposable
 
             // The push arrives on the poll, without the client having said anything.
             (await ReadLineAsync(tls)).ShouldBe("* 2 EXISTS");
+
+            await WriteLineAsync(tls, "DONE");
+            (await ReadLineAsync(tls)).ShouldStartWith("a3 OK ");
+
+            await WriteLineAsync(tls, "a4 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a4");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// The baseline an idling connection compares against is what the client was told, so a
+    /// message that arrived between the SELECT and the IDLE is pushed rather than silently
+    /// adopted as the starting point. A server that re-counted on entering IDLE would leave the
+    /// client one message behind until it next sent a command — which is the poll IDLE exists to
+    /// replace.
+    /// </summary>
+    [Fact]
+    public async Task Idle_pushes_a_delivery_that_arrived_before_the_idle_began()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 1);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(idlePollMilliseconds: 200),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(tls, "a2 SELECT INBOX");
+            await ReadUntilTaggedAsync(tls, "a2");
+
+            // Delivered after the SELECT told the client "1", and before IDLE is even sent.
+            mailboxes.Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2);
+
+            await WriteLineAsync(tls, "a3 IDLE");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+            (await ReadLineAsync(tls)).ShouldBe("* 2 EXISTS");
+
+            await WriteLineAsync(tls, "DONE");
+            (await ReadLineAsync(tls)).ShouldStartWith("a3 OK ");
+
+            await WriteLineAsync(tls, "a4 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a4");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// A folder that shrinks and grows back must not produce an <c>EXISTS</c> lower than the one
+    /// the client already holds. RFC 2180 §4.1 shows a falling count being sent as the
+    /// <c>EXPUNGE</c> lines first and the lower <c>EXISTS</c> after; a bare decrement would have
+    /// the client renumber onto the wrong messages, which is how mail gets deleted on a client.
+    /// So the poll absorbs the shrink without lowering what it compares against.
+    /// </summary>
+    [Fact]
+    public async Task Idle_never_pushes_an_exists_below_what_the_client_was_told()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2, 3);
+
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(idlePollMilliseconds: 200),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(tls, "a2 SELECT INBOX");
+            await ReadUntilTaggedAsync(tls, "a2");
+
+            await WriteLineAsync(tls, "a3 IDLE");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+
+            // Another session expunges one, which this connection was never told about.
+            mailboxes.Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2);
+            await Task.Delay(TimeSpan.FromMilliseconds(600));
+
+            // The folder is back to three. The client already believes three, so there is
+            // nothing to say - and saying "* 3 EXISTS" here would be a decrement in disguise.
+            mailboxes.Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2, 4);
+            await Task.Delay(TimeSpan.FromMilliseconds(600));
+
+            // The fourth is news, and is the first thing the client hears.
+            mailboxes.Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2, 4, 5);
+
+            (await ReadLineAsync(tls)).ShouldBe("* 4 EXISTS");
 
             await WriteLineAsync(tls, "DONE");
             (await ReadLineAsync(tls)).ShouldStartWith("a3 OK ");

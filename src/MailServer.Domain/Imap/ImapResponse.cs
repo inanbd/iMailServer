@@ -238,12 +238,33 @@ public sealed record ImapFetchPart(
     ReadOnlyMemory<byte>? Octets,
     bool IsSection)
 {
+    /// <summary>
+    /// A value built out of pieces, for an item whose own text may be interrupted by a literal.
+    /// </summary>
+    /// <remarks>
+    /// Null except for <c>ENVELOPE</c> and the body-structure items. Those are parenthesised
+    /// structures whose members are §9 <c>nstring</c>s, and a member that cannot be quoted — a
+    /// subject with a raw 8-bit octet in it — becomes a literal in the middle of the item, with
+    /// the rest of the structure following the octets. See <see cref="ImapSegmentBuilder"/>.
+    /// </remarks>
+    public IReadOnlyList<ImapResponseSegment>? Pieces { get; init; }
+
     /// <summary>A metadata item, already rendered as name and value.</summary>
     public static ImapFetchPart Metadata(string text) => new(text, null, false);
 
     /// <summary>A body section, with its octets or with none.</summary>
     public static ImapFetchPart Section(string name, ReadOnlyMemory<byte>? octets) =>
         new(name, octets, true);
+
+    /// <summary>An item whose value is a structure that may carry literals within it.</summary>
+    public static ImapFetchPart Composite(
+        string name,
+        IReadOnlyList<ImapResponseSegment> pieces)
+    {
+        ArgumentNullException.ThrowIfNull(pieces);
+
+        return new ImapFetchPart(name, null, false) { Pieces = pieces };
+    }
 }
 
 /// <summary>
@@ -1030,6 +1051,30 @@ public static class ImapResponses
             if (i > 0)
             {
                 head.Append(' ');
+            }
+
+            // A structure whose own members may be literals: its text is interleaved with them
+            // rather than preceding them, so the pieces are laid down in the order they were
+            // built.
+            if (part.Pieces is { } pieces)
+            {
+                head.Append(part.Text).Append(' ');
+
+                foreach (ImapResponseSegment piece in pieces)
+                {
+                    if (piece.Text is { } text)
+                    {
+                        head.Append(text);
+                        continue;
+                    }
+
+                    segments.Add(ImapResponseSegment.FromText(head.ToString()));
+                    head.Clear();
+
+                    segments.Add(ImapResponseSegment.FromOctets(piece.Octets));
+                }
+
+                continue;
             }
 
             // A metadata item is already a complete "NAME value" pair and carries no literal.

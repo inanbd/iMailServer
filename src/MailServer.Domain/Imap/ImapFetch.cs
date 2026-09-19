@@ -37,7 +37,7 @@ public enum ImapFetchItem
     /// <summary><c>RFC822.SIZE</c> — "the [RFC-2822] size of the message".</summary>
     Rfc822Size = 3,
 
-    /// <summary><c>ENVELOPE</c> — the parsed header. Needs a MIME reader; not answerable yet.</summary>
+    /// <summary><c>ENVELOPE</c> — "the envelope structure of the message".</summary>
     Envelope = 4,
 
     /// <summary><c>BODY</c> — "non-extensible form of BODYSTRUCTURE". Not answerable yet.</summary>
@@ -78,9 +78,9 @@ public static class ImapFetchItems
     /// The items this server can answer today.
     /// </summary>
     /// <remarks>
-    /// Everything that is a column rather than a parse. The rest wait on the MIME reader, and
-    /// <c>docs/Standards.md</c> records IMAP's <c>BODY[…]</c> as this product's first real MIME
-    /// consumer.
+    /// The four that are columns, and <c>ENVELOPE</c>, which is the message's own header parsed.
+    /// The rest wait on the MIME reader, and <c>docs/Standards.md</c> records IMAP's
+    /// <c>BODY[…]</c> as this product's first real MIME consumer.
     /// </remarks>
     public static IReadOnlyList<ImapFetchItem> Available { get; } =
     [
@@ -88,7 +88,27 @@ public static class ImapFetchItems
         ImapFetchItem.Uid,
         ImapFetchItem.InternalDate,
         ImapFetchItem.Rfc822Size,
+        ImapFetchItem.Envelope,
     ];
+
+    /// <summary>
+    /// Whether answering the item means reading the message itself.
+    /// </summary>
+    /// <remarks>
+    /// The four columns come off the folder's own rows and cost one query for the whole fetch.
+    /// Everything else — the envelope, the body structure and every section — is computed from
+    /// the stored octets, so a request naming one of them makes the handler open each message in
+    /// turn. Knowing which of the two a request is keeps <c>FETCH 1:* FLAGS</c> from touching
+    /// the message store at all.
+    /// </remarks>
+    public static bool NeedsContent(ImapFetchItem item) => item is
+        ImapFetchItem.Envelope or
+        ImapFetchItem.Body or
+        ImapFetchItem.BodyStructure or
+        ImapFetchItem.Rfc822 or
+        ImapFetchItem.Rfc822Header or
+        ImapFetchItem.Rfc822Text or
+        ImapFetchItem.BodySection;
 
     /// <summary>The longest item list accepted.</summary>
     /// <remarks>
@@ -200,8 +220,8 @@ public static class ImapFetchItems
     /// <remarks>
     /// Quoted from §6.4.5 rather than reconstructed: <c>ALL</c> is "(FLAGS INTERNALDATE
     /// RFC822.SIZE ENVELOPE)", <c>FAST</c> is "(FLAGS INTERNALDATE RFC822.SIZE)" and
-    /// <c>FULL</c> is "(FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODY)". Only <c>FAST</c> is
-    /// answerable today, and the other two refuse by naming <c>ENVELOPE</c> — which is a more
+    /// <c>FULL</c> is "(FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODY)". <c>FAST</c> and
+    /// <c>ALL</c> are answerable; <c>FULL</c> refuses by naming <c>BODY</c> — which is a more
     /// useful thing to tell a client than that its macro failed.
     /// </remarks>
     public static bool TryParseMacro(string name, out IReadOnlyList<ImapFetchItem> items)

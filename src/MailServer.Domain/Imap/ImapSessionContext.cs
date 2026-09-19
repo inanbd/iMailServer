@@ -172,7 +172,44 @@ public sealed class ImapSessionContext
         SelectedFolderId = folderId;
         SelectedFolderUidValidity = uidValidity;
         IsSelectedReadOnly = readOnly;
+        ReportedExists = 0;
         State = ImapSessionState.Selected;
+    }
+
+    /// <summary>
+    /// How many messages the client has been told the selected folder holds.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>What the client believes, not what the folder holds.</b> RFC 3501 §7.3.1 makes
+    /// <c>EXISTS</c> "the number of messages in the mailbox" and requires that "the update from
+    /// the EXISTS response MUST be recorded by the client", and §7.4.1 says an <c>EXPUNGE</c>
+    /// "also decrements the number of messages in the mailbox; it is not necessary to send an
+    /// EXISTS response with the new value". So the client's count moves only when the server
+    /// tells it to, and this is that count.
+    /// </para>
+    /// <para>
+    /// It exists so that an idling connection can push what the client has not been told rather
+    /// than what has changed since the idle began. A message that arrives between <c>SELECT</c>
+    /// and <c>IDLE</c> is news to the client either way.
+    /// </para>
+    /// </remarks>
+    public long ReportedExists { get; private set; }
+
+    /// <summary>
+    /// Records that the client has been told the folder's size.
+    /// </summary>
+    /// <remarks>
+    /// <b>Only ever called where a response actually says so</b> — an <c>EXISTS</c> line, or the
+    /// <c>EXPUNGE</c> lines that §7.4.1 makes equivalent to one. A count taken from the database
+    /// and recorded here without being sent would leave the client permanently behind by
+    /// whatever arrived in between.
+    /// </remarks>
+    public void ReportExists(long count)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(count);
+
+        ReportedExists = count;
     }
 
     /// <summary>Closes the selected mailbox, returning to the authenticated state.</summary>
@@ -186,6 +223,7 @@ public sealed class ImapSessionContext
         SelectedFolderId = null;
         SelectedFolderUidValidity = 0;
         IsSelectedReadOnly = false;
+        ReportedExists = 0;
 
         if (State == ImapSessionState.Selected)
         {

@@ -223,7 +223,31 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
 
         _messages[(mailboxId.Value, path)] = summaries;
 
+        SyncCount(mailboxId.Value, path);
+
         return this;
+    }
+
+    /// <summary>
+    /// Keeps the folder's reported size equal to the number of messages it holds.
+    /// </summary>
+    /// <remarks>
+    /// A fake that let <c>SELECT</c> report one number while a count returned another could make
+    /// a test about the difference between the two pass for the wrong reason — the IDLE push
+    /// compares exactly those two numbers.
+    /// </remarks>
+    private void SyncCount(Guid mailboxId, string path)
+    {
+        if (!_folders.TryGetValue((mailboxId, path), out Entry? entry))
+        {
+            return;
+        }
+
+        long count = _messages.TryGetValue((mailboxId, path), out List<ImapMessageSummary>? all)
+            ? all.Count
+            : 0;
+
+        _folders[(mailboxId, path)] = entry with { ExistsCount = count };
     }
 
     /// <summary>The mailbox and folder every summary read was scoped to.</summary>
@@ -570,7 +594,14 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
     /// <summary>The stored octets of each message this fake knows, keyed by its identity.</summary>
     public Dictionary<Guid, byte[]> Content { get; } = [];
 
-    /// <summary>Gives a message some content, so a BODY[] fetch has something to return.</summary>
+    /// <summary>
+    /// Gives a message some content, so a BODY[] fetch has something to return.
+    /// </summary>
+    /// <remarks>
+    /// Encoded as Latin-1 rather than ASCII so that a test can write a message carrying a raw
+    /// 8-bit octet — which RFC 2822 §2.2 forbids and which arrives anyway — and have the octet
+    /// reach the server rather than being replaced with a question mark on the way in.
+    /// </remarks>
     public ScriptedImapMailboxReader WithContent(
         MailboxId mailboxId,
         string path,
@@ -592,7 +623,7 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
         Guid id = Guid.NewGuid();
 
         _contentIds[(mailboxId.Value, path, uid)] = id;
-        Content[id] = System.Text.Encoding.ASCII.GetBytes(message);
+        Content[id] = System.Text.Encoding.Latin1.GetBytes(message);
 
         return this;
     }
@@ -658,6 +689,8 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
             stored.SizeBytes));
 
         _contentIds[(mailboxId.Value, canonical, uid)] = stored.Id.Value;
+
+        SyncCount(mailboxId.Value, canonical);
 
         return Task.FromResult(
             new ImapAppendResult(ImapFolderMutation.Done, folder.Folder.Id, all.Count));
@@ -729,6 +762,8 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
         {
             all.Add(survivor with { SequenceNumber = sequenceNumber++ });
         }
+
+        SyncCount(owner.Key.Mailbox, owner.Key.Path);
 
         return Task.FromResult<IReadOnlyList<long>>(removed);
     }
@@ -838,6 +873,112 @@ public sealed class ImapCommandProcessorTests
             mailboxes,
             null,
             mailboxes is null ? null : new ScriptedMessageStore(mailboxes));
+
+    /// <summary>
+    /// The count an idling connection watches follows a delivery that happens after the folder
+    /// was selected. The push in <c>ImapConnectionHandler.IdleAsync</c> is built on this, and a
+    /// count that answered from a snapshot taken at SELECT would make it silent for ever.
+    /// </summary>
+    [Fact]
+    public async Task The_selected_count_follows_a_later_delivery()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 1);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+
+        (await processor.CountSelectedAsync(CancellationToken.None)).ShouldBe(1);
+
+        mailboxes.Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2);
+
+        (await processor.CountSelectedAsync(CancellationToken.None)).ShouldBe(2);
+    }
+
+    /// <summary>
+    /// SELECT tells the client the folder's size, so that is the count it holds afterwards.
+    /// RFC 3501 §7.3.1: "The update from the EXISTS response MUST be recorded by the client."
+    /// </summary>
+    [Fact]
+    public async Task Select_records_the_count_the_client_was_told()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 4)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 3, 7, 11, 19);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        processor.Session.ReportedExists.ShouldBe(0);
+
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+
+        processor.Session.ReportedExists.ShouldBe(4);
+    }
+
+    /// <summary>
+    /// §7.4.1: "The EXPUNGE response also decrements the number of messages in the mailbox; it is
+    /// not necessary to send an EXISTS response with the new value." So each line the client
+    /// receives lowers the count it holds by one.
+    /// </summary>
+    [Fact]
+    public async Task An_expunge_lowers_the_count_the_client_holds()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 3)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2, 3);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+        await ExecuteAsync(processor, "a2 STORE 1:2 +FLAGS (\\Deleted)");
+
+        string wire = Wire(await ExecuteAsync(processor, "a3 EXPUNGE"));
+
+        wire.ShouldContain("* 2 EXPUNGE");
+        processor.Session.ReportedExists.ShouldBe(1);
+    }
+
+    /// <summary>
+    /// The count the client holds is forgotten when the folder is closed, so a later SELECT of a
+    /// different folder does not inherit it.
+    /// </summary>
+    [Fact]
+    public async Task Closing_a_folder_forgets_the_count()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 3)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2, 3);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+        await ExecuteAsync(processor, "a2 CLOSE");
+
+        processor.Session.ReportedExists.ShouldBe(0);
+    }
 
     private static ImapCommand Parse(string line)
     {
@@ -2319,15 +2460,14 @@ public sealed class ImapCommandProcessorTests
 
     /// <summary>
     /// §6.4.5 distinguishes "BAD - command unknown or arguments invalid" from "NO - fetch error:
-    /// can't fetch that data". ENVELOPE is the second, and saying so by name beats a partial
-    /// response a client cannot tell from a message with no envelope.
+    /// can't fetch that data". A body-structure item is the second, and saying so by name beats
+    /// a partial response a client cannot tell from a message with no body.
     /// </summary>
     [Theory]
-    [InlineData("a2 FETCH 1 ENVELOPE", "ENVELOPE")]
+    [InlineData("a2 FETCH 1 BODY", "BODY")]
     [InlineData("a2 FETCH 1 BODYSTRUCTURE", "BODYSTRUCTURE")]
-    [InlineData("a2 FETCH 1 (FLAGS ENVELOPE)", "ENVELOPE")]
-    [InlineData("a2 FETCH 1 ALL", "ENVELOPE")]
-    [InlineData("a2 FETCH 1 FULL", "ENVELOPE")]
+    [InlineData("a2 FETCH 1 (FLAGS BODYSTRUCTURE)", "BODYSTRUCTURE")]
+    [InlineData("a2 FETCH 1 FULL", "BODY")]
     public async Task An_item_needing_a_mime_reader_is_refused_by_name(string line, string item)
     {
         string wire = Wire(await ExecuteAsync(await FetchableAsync(), line));
@@ -3607,6 +3747,129 @@ public sealed class ImapCommandProcessorTests
 
         wire.ShouldBe(
             $"* 1 FETCH (BODY[] {{{StoredMessage.Length}}}\r\n{StoredMessage})\r\n" +
+            "a2 OK FETCH completed\r\n");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // FETCH ENVELOPE. RFC 3501 §7.4.2.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// The item a client builds a message list from, answered from the message's own header.
+    /// Sender and Reply-To are the §7.4.2 default — "the server sets the corresponding member of
+    /// the envelope to be the same value as the from member".
+    /// </summary>
+    [Fact]
+    public async Task An_envelope_fetch_answers_from_the_stored_header()
+    {
+        (ImapCommandProcessor processor, _) = await ReadableAsync();
+
+        string wire = Wire(await ExecuteAsync(processor, "a2 FETCH 1 ENVELOPE"));
+
+        wire.ShouldBe(
+            "* 1 FETCH (ENVELOPE (\"Mon, 7 Feb 2026 21:52:25 -0800\" \"hello\" " +
+            "((\"Alice\" NIL \"alice\" \"example.com\")) " +
+            "((\"Alice\" NIL \"alice\" \"example.com\")) " +
+            "((\"Alice\" NIL \"alice\" \"example.com\")) " +
+            "NIL NIL NIL NIL NIL))\r\n" +
+            "a2 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.5's ALL macro is "(FLAGS INTERNALDATE RFC822.SIZE ENVELOPE)" and is now answerable
+    /// in full. The items come back in the macro's own order.
+    /// </summary>
+    [Fact]
+    public async Task The_all_macro_is_answered_in_full()
+    {
+        (ImapCommandProcessor processor, _) = await ReadableAsync();
+
+        string wire = Wire(await ExecuteAsync(processor, "a2 FETCH 1 ALL"));
+
+        wire.ShouldStartWith("* 1 FETCH (FLAGS (");
+        wire.ShouldContain(" RFC822.SIZE ");
+        wire.ShouldContain(" ENVELOPE (\"Mon, 7 Feb 2026 21:52:25 -0800\" \"hello\" ");
+        wire.ShouldEndWith("a2 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// §9's <c>msg-att-static</c> is <c>"ENVELOPE" SP envelope</c> with no NIL alternative, so a
+    /// message whose octets are not in the store is answered with the empty structure rather
+    /// than failing the command — one unreadable message must not close a folder.
+    /// </summary>
+    [Fact]
+    public async Task An_envelope_fetch_of_a_message_with_no_content_is_all_nil()
+    {
+        string wire = Wire(await ExecuteAsync(await FetchableAsync(), "a2 FETCH 1 ENVELOPE"));
+
+        wire.ShouldBe(
+            "* 1 FETCH (ENVELOPE (NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL))\r\n" +
+            "a2 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.5 sets \Seen for a BODY[…] without .PEEK and for nothing else. An envelope is built
+    /// from the header the server already has to read, and a client that listed a folder would
+    /// otherwise mark every message in it read. Asserted on the write rather than on the
+    /// reported flags, because the fake delivers messages already \Seen.
+    /// </summary>
+    [Fact]
+    public async Task An_envelope_fetch_does_not_set_seen()
+    {
+        (ImapCommandProcessor processor, ScriptedImapMailboxReader store) = await ReadableAsync();
+
+        await ExecuteAsync(processor, "a2 FETCH 1 (ENVELOPE FLAGS)");
+
+        store.Stored.ShouldBeEmpty();
+    }
+
+    /// <summary>
+    /// The control for the test above: the same folder, fetched with a non-peeking section,
+    /// does write. A test that only asserted the absence of a write would pass just as well if
+    /// the fake had stopped recording them.
+    /// </summary>
+    [Fact]
+    public async Task A_non_peeking_body_fetch_does_set_seen()
+    {
+        (ImapCommandProcessor processor, ScriptedImapMailboxReader store) = await ReadableAsync();
+
+        await ExecuteAsync(processor, "a2 FETCH 1 BODY[]");
+
+        store.Stored.ShouldNotBeEmpty();
+    }
+
+    /// <summary>
+    /// An envelope member that cannot be quoted becomes a literal in the middle of the item, and
+    /// the rest of the structure follows the octets on the same line.
+    /// </summary>
+    [Fact]
+    public async Task An_eight_bit_subject_becomes_a_literal_inside_the_envelope()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 1)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 7);
+
+        mailboxes.WithContent(
+            authenticator.KnownMailboxId,
+            "INBOX",
+            uid: 7,
+            "Subject: caf\u00e9\r\nFrom: a@b.test\r\n\r\nbody\r\n");
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+
+        string wire = Wire(await ExecuteAsync(processor, "a2 FETCH 1 ENVELOPE"));
+
+        wire.ShouldBe(
+            "* 1 FETCH (ENVELOPE (NIL {4}\r\ncaf\u00e9 ((NIL NIL \"a\" \"b.test\")) " +
+            "((NIL NIL \"a\" \"b.test\")) ((NIL NIL \"a\" \"b.test\")) " +
+            "NIL NIL NIL NIL NIL))\r\n" +
             "a2 OK FETCH completed\r\n");
     }
 

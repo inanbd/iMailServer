@@ -246,11 +246,10 @@ public sealed class ImapFetchTests
     }
 
     /// <summary>
-    /// The items that are stored columns rather than a parse of the message. Everything else
-    /// waits on the MIME reader.
+    /// The stored columns, and the envelope. Everything else waits on the MIME reader.
     /// </summary>
     [Fact]
-    public void Only_the_stored_columns_are_available()
+    public void The_stored_columns_and_the_envelope_are_available()
     {
         ImapFetchItems.Available.ShouldBe(
         [
@@ -258,21 +257,43 @@ public sealed class ImapFetchTests
             ImapFetchItem.Uid,
             ImapFetchItem.InternalDate,
             ImapFetchItem.Rfc822Size,
+            ImapFetchItem.Envelope,
         ]);
     }
 
     /// <summary>
-    /// The two lists agree: an item is answerable exactly when the summary has a value for it.
-    /// A disagreement would mean either a silent omission or a refused item that would have
-    /// worked.
+    /// The two lists agree: an item is answerable from the summary alone exactly when it is
+    /// available and does not need the message read. A disagreement would mean either a silent
+    /// omission or a refused item that would have worked.
     /// </summary>
     [Fact]
-    public void An_item_is_available_exactly_when_the_summary_can_answer_it()
+    public void An_item_is_answerable_from_the_summary_exactly_when_it_needs_no_content()
     {
         foreach (ImapFetchItem item in ImapFetchItems.All)
         {
-            (Summary().ValueOf(item) is not null)
-                .ShouldBe(ImapFetchItems.Available.Contains(item), $"{item} disagrees");
+            bool fromColumns =
+                ImapFetchItems.Available.Contains(item) && !ImapFetchItems.NeedsContent(item);
+
+            (Summary().ValueOf(item) is not null).ShouldBe(fromColumns, $"{item} disagrees");
+        }
+    }
+
+    /// <summary>
+    /// <c>NeedsContent</c> is the complement of the four stored columns, over the whole item
+    /// list — so adding an item without deciding which side it falls on fails here.
+    /// </summary>
+    [Fact]
+    public void Everything_but_the_four_stored_columns_needs_the_message_read()
+    {
+        foreach (ImapFetchItem item in ImapFetchItems.All)
+        {
+            bool stored = item is
+                ImapFetchItem.Flags or
+                ImapFetchItem.Uid or
+                ImapFetchItem.InternalDate or
+                ImapFetchItem.Rfc822Size;
+
+            ImapFetchItems.NeedsContent(item).ShouldBe(!stored, $"{item} disagrees");
         }
     }
 

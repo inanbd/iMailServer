@@ -691,6 +691,7 @@ public sealed class ImapCommandProcessor
         }
 
         _session.Select(snapshot.FolderId, snapshot.UidValidity, readOnly);
+        _session.ReportExists(snapshot.ExistsCount);
 
         List<ImapResponse> responses =
         [
@@ -1160,13 +1161,15 @@ public sealed class ImapCommandProcessor
 
         foreach (ImapFetchRequestItem item in requested)
         {
+            // An item read out of the message needs somewhere to read it from. A deployment
+            // without a message store can still answer the folder's own columns.
+            if (ImapFetchItems.NeedsContent(item.Item) && _messages is null)
+            {
+                return NotImplemented(command);
+            }
+
             if (item.Item == ImapFetchItem.BodySection)
             {
-                if (_messages is null)
-                {
-                    return NotImplemented(command);
-                }
-
                 // A numbered part or a MIME header needs the message's MIME tree walked, which
                 // is not built yet. §6.4.5 separates that from a syntax error - "NO - fetch
                 // error: can't fetch that data" - so the item is named rather than the command
@@ -1209,9 +1212,9 @@ public sealed class ImapCommandProcessor
             reported.Add(ImapFetchItem.Uid);
         }
 
-        bool wantsBody = requested.Any(r => r.Item == ImapFetchItem.BodySection);
+        bool wantsContent = requested.Any(r => ImapFetchItems.NeedsContent(r.Item));
 
-        if (!wantsBody)
+        if (!wantsContent)
         {
             List<ImapResponse> plain = [];
 
@@ -1320,6 +1323,21 @@ public sealed class ImapCommandProcessor
 
             foreach (ImapFetchRequestItem item in requested)
             {
+                if (item.Item == ImapFetchItem.Envelope)
+                {
+                    // Parsed per message rather than once, because each message has its own
+                    // header. A message whose octets are gone still answers, with the empty
+                    // structure: §9's msg-att-static has no NIL for an envelope.
+                    ImapSegmentBuilder envelope = new();
+
+                    ImapEnvelopes.Format(
+                        haveContent ? ImapEnvelopes.Read(content) : ImapEnvelopes.Missing,
+                        envelope);
+
+                    parts.Add(ImapFetchPart.Composite("ENVELOPE", envelope.Build()));
+                    continue;
+                }
+
                 if (item.Section is null)
                 {
                     // A metadata item alongside a body one: rendered as text, then handed over
@@ -1574,6 +1592,10 @@ public sealed class ImapCommandProcessor
         {
             responses.Add(ImapResponses.Expunge(sequenceNumber));
         }
+
+        // §7.4.1: "The EXPUNGE response also decrements the number of messages in the mailbox".
+        // So the client's count falls by one per line, without an EXISTS being sent.
+        _session.ReportExists(Math.Max(0, _session.ReportedExists - removed.Count));
 
         responses.Add(ImapResponses.Ok(command.Tag, "EXPUNGE completed"));
 
@@ -1996,6 +2018,11 @@ public sealed class ImapCommandProcessor
             responses.Add(ImapResponses.Expunge(sequenceNumber));
         }
 
+        // A MOVE takes its messages out of the selected folder, and §7.4.1 makes each EXPUNGE
+        // line a decrement of the count the client holds.
+        _session.ReportExists(
+            Math.Max(0, _session.ReportedExists - result.RemovedSequenceNumbers.Count));
+
         responses.Add(ImapResponses.Ok(
             command.Tag,
             command.IsUid ? $"UID {verb} completed" : $"{verb} completed"));
@@ -2107,6 +2134,7 @@ public sealed class ImapCommandProcessor
         if (_session.SelectedFolderId == result.FolderId)
         {
             responses.Add(ImapResponses.Exists(result.ExistsCount));
+            _session.ReportExists(result.ExistsCount);
         }
 
         responses.Add(ImapResponses.Ok(command.Tag, "APPEND completed"));

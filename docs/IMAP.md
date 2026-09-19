@@ -129,11 +129,11 @@ the count of messages carrying it is zero — a true answer rather than an unimp
 ## FETCH
 
 Implemented for the data items that are stored columns — `FLAGS`, `UID`, `INTERNALDATE`,
-`RFC822.SIZE`, and therefore the `FAST` macro in full. `ENVELOPE`, `BODY`, `BODYSTRUCTURE`,
-`RFC822*` and `BODY[...]` need a MIME reader and are answered with a tagged `NO` naming the
-item. RFC 3501 §6.4.5 distinguishes "BAD - command unknown or arguments invalid" from "NO -
-fetch error: can't fetch that data"; a client told `BAD` for `ENVELOPE` would go looking for a
-syntax error that is not there.
+`RFC822.SIZE` — for `ENVELOPE`, for `BODY[...]` and the `RFC822*` items, and therefore for the
+`FAST` and `ALL` macros in full. `BODY`, `BODYSTRUCTURE` and numbered MIME parts need a MIME
+reader and are answered with a tagged `NO` naming the item. RFC 3501 §6.4.5 distinguishes "BAD -
+command unknown or arguments invalid" from "NO - fetch error: can't fetch that data"; a client
+told `BAD` for `BODYSTRUCTURE` would go looking for a syntax error that is not there.
 
 **`UID FETCH` is the same handler with one flag**, because §6.4.8 makes it the same command —
 only what the numbers mean changes. Two of its rules are easy to get wrong and both are tested:
@@ -169,7 +169,7 @@ of.
 `BODY[]`, `BODY[HEADER]`, `BODY[TEXT]`, `BODY[HEADER.FIELDS (…)]`, `BODY[HEADER.FIELDS.NOT (…)]`,
 their `.PEEK` forms, `<origin.length>` partials, and the `RFC822`, `RFC822.HEADER` and
 `RFC822.TEXT` items §6.4.5 defines as equivalents. Numbered MIME parts and `BODY[n.MIME]` are
-refused by name pending the MIME tree; `ENVELOPE` and `BODYSTRUCTURE` likewise.
+refused by name pending the MIME tree; `BODY` and `BODYSTRUCTURE` likewise.
 
 **The octets go out as a literal and are never touched.** §9 types a body section's value an
 `nstring`, and a quoted string cannot hold CR, LF or an 8-bit octet — all of which a message is
@@ -210,6 +210,51 @@ still holds one message at a time on top of the materialised response below.
 **Known limitation: the response is materialised, not streamed.** `FETCH 1:*` over a folder with
 a million messages builds a million response objects before any of them is written. That is
 within the current `ImapCommandResult` shape and is the next thing to change for large mailboxes.
+
+### ENVELOPE
+
+The item a client builds a message list from: the sender, subject and date of every message in a
+folder without fetching one byte of any of them. §6.4.5: "computed by the server by parsing the
+[RFC-2822] header into the component parts, defaulting various fields as necessary."
+
+**The members are the header's own text, not a normalised form of it.** §7.4.2's worked example
+gives the date as `"Wed, 17 Jul 1996 02:23:25 -0700 (PDT)"` — the line as written, comment and
+all. That example is used as a test: the same section shows the message's header in its reply to
+`fetch 12 body[header]` and the envelope the same server computed from it, so the specification
+checks the implementation rather than the implementation checking itself.
+
+**Absent and empty are different answers, and only for four of the ten members.** §7.4.2: a
+missing `Date`, `Subject`, `In-Reply-To` or `Message-ID` is `NIL` and a present-but-empty one is
+the empty string; `From`, `To`, `Cc` and `Bcc` are `NIL` in *both* cases, because §9's
+`env-from = "(" 1*address ")" / nil` has no empty-list form to put an empty header in.
+
+**`Sender` and `Reply-To` default to `From`, and that is the server's job.** §7.4.2: "the server
+sets the corresponding member of the envelope to be the same value as the from member (the
+client is not expected to know to do this)".
+
+**A `NIL` host means group syntax, so a malformed address never gets one.** §7.4.2 reserves that
+shape: a host of `NIL` with a non-`NIL` mailbox opens a group, and with a `NIL` mailbox closes
+one. Answering `NIL` for `From: Mailer Daemon`, which has no domain to report, would open a group
+the client never sees closed and every address after it would be read as a member. Such an
+address gets an empty host instead — not `NIL`, still visibly malformed, and the list keeps its
+shape.
+
+**Comments are dropped and quoting is removed; encoded words are not decoded.** §7.4.2 asks for
+the first two — the personal name "holds phrase from [RFC-2822] mailbox after removing
+[RFC-2822] quoting" — and RFC 2047 §6.2 puts the third in the client. A server that decoded
+`=?utf-8?B?…?=` would have to re-encode the result into a charset the envelope has no field to
+name.
+
+**A member a quoted string cannot hold goes out as a literal, mid-structure.** §9's `QUOTED-CHAR`
+is US-ASCII, so a subject carrying a raw 8-bit octet — forbidden by RFC 2822 §2.2 and common in
+real mail — is sent as `{n}CRLF` followed by exactly n octets, with the rest of the envelope
+following them. The header block is decoded as Latin-1 for exactly this reason: every octet round
+trips, where a UTF-8 decode would replace each unpaired byte with U+FFFD and lose it.
+
+**The whole header is parsed, including the awkward parts.** RFC 2822 §A.5's "aesthetically
+displeasing, but perfectly legal" example — a quoted-pair inside a comment, comments in the
+middle of an `addr-spec`, a nested comment, a group whose name is followed by one, and a date
+folded across six lines — is a test.
 
 ## Folder management
 
@@ -507,6 +552,23 @@ another session expunged something, and reporting that correctly needs the seque
 went — which the poll does not know. Guessing would make a client renumber onto the wrong message,
 which in this response is how mail gets deleted on the client. A shrink is absorbed silently and
 the client learns of it on its next command: late, but never wrong.
+
+**The baseline is what the client was told, not what the folder held when the idle began.** The
+session carries the count it last reported — set by `SELECT`, by an `APPEND` into the selected
+folder, and decremented by each `EXPUNGE` line, which §7.4.1 makes equivalent: "The EXPUNGE
+response also decrements the number of messages in the mailbox; it is not necessary to send an
+EXISTS response with the new value." Two things follow, and both were wrong before:
+
+- *A message that arrives between `SELECT` and `IDLE` is pushed.* A server that re-counted on
+  entering the idle would adopt that message as its starting point and never mention it, leaving
+  the client one behind until its next command — which is the polling `IDLE` exists to replace.
+- *Absorbing a shrink must not lower the baseline.* A folder of ten that loses two and gains one
+  must not be sent `* 9 EXISTS`: that is a decrement without the `EXPUNGE` lines §7.4.1 pairs it
+  with, and RFC 2180 §4.1's worked example sends those lines first and the lower `EXISTS` after.
+  The client would otherwise renumber onto the wrong messages.
+
+**The poll interval is five seconds by default** and is a listener option, so a deployment that
+wants faster pushes or cheaper idling can say so.
 
 **The inactivity timeout still applies**, which §3 permits outright: "The server MAY consider a
 client inactive if it has an IDLE command running, and if such a server has an inactivity timeout
