@@ -267,6 +267,44 @@ Paste raw headers; get SPF, DKIM, DMARC and ARC results with the reasoning, plus
 Useful in both directions: diagnosing why your mail was refused, and diagnosing why something
 arrived that should not have.
 
+## The Operations category
+
+Five points, the lightest of the six, and it contains the single worst finding in the report.
+
+| Id | W | Judged on |
+|---|---|---|
+| `operations.not-an-open-relay` | 3 | An unauthenticated message to an outside address is refused |
+| `operations.queue-health` | 2 | The **age** of the oldest queued message |
+| `operations.bounce-rate` | 2 | Permanent failures as a share of recent deliveries |
+| `operations.disk-space` | 2 | Free space on the message store's volume |
+| `operations.clock-skew` | 1 | Distance from an external time reference |
+
+The weights are relative; `DeliverabilityReport.From` normalises them to the category's five, and
+a test asserts that rather than the arithmetic.
+
+**An open relay is not a five-point problem, and the weight does not have to say so.** Readiness
+is the worst outcome present and never the arithmetic, so a server scoring 96 with an open relay
+is *Not ready* and the UI leads with that. This is the design working as intended: it is why the
+verdict and the score are separate things. The remedy says to take the listener off the network
+before changing any setting, because while it is reachable it is being used.
+
+**The queue is judged on age, not depth.** A queue of ten thousand that clears in a minute is a
+busy server; a queue of one that has been there since yesterday is a broken one. A check on depth
+reports the first and misses the second. A non-empty queue whose age is unknown is therefore
+*Inconclusive* rather than passing — depth alone says nothing about health.
+
+**A bounce rate is not computed below fifty deliveries.** Two bounces out of three is 67% and
+means nothing; an operator on their first day would otherwise be shown a catastrophic number
+generated entirely by their own test messages, and would go looking for a problem that does not
+exist.
+
+**The clock check names what a skew breaks** — DKIM signatures carrying `x=`, a new certificate
+that looks not-yet-valid, `Received` headers dated wrongly — because none of those looks like a
+clock problem from the outside, and an operator told only "your clock is wrong" has no reason to
+connect it to the delivery failures they are chasing. A clock behind is judged exactly as one
+ahead; reading the signed value rather than its magnitude would pass every slow clock in the
+world.
+
 ## Reputation providers
 
 `IReputationProvider` is an abstraction with caching and rate limiting. `DnsBlockListProvider`
