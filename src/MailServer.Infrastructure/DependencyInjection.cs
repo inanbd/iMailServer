@@ -200,6 +200,12 @@ public static class DependencyInjection
         // Scoped for the same reason the SMTP one is: its dependencies reach repositories, and a
         // handler shared across concurrent sessions would share their database connection.
         services.TryAddScoped<Imap.ImapConnectionHandler>();
+        services.TryAddScoped<Pop3.Pop3ConnectionHandler>();
+
+        // The POP3 maildrop lock is a singleton, and has to be: RFC 1939 §4's exclusive-access
+        // lock exists to keep two sessions apart, and one held per scope would be held by every
+        // connection separately, which is no lock at all.
+        services.TryAddSingleton<Pop3.IPop3MaildropLocks, Pop3.Pop3MaildropLocks>();
         services.TryAddScoped<ISmtpDirectory, SmtpDirectory>();
         services.TryAddScoped<IMailboxAuthenticator, MailboxAuthenticator>();
         services.TryAddScoped<ISubmissionRateLimiter, SubmissionRateLimiter>();

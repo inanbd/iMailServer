@@ -298,6 +298,40 @@ public interface IImapMailboxWriter
         bool subscribed,
         DateTimeOffset now,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Removes named messages from a folder, whatever their flags.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>POP3's UPDATE state is why this exists alongside
+    /// <see cref="ExpungeAsync"/>.</b> RFC 1939 §6: "The POP3 server removes all messages marked
+    /// as deleted from the maildrop […] In no case may the server remove any messages not marked
+    /// as deleted." A POP3 session's marks live in that session and nowhere else, so the removal
+    /// has to name the messages. Reaching for <c>ExpungeAsync</c> instead would remove every
+    /// message in the folder carrying <c>\Deleted</c> — including ones an IMAP client marked and
+    /// deliberately has not expunged, which is mail the user did not ask anybody to destroy.
+    /// </para>
+    /// <para>
+    /// <b>The messages' stored content is not touched</b>, for the reason
+    /// <see cref="ExpungeAsync"/> gives at length: only the <c>Deliveries</c> rows go, and
+    /// reclaiming a file no delivery references is a retention sweep's job.
+    /// </para>
+    /// <para>
+    /// A UID that is not there is passed over rather than reported. Another session may have
+    /// removed it since this one listed the folder, and a POP3 client that is told its
+    /// <c>QUIT</c> failed will simply send the same deletions again.
+    /// </para>
+    /// </remarks>
+    /// <param name="mailboxId">The authenticated mailbox. Scopes the removal; never optional.</param>
+    /// <param name="folderId">The folder the messages are in.</param>
+    /// <param name="uids">The messages to remove. An empty list does nothing.</param>
+    /// <returns>How many rows were removed.</returns>
+    Task<long> DeleteMessagesAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        IReadOnlyList<long> uids,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>What an <c>APPEND</c> did.</summary>

@@ -152,6 +152,7 @@ public static class Program
         // those would accept connections it could not complete.
         builder.Services.AddHostedService<SmtpListenerService>();
         builder.Services.AddHostedService<ImapListenerService>();
+        builder.Services.AddHostedService<Pop3ListenerService>();
 
         return builder.Build();
     }

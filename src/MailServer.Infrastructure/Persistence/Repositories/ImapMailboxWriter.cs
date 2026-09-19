@@ -1126,4 +1126,58 @@ internal sealed class ImapMailboxWriter(
                 ct),
             cancellationToken);
     }
+
+    /// <summary>
+    /// Removes named deliveries, whatever their flags.
+    /// </summary>
+    /// <remarks>
+    /// The same statement <see cref="ExpungeAsync"/> uses to remove the rows it selected, driven
+    /// by the caller's list instead of by a flag — see
+    /// <see cref="IImapMailboxWriter.DeleteMessagesAsync"/> for why POP3 cannot use the flag.
+    /// </remarks>
+    public Task<long> DeleteMessagesAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        IReadOnlyList<long> uids,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(uids);
+
+        if (uids.Count == 0)
+        {
+            return Task.FromResult(0L);
+        }
+
+        // One transaction around every batch: a QUIT that removed half its messages and then
+        // failed would leave a client believing all of them were gone, because RFC 1939 §6 gives
+        // it one answer for the whole operation.
+        return transactions.ExecuteScopedAsync(
+            async ct => await ExecuteAsync(
+                async (session, inner) =>
+                {
+                    long removed = 0;
+
+                    for (int offset = 0; offset < uids.Count; offset += UidBatchSize)
+                    {
+                        long[] batch = [.. uids.Skip(offset).Take(UidBatchSize)];
+
+                        removed += await session.Connection
+                            .ExecuteAsync(Command(
+                                session,
+                                DeleteDeliveries,
+                                new
+                                {
+                                    FolderId = folderId.Value,
+                                    MailboxId = mailboxId.Value,
+                                    Uids = batch,
+                                },
+                                inner))
+                            .ConfigureAwait(false);
+                    }
+
+                    return removed;
+                },
+                ct),
+            cancellationToken);
+    }
 }

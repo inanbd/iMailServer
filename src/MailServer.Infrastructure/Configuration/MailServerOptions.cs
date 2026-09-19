@@ -51,6 +51,8 @@ public sealed class MailServerOptions
 
     public ImapOptions Imap { get; set; } = new();
 
+    public Pop3Options Pop3 { get; set; } = new();
+
     public OutboundOptions Outbound { get; set; } = new();
 }
 
@@ -88,6 +90,59 @@ public sealed class ImapOptions
     /// advertise an authentication this server cannot complete.
     /// </remarks>
     public bool EnableAuthentication { get; set; }
+}
+
+/// <summary>The POP3 listeners.</summary>
+/// <remarks>
+/// <para>
+/// Both listeners are <b>disabled by default</b>, as the IMAP ones are, and POP3 has a reason of
+/// its own to stay shut: RFC 1939 §8 describes what a maildrop becomes when clients use it as a
+/// repository — "there has been a tendency for already-read messages to accumulate on the server
+/// without bound" — and §5's numbering makes a maildrop of thousands of messages expensive to
+/// open. It is here for the devices that cannot speak IMAP, not as an alternative to it.
+/// </para>
+/// <para>
+/// Port 995 is the one to enable. RFC 8314 §3.1 has the TLS handshake begin immediately there,
+/// so there is no cleartext phase for a stripping attacker to interfere with; port 110 exists
+/// for clients that cannot do that, and it refuses <c>USER</c> and <c>PASS</c> until
+/// <c>STLS</c> has run.
+/// </para>
+/// </remarks>
+public sealed class Pop3Options
+{
+    /// <summary>Port 110. Cleartext on connect; TLS is reached through <c>STLS</c>.</summary>
+    public Pop3ListenerOptions Cleartext { get; set; } = new() { Port = 110, Enabled = false };
+
+    /// <summary>Port 995. TLS from the first byte, before the greeting.</summary>
+    public Pop3ListenerOptions ImplicitTls { get; set; } = new() { Port = 995, Enabled = false };
+
+    /// <summary>
+    /// Whether <c>USER</c> and <c>PASS</c> are offered.
+    /// </summary>
+    /// <remarks>
+    /// The flag that keeps the capability listing honest: false announces no <c>USER</c>
+    /// capability and refuses both commands, which RFC 2449 §6.2 makes the correct pairing — that
+    /// capability "indicates that the USER and PASS commands are supported".
+    /// </remarks>
+    public bool EnableAuthentication { get; set; }
+}
+
+/// <summary>One POP3 listener's endpoint.</summary>
+/// <remarks>
+/// The same three members as <see cref="ImapListenerOptions"/>, and deliberately not the same
+/// type, for the reason that class gives: a configuration class is a published schema, and
+/// sharing one between two protocols' sections would mean that adding a setting for one silently
+/// adds it to the other.
+/// </remarks>
+public sealed class Pop3ListenerOptions
+{
+    public bool Enabled { get; set; }
+
+    [Range(1, 65_535)]
+    public int Port { get; set; }
+
+    /// <summary>Addresses to bind. Empty means every interface.</summary>
+    public IList<string> BindAddresses { get; set; } = [];
 }
 
 /// <summary>One IMAP listener's endpoint.</summary>
@@ -621,6 +676,54 @@ public sealed class LimitsOptions
     /// </remarks>
     [Range(1_800, 86_400)]
     public int ImapInactivityTimeoutSeconds { get; set; } = 1_800;
+
+    /// <summary>
+    /// Longest a POP3 connection may sit idle before it has authenticated.
+    /// </summary>
+    /// <remarks>
+    /// Bounds slowloris. A POP3 client sends <c>USER</c> and <c>PASS</c> immediately, so this is
+    /// far shorter than the authenticated timer and is not the one RFC 1939 §3 sets a floor for —
+    /// that floor is about a session that has a maildrop open.
+    /// </remarks>
+    [Range(5, 600)]
+    public int Pop3PreAuthenticationTimeoutSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Longest an authenticated POP3 connection may sit idle.
+    /// </summary>
+    /// <remarks>
+    /// <b>The lower bound of the range is a conformance requirement, not a preference.</b>
+    /// RFC 1939 §3: "A POP3 server MAY have an inactivity autologout timer. Such a timer MUST be
+    /// of at least 10 minutes' duration." Expressing that as the floor of the
+    /// <see cref="RangeAttribute"/> rather than as a comment means an operator cannot configure
+    /// this server into violating it — the options validator refuses to start instead.
+    /// </remarks>
+    [Range(600, 86_400)]
+    public int Pop3InactivityTimeoutSeconds { get; set; } = 600;
+
+    /// <summary>
+    /// Longest POP3 command line accepted.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>RFC 2449 §4 sets the conformance floor at 255</b>: "Servers which support the CAPA
+    /// command MUST support commands up to 255 octets." This server supports CAPA, so no value
+    /// below that would be conformant.
+    /// </para>
+    /// <para>
+    /// <b>The range starts at 512 rather than 255 because the line reader's own floor is 512</b>
+    /// — the same reader IMAP uses, which refuses to be constructed below it. A range that
+    /// admitted 255 would let an operator configure a server whose every POP3 connection failed
+    /// before its greeting, which is the worst kind of misconfiguration: silent, total, and
+    /// indistinguishable from a firewall. Every value in this range satisfies §4 with room.
+    /// </para>
+    /// <para>
+    /// The default leaves room for a long passphrase, which RFC 1939 §7 puts entirely in one
+    /// argument: "a POP3 server may treat spaces in the argument as part of the password".
+    /// </para>
+    /// </remarks>
+    [Range(512, 8_192)]
+    public int MaxPop3LineBytes { get; set; } = 1_024;
 
     [Range(4_096, 4 * 1024 * 1024)]
     public int MaxHeaderBytes { get; set; } = 256 * 1024;

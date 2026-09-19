@@ -767,6 +767,55 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
 
         return Task.FromResult<IReadOnlyList<long>>(removed);
     }
+
+    /// <summary>Every (folder, uid) set this fake was asked to remove by name.</summary>
+    public List<(Guid Folder, long[] Uids)> Removed { get; } = [];
+
+    /// <summary>
+    /// Removes named messages, whatever their flags, and renumbers what is left.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately independent of <c>\Deleted</c>, as the real writer is: a fake that removed
+    /// by flag would make a POP3 test pass while the product destroyed mail an IMAP client had
+    /// merely marked.
+    /// </remarks>
+    public Task<long> DeleteMessagesAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        IReadOnlyList<long> uids,
+        CancellationToken cancellationToken)
+    {
+        Removed.Add((folderId.Value, [.. uids]));
+
+        KeyValuePair<(Guid Mailbox, string Path), Entry> owner = _folders
+            .FirstOrDefault(pair =>
+                pair.Value.Folder.Id.Value == folderId.Value &&
+                pair.Key.Mailbox == mailboxId.Value);
+
+        if (owner.Value is null ||
+            !_messages.TryGetValue(owner.Key, out List<ImapMessageSummary>? all))
+        {
+            return Task.FromResult(0L);
+        }
+
+        HashSet<long> wanted = [.. uids];
+
+        List<ImapMessageSummary> survivors = [.. all.Where(m => !wanted.Contains(m.Uid))];
+        long removed = all.Count - survivors.Count;
+
+        all.Clear();
+
+        long sequenceNumber = 1;
+
+        foreach (ImapMessageSummary survivor in survivors.OrderBy(m => m.Uid))
+        {
+            all.Add(survivor with { SequenceNumber = sequenceNumber++ });
+        }
+
+        SyncCount(owner.Key.Mailbox, owner.Key.Path);
+
+        return Task.FromResult(removed);
+    }
 }
 
 /// <summary>A message store serving the octets a <see cref="ScriptedImapMailboxReader"/> holds.</summary>
