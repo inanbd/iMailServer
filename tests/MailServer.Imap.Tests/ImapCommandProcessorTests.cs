@@ -4012,6 +4012,58 @@ public sealed class ImapCommandProcessorTests
     }
 
     /// <summary>
+    /// A structure whose nested envelope needs a literal puts one in the middle of the item, and
+    /// the rest of the structure follows the octets on the same line. This is the one place two
+    /// of this increment's mechanisms meet — <c>BODYSTRUCTURE</c> embedding an <c>ENVELOPE</c>
+    /// that embeds an <c>nstring</c> which has no quoted form — and a response assembled by
+    /// concatenating text would have corrupted it.
+    /// </summary>
+    [Fact]
+    public async Task A_literal_inside_a_nested_envelope_survives_the_response_assembly()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 7);
+
+        mailboxes.WithContent(
+            authenticator.KnownMailboxId,
+            "INBOX",
+            uid: 7,
+            "Content-Type: message/rfc822\r\n" +
+            "\r\n" +
+            "Subject: caf\u00e9\r\n" +
+            "From: a@b.test\r\n" +
+            "\r\n" +
+            "body\r\n");
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+
+        string wire = Wire(await ExecuteAsync(processor, "a2 FETCH 1 BODY"));
+
+        // The literal interrupts the envelope, which is itself inside the body structure.
+        wire.ShouldContain("(NIL {4}\r\ncaf\u00e9 ((NIL NIL \"a\" \"b.test\"))");
+        wire.ShouldStartWith("* 1 FETCH (BODY (\"MESSAGE\" \"RFC822\" ");
+        wire.ShouldEndWith("a2 OK FETCH completed\r\n");
+
+        // Every declared octet count is followed by exactly that many octets.
+        foreach (System.Text.RegularExpressions.Match match in
+            System.Text.RegularExpressions.Regex.Matches(wire, @"\{(\d+)\}\r\n"))
+        {
+            int declared = int.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+            int start = match.Index + match.Length;
+
+            (wire.Length - start).ShouldBeGreaterThanOrEqualTo(declared);
+        }
+    }
+
+    /// <summary>
     /// A part that is not there is answered NIL rather than failing the command: whether a part
     /// exists is a fact about one message, and §6.4.8's FETCH covers many at once.
     /// </summary>

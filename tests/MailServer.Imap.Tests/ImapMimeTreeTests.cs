@@ -796,6 +796,60 @@ public sealed class ImapMimeTreeTests
             .ShouldBeLessThanOrEqualTo(ImapMimeTree.MaxPartCount + 1);
     }
 
+    /// <summary>
+    /// Every octet count a response declares is followed by exactly that many octets.
+    /// </summary>
+    /// <remarks>
+    /// §9's <c>literal = "{" number "}" CRLF *CHAR8</c> makes the count the client's instruction
+    /// for how much to read off the socket. Getting it wrong by one does not corrupt one field —
+    /// it desynchronises the connection permanently, because every octet after the miscount is
+    /// read as part of a response it does not belong to. The shapes below are every way this
+    /// server can put a literal inside a structure.
+    /// </remarks>
+    [Theory]
+    [InlineData("Subject: caf\u00e9\r\nFrom: a@b.test\r\n\r\nbody\r\n")]
+    [InlineData("Content-Type: message/rfc822\r\n\r\nSubject: \u00a1hola!\r\nFrom: a@b.test\r\n\r\nx\r\n")]
+    [InlineData("Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: text/plain; name=\"caf\u00e9.txt\"\r\n\r\nhi\r\n--b--\r\n")]
+    [InlineData("Content-Type: text/plain\r\nContent-Description: \u00e9\u00e8\u00ea\r\n\r\nhi\r\n")]
+    public void Every_declared_octet_count_matches_the_octets_that_follow(string message)
+    {
+        ImapSegmentBuilder builder = new();
+
+        // Both items into one builder, which is what a FETCH (ENVELOPE BODYSTRUCTURE) produces
+        // and the shape in which a literal can land in either half.
+        ImapEnvelopes.Format(ImapEnvelopes.Read(Octets(message)), builder);
+        builder.Append(" ");
+        ImapBodyStructure.Format(ImapMimeTree.Parse(Octets(message)), extended: true, builder);
+
+        IReadOnlyList<ImapResponseSegment> segments = builder.Build();
+
+        int literals = 0;
+
+        for (int i = 0; i < segments.Count; i++)
+        {
+            if (segments[i].Text is not { } text || !text.EndsWith("}\r\n", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            int open = text.LastIndexOf('{');
+
+            open.ShouldBeGreaterThanOrEqualTo(0);
+
+            int declared = int.Parse(
+                text[(open + 1)..^3],
+                System.Globalization.CultureInfo.InvariantCulture);
+
+            (i + 1).ShouldBeLessThan(segments.Count);
+            segments[i + 1].IsText.ShouldBeFalse();
+            segments[i + 1].Octets.Length.ShouldBe(declared);
+
+            literals++;
+        }
+
+        literals.ShouldBeGreaterThan(0, "each of these messages needs at least one literal");
+    }
+
     /// <summary>Every node of a tree, including the ones an encapsulated message carries.</summary>
     private static int Count(ImapBodyPart part)
     {

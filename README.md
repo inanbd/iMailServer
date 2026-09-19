@@ -6,18 +6,24 @@ This is a complete mail platform — SMTP receipt, authenticated submission, dir
 delivery, IMAP access, DKIM/SPF/DMARC, automatic TLS certificates and deliverability
 diagnostics — not an SMTP sending utility.
 
-> **Status: Milestone 9 of 13 complete.** The foundation, security, certificates, ACME, mailbox
-> administration, SMTP inbound and submission, outbound delivery, and now mail authentication —
-> DKIM signing/verification, SPF, DMARC alignment and enforcement, ARC groundwork — are built,
-> compile with warnings as errors, and are covered by 3,416 passing tests. This server can
-> receive mail from the Internet, accept authenticated submission from a mail client, relay it
-> onward to another server's MX, and evaluate/enforce SPF+DKIM+DMARC on the way in; it does not
-> yet offer IMAP access, and two real Milestone 9 gaps are worth knowing before relying on this:
-> there is no operator-facing way yet to generate and activate a DKIM key for a domain, and none
-> of this has been proven against a live Gmail/Microsoft 365 exchange, only RFC test vectors and
-> this product's own round-trip. See [Roadmap](#roadmap) for what lands when, and
-> `docs/Standards.md` for exactly which standards are implemented versus planned. Nothing is
-> described as working until it has tests.
+> **Status: Milestones 1–9 complete; Milestone 10's protocol work is built and its exit
+> criterion is not yet met.** The foundation, security, certificates, ACME, mailbox
+> administration, SMTP inbound and submission, outbound delivery, mail authentication — DKIM
+> signing/verification, SPF, DMARC alignment and enforcement, ARC groundwork — and now IMAP and
+> POP3 are built, compile with warnings as errors, and are covered by 5,704 passing tests. This
+> server can receive mail from the Internet, accept authenticated submission from a mail client,
+> relay it onward to another server's MX, evaluate and enforce SPF+DKIM+DMARC on the way in, and
+> serve the resulting mailbox over IMAP or POP3.
+>
+> **Three gaps are worth knowing before relying on this.** Milestone 10's exit criterion is
+> "Thunderbird/Outlook/Apple Mail interoperate without mail loss", and that has not been
+> attempted — every IMAP and POP3 claim here rests on this product's own tests and on the RFC
+> text, not on a real client. There is no operator-facing way yet to generate and activate a DKIM
+> key for a domain. And none of the mail authentication work has been proven against a live
+> Gmail/Microsoft 365 exchange, only RFC test vectors and this product's own round-trip.
+>
+> See [Roadmap](#roadmap) for what lands when, and `docs/Standards.md` for exactly which
+> standards are implemented versus planned. Nothing is described as working until it has tests.
 
 ---
 
@@ -52,7 +58,9 @@ diagnostics — not an SMTP sending utility.
 | SPF (parser, evaluator, DNS resolver) | Built and tested against every RFC 7208 Appendix A example |
 | DMARC (Public Suffix List, alignment, `pct=` sampling, `p=reject` enforcement) | Built and tested against RFC 7489's official alignment examples; **aggregate/failure reporting not implemented** — see `docs/DMARC.md` |
 | ARC (groundwork) | Structural parsing and grouping only; **no cryptographic chain validation** |
-| IMAP, POP3, filtering | **Not yet built** — milestones 10–12 |
+| IMAP | Built and tested: UID/UIDVALIDITY correctness, `SELECT`/`EXAMINE`, `LIST`/`LSUB`, `STATUS`, the whole `FETCH` surface including `ENVELOPE`, `BODY`/`BODYSTRUCTURE` and numbered MIME parts, `STORE`, `EXPUNGE`, `COPY`, `APPEND`, `SEARCH`, `IDLE`, `NAMESPACE`, `UNSELECT`, `CHILDREN`, `SPECIAL-USE`; **never exercised by a real mail client** — see `docs/IMAP.md` |
+| POP3 | Built and tested, **disabled by default** — for legacy devices only; see `docs/POP3.md` |
+| Filtering | **Not yet built** — milestone 12 |
 
 ---
 
@@ -261,7 +269,7 @@ assemblies looks finished and provides no compile-time value.
 | 7 | SMTP Submission | **Complete** |
 | 8 | Outbound MTA | **Complete** |
 | 9 | Mail Authentication (DKIM/SPF/DMARC) | **Complete** |
-| 10 | IMAP (+ optional POP3) | Next |
+| 10 | IMAP (+ optional POP3) | Protocol work **complete and tested**; exit criterion (real-client interoperability) **not yet attempted** |
 | 11 | Deliverability | Planned |
 | 12 | Filtering | Planned |
 | 13 | Production Hardening (installer, backups, migration) | Planned |

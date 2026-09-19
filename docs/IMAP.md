@@ -1,6 +1,12 @@
 # IMAP Architecture
 
-> **Status: Planned — Milestone 10.**
+> **Status: built and tested — Milestone 10. The milestone's exit criterion is not met.**
+>
+> Every command below is implemented and covered by tests, but that criterion is
+> "Thunderbird/Outlook/Apple Mail interoperate without mail loss" and no real client has
+> yet connected to this server. Everything here rests on the RFC text and on this product's
+> own tests. Read the next section for why that distinction matters more here than anywhere
+> else in this codebase.
 
 ## Why this is the riskiest subsystem
 
