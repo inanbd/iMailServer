@@ -2459,42 +2459,21 @@ public sealed class ImapCommandProcessorTests
     }
 
     /// <summary>
-    /// §6.4.5 distinguishes "BAD - command unknown or arguments invalid" from "NO - fetch error:
-    /// can't fetch that data". A body-structure item is the second, and saying so by name beats
-    /// a partial response a client cannot tell from a message with no body.
+    /// §6.4.5's FULL macro is "(FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODY)", the last of the
+    /// three to become answerable. Every item it names comes back.
     /// </summary>
-    [Theory]
-    [InlineData("a2 FETCH 1 BODY", "BODY")]
-    [InlineData("a2 FETCH 1 BODYSTRUCTURE", "BODYSTRUCTURE")]
-    [InlineData("a2 FETCH 1 (FLAGS BODYSTRUCTURE)", "BODYSTRUCTURE")]
-    [InlineData("a2 FETCH 1 FULL", "BODY")]
-    public async Task An_item_needing_a_mime_reader_is_refused_by_name(string line, string item)
+    [Fact]
+    public async Task The_full_macro_is_answered_in_full()
     {
-        string wire = Wire(await ExecuteAsync(await FetchableAsync(), line));
+        string wire = Wire(await ExecuteAsync(await FetchableAsync(), "a2 FETCH 1 FULL"));
 
-        wire.ShouldContain("a2 NO ");
-        wire.ShouldContain(item);
-        wire.ShouldContain("not implemented yet");
-        wire.ShouldNotContain(" FETCH (");
-    }
-
-    /// <summary>
-    /// A numbered part or a MIME header needs the message's MIME tree walked, which is a later
-    /// increment. §6.4.5 separates that from a syntax error — "NO - fetch error: can't fetch
-    /// that data" — so the item is named rather than the command called malformed.
-    /// </summary>
-    [Theory]
-    [InlineData("a2 FETCH 1 BODY[1]")]
-    [InlineData("a2 FETCH 1 BODY[1.2]")]
-    [InlineData("a2 FETCH 1 BODY[1.MIME]")]
-    [InlineData("a2 FETCH 1 BODY[1.TEXT]")]
-    public async Task A_section_needing_the_mime_tree_is_refused_by_name(string line)
-    {
-        string wire = Wire(await ExecuteAsync(await FetchableAsync(), line));
-
-        wire.ShouldContain("a2 NO ");
-        wire.ShouldContain("not implemented yet");
-        wire.ShouldNotContain("BAD");
+        wire.ShouldStartWith("* 1 FETCH (FLAGS (");
+        wire.ShouldContain(" INTERNALDATE ");
+        wire.ShouldContain(" RFC822.SIZE ");
+        wire.ShouldContain(" ENVELOPE (");
+        wire.ShouldContain(" BODY (");
+        wire.ShouldNotContain(" NO ");
+        wire.ShouldEndWith("a2 OK FETCH completed\r\n");
     }
 
     [Theory]
@@ -3871,6 +3850,171 @@ public sealed class ImapCommandProcessorTests
             "((NIL NIL \"a\" \"b.test\")) ((NIL NIL \"a\" \"b.test\")) " +
             "NIL NIL NIL NIL NIL))\r\n" +
             "a2 OK FETCH completed\r\n");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // FETCH BODYSTRUCTURE and numbered MIME parts. RFC 3501 §7.4.2.
+    // ---------------------------------------------------------------------------------------
+
+    private const string MultipartMessage =
+        "Date: Mon, 7 Feb 2026 21:52:25 -0800\r\n" +
+        "From: Alice <alice@example.com>\r\n" +
+        "Subject: with an attachment\r\n" +
+        "MIME-Version: 1.0\r\n" +
+        "Content-Type: multipart/mixed; boundary=\"edge\"\r\n" +
+        "\r\n" +
+        "--edge\r\n" +
+        "Content-Type: text/plain; charset=us-ascii\r\n" +
+        "\r\n" +
+        "Have a look.\r\n" +
+        "--edge\r\n" +
+        "Content-Type: application/pdf; name=\"notes.pdf\"\r\n" +
+        "Content-Transfer-Encoding: base64\r\n" +
+        "Content-Disposition: attachment; filename=\"notes.pdf\"\r\n" +
+        "\r\n" +
+        "JVBERi0=\r\n" +
+        "--edge--\r\n";
+
+    private static async Task<ImapCommandProcessor> MultipartAsync()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 7);
+
+        mailboxes.WithContent(authenticator.KnownMailboxId, "INBOX", uid: 7, MultipartMessage);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+
+        return processor;
+    }
+
+    /// <summary>
+    /// The item a client uses to decide what to show and what to offer as a download, answered
+    /// from the message's MIME headers. §7.4.2: "computed by the server by parsing the
+    /// [MIME-IMB] header fields, defaulting various fields as necessary."
+    /// </summary>
+    [Fact]
+    public async Task A_bodystructure_fetch_describes_every_part()
+    {
+        string wire = Wire(await ExecuteAsync(await MultipartAsync(), "a2 FETCH 1 BODYSTRUCTURE"));
+
+        wire.ShouldBe(
+            "* 1 FETCH (BODYSTRUCTURE " +
+            "((\"TEXT\" \"PLAIN\" (\"CHARSET\" \"us-ascii\") NIL NIL \"7BIT\" 12 1 " +
+            "NIL NIL NIL NIL)" +
+            "(\"APPLICATION\" \"PDF\" (\"NAME\" \"notes.pdf\") NIL NIL \"BASE64\" 8 " +
+            "NIL (\"ATTACHMENT\" (\"FILENAME\" \"notes.pdf\")) NIL NIL) " +
+            "\"MIXED\" (\"BOUNDARY\" \"edge\") NIL NIL NIL))\r\n" +
+            "a2 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// §7.4.2 makes BODY the "Non-extensible form of BODYSTRUCTURE", and §9 annotates both
+    /// extension productions "MUST NOT be returned on non-extensible 'BODY' fetch" — so the
+    /// disposition that named the attachment is absent here, and the parameters that follow a
+    /// multipart's subtype are too.
+    /// </summary>
+    [Fact]
+    public async Task A_body_fetch_is_the_same_structure_without_the_extension_data()
+    {
+        string wire = Wire(await ExecuteAsync(await MultipartAsync(), "a2 FETCH 1 BODY"));
+
+        wire.ShouldBe(
+            "* 1 FETCH (BODY " +
+            "((\"TEXT\" \"PLAIN\" (\"CHARSET\" \"us-ascii\") NIL NIL \"7BIT\" 12 1)" +
+            "(\"APPLICATION\" \"PDF\" (\"NAME\" \"notes.pdf\") NIL NIL \"BASE64\" 8) " +
+            "\"MIXED\"))\r\n" +
+            "a2 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// A numbered part comes back as its own octets, with the response echoing the specifier the
+    /// client wrote so it can tell one part from another.
+    /// </summary>
+    [Fact]
+    public async Task A_numbered_part_fetch_returns_that_parts_octets()
+    {
+        string wire = Wire(await ExecuteAsync(await MultipartAsync(), "a2 FETCH 1 BODY.PEEK[2]"));
+
+        wire.ShouldBe(
+            "* 1 FETCH (BODY[2] {8}\r\nJVBERi0=)\r\n" +
+            "a2 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.5: "The MIME part specifier refers to the [MIME-IMB] header for this part." Its own
+    /// header, which is where a client reads the filename it will save an attachment under.
+    /// </summary>
+    [Fact]
+    public async Task A_mime_part_fetch_returns_that_parts_own_header()
+    {
+        string wire = Wire(await ExecuteAsync(await MultipartAsync(), "a2 FETCH 1 BODY.PEEK[1.MIME]"));
+
+        wire.ShouldContain("BODY[1.MIME] {");
+        wire.ShouldContain("Content-Type: text/plain; charset=us-ascii\r\n\r\n");
+        wire.ShouldNotContain("Have a look");
+    }
+
+    /// <summary>
+    /// A part that is not there is answered NIL rather than failing the command: whether a part
+    /// exists is a fact about one message, and §6.4.8's FETCH covers many at once.
+    /// </summary>
+    [Fact]
+    public async Task A_part_that_is_not_there_is_answered_nil()
+    {
+        string wire = Wire(await ExecuteAsync(await MultipartAsync(), "a2 FETCH 1 BODY.PEEK[9]"));
+
+        wire.ShouldBe(
+            "* 1 FETCH (BODY[9] NIL)\r\n" +
+            "a2 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.5's partial applies to a numbered part as it does to the whole message: "If the
+    /// origin octet is specified, this string is a substring of the entire body contents,
+    /// starting at that origin octet."
+    /// </summary>
+    [Fact]
+    public async Task A_numbered_part_can_be_fetched_in_part()
+    {
+        string wire = Wire(await ExecuteAsync(await MultipartAsync(), "a2 FETCH 1 BODY.PEEK[2]<2.4>"));
+
+        wire.ShouldBe(
+            "* 1 FETCH (BODY[2]<2> {4}\r\nBERi)\r\n" +
+            "a2 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// A fetch of a numbered part without .PEEK still sets \Seen, because §6.4.5 attaches that
+    /// to the BODY[…] family rather than to any one section.
+    /// </summary>
+    [Fact]
+    public async Task A_numbered_part_fetch_without_peek_sets_seen()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 7);
+
+        mailboxes.WithContent(authenticator.KnownMailboxId, "INBOX", uid: 7, MultipartMessage);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+        await ExecuteAsync(processor, "a2 FETCH 1 BODY[1]");
+
+        mailboxes.Stored.ShouldNotBeEmpty();
     }
 
     [Fact]

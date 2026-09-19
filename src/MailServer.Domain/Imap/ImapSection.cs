@@ -97,12 +97,21 @@ public sealed record ImapSection(
     {
         StringBuilder builder = new("BODY[");
 
-        foreach (int number in Part)
+        // §9: section-part = nz-number *("." nz-number), and section-spec joins it to a trailing
+        // text specifier with section-part "." section-text. So the dot goes *between* pieces
+        // and never after the last one: BODY[2.] is not a specifier the grammar has, and a
+        // client comparing the echo against what it asked for would find they differ.
+        for (int i = 0; i < Part.Count; i++)
         {
-            builder.Append(number.ToString(CultureInfo.InvariantCulture)).Append('.');
+            if (i > 0)
+            {
+                builder.Append('.');
+            }
+
+            builder.Append(Part[i].ToString(CultureInfo.InvariantCulture));
         }
 
-        builder.Append(Kind switch
+        string text = Kind switch
         {
             ImapSectionKind.Header => "HEADER",
             ImapSectionKind.HeaderFields => "HEADER.FIELDS",
@@ -110,7 +119,17 @@ public sealed record ImapSection(
             ImapSectionKind.Text => "TEXT",
             ImapSectionKind.Mime => "MIME",
             _ => string.Empty,
-        });
+        };
+
+        if (text.Length > 0)
+        {
+            if (Part.Count > 0)
+            {
+                builder.Append('.');
+            }
+
+            builder.Append(text);
+        }
 
         if (Kind is ImapSectionKind.HeaderFields or ImapSectionKind.HeaderFieldsNot)
         {

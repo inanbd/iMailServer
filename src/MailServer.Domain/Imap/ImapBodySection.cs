@@ -62,7 +62,7 @@ public static class ImapBodySection
     /// error — the client asked for the part of a shorter string that is not there, and the
     /// honest answer is an empty one.
     /// </remarks>
-    private static ReadOnlyMemory<byte> Partial(ReadOnlyMemory<byte> whole, ImapSection section)
+    public static ReadOnlyMemory<byte> Partial(ReadOnlyMemory<byte> whole, ImapSection section)
     {
         if (section.Origin is not { } origin)
         {
@@ -101,6 +101,22 @@ public static class ImapBodySection
     /// </remarks>
     private static int HeaderLength(ReadOnlySpan<byte> message)
     {
+        // A part may have no header at all. RFC 2046 §5.1.1: "The absence of a Content-Type
+        // header usually indicates that the corresponding body has a content-type of
+        // 'text/plain; charset=US-ASCII'", and §5.1's own example body parts begin with the
+        // blank line and nothing before it. Looking only for a blank line *after* some other
+        // line would make such a part all header and no body - so the very first line is
+        // checked before the scan begins.
+        if (message.Length > 0 && message[0] == (byte)'\n')
+        {
+            return 1;
+        }
+
+        if (message.Length > 1 && message[0] == (byte)'\r' && message[1] == (byte)'\n')
+        {
+            return 2;
+        }
+
         for (int i = 0; i < message.Length; i++)
         {
             if (message[i] != (byte)'\n')
@@ -133,10 +149,12 @@ public static class ImapBodySection
         return message.Length;
     }
 
-    private static ReadOnlyMemory<byte> HeaderBlock(ReadOnlyMemory<byte> message) =>
+    /// <summary>The header of a message or of one MIME part, blank line included.</summary>
+    public static ReadOnlyMemory<byte> HeaderBlock(ReadOnlyMemory<byte> message) =>
         message[..HeaderLength(message.Span)];
 
-    private static ReadOnlyMemory<byte> BodyBlock(ReadOnlyMemory<byte> message) =>
+    /// <summary>Everything after that header.</summary>
+    public static ReadOnlyMemory<byte> BodyBlock(ReadOnlyMemory<byte> message) =>
         message[HeaderLength(message.Span)..];
 
     /// <summary>

@@ -128,12 +128,10 @@ the count of messages carrying it is zero — a true answer rather than an unimp
 
 ## FETCH
 
-Implemented for the data items that are stored columns — `FLAGS`, `UID`, `INTERNALDATE`,
-`RFC822.SIZE` — for `ENVELOPE`, for `BODY[...]` and the `RFC822*` items, and therefore for the
-`FAST` and `ALL` macros in full. `BODY`, `BODYSTRUCTURE` and numbered MIME parts need a MIME
-reader and are answered with a tagged `NO` naming the item. RFC 3501 §6.4.5 distinguishes "BAD -
-command unknown or arguments invalid" from "NO - fetch error: can't fetch that data"; a client
-told `BAD` for `BODYSTRUCTURE` would go looking for a syntax error that is not there.
+Implemented for every data item §6.4.5 defines: the stored columns `FLAGS`, `UID`,
+`INTERNALDATE` and `RFC822.SIZE`; `ENVELOPE`; `BODY` and `BODYSTRUCTURE`; every `BODY[…]`
+section including numbered MIME parts; the `RFC822*` equivalents; and therefore all three of the
+`FAST`, `ALL` and `FULL` macros.
 
 **`UID FETCH` is the same handler with one flag**, because §6.4.8 makes it the same command —
 only what the numbers mean changes. Two of its rules are easy to get wrong and both are tested:
@@ -167,9 +165,9 @@ of.
 ### Message content
 
 `BODY[]`, `BODY[HEADER]`, `BODY[TEXT]`, `BODY[HEADER.FIELDS (…)]`, `BODY[HEADER.FIELDS.NOT (…)]`,
-their `.PEEK` forms, `<origin.length>` partials, and the `RFC822`, `RFC822.HEADER` and
-`RFC822.TEXT` items §6.4.5 defines as equivalents. Numbered MIME parts and `BODY[n.MIME]` are
-refused by name pending the MIME tree; `BODY` and `BODYSTRUCTURE` likewise.
+numbered parts such as `BODY[1]` and `BODY[4.2.2.1]`, `BODY[n.MIME]`, `BODY[n.HEADER]` and
+`BODY[n.TEXT]` on an encapsulated message, their `.PEEK` forms, `<origin.length>` partials, and
+the `RFC822`, `RFC822.HEADER` and `RFC822.TEXT` items §6.4.5 defines as equivalents.
 
 **The octets go out as a literal and are never touched.** §9 types a body section's value an
 `nstring`, and a quoted string cannot hold CR, LF or an 8-bit octet — all of which a message is
@@ -210,6 +208,62 @@ still holds one message at a time on top of the materialised response below.
 **Known limitation: the response is materialised, not streamed.** `FETCH 1:*` over a folder with
 a million messages builds a million response objects before any of them is written. That is
 within the current `ImapCommandResult` shape and is the next thing to change for large mailboxes.
+
+### BODYSTRUCTURE and MIME parts
+
+`BODYSTRUCTURE` is what a client reads to decide which part to display and which to offer as a
+download; the numbered sections are how it then fetches one without pulling the whole message.
+Both come from one parse of the stored octets, done at most once per message and only when
+something asks for it — a `FETCH 1:* BODY[]` must not walk every message's structure to answer.
+
+**`BODY` is `BODYSTRUCTURE` without the extension data.** §7.4.2 calls it the "Non-extensible
+form", and §9 says it twice more, annotating both `body-ext-1part` and `body-ext-mpart`
+"MUST NOT be returned on non-extensible 'BODY' fetch". Nothing beyond the extension fields
+§7.4.2 defines is ever emitted either: "Server implementations MUST NOT send such extension data
+until it has been defined by a revision of this protocol."
+
+**A multipart's parameters come after its subtype, not before it.** §7.4.2: "Instead of a body
+type as the first element of the parenthesized list, there is a sequence of one or more nested
+body structures. The second element of the parenthesized list is the multipart subtype." A
+multipart has no `body-fields` at all — no encoding, no octet count — and its parameters are the
+first of its extension fields.
+
+**The CRLF before a boundary belongs to the boundary.** RFC 2046 §5.1.1: "the initial CRLF is
+considered to be attached to the boundary delimiter line rather than part of the preceding
+part." A server that kept it reports every part two octets longer than it is and hands the
+client two octets that are not its own. The preamble and the epilogue are dropped, as §5.1.1
+requires, and a boundary is matched exactly — one that merely begins with another belongs to a
+nested multipart, and treating it as the outer one's would cut the nested message in half.
+
+**Defaults are applied where the standards put them.** RFC 2045 §5.2 makes a message with no
+`Content-Type` "plain text in the US-ASCII character set"; §6.1 assumes `7BIT` when no encoding
+is declared; and RFC 2046 §5.1.5 changes the default inside a digest: "In a digest, the default
+Content-Type value for a body part is changed from 'text/plain' to 'message/rfc822'."
+
+**Part numbering follows §6.4.5's worked example, which is a test.** That section lists the
+specifiers for a message whose third part is an encapsulated message carrying a multipart and
+whose fourth is a multipart carrying an encapsulated message carrying a multipart carrying an
+alternative; the test builds exactly that message and checks every specifier. The rule that is
+easiest to get wrong: a `MESSAGE/RFC822` part's numbers address the message it carries *without*
+a level in between — the example numbers the parts of part 3's encapsulated multipart `3.1` and
+`3.2`, not `3.1.1` and `3.1.2`.
+
+**A part that is not there is `NIL`, not an error.** Whether a part exists is a fact about one
+message and a `FETCH 1:*` covers many, so a specifier naming nothing gets §9's `nstring` NIL. A
+specifier the *grammar* does not have is different and gets `BAD`: §9's `section-part` is
+`nz-number *("." nz-number)`, so there is no part 0, and §6.4.5 says "The MIME part specifier
+MUST be prefixed by one or more numeric part specifiers", so a bare `BODY[MIME]` is a syntax
+error.
+
+**A structure that cannot be taken apart is described as an opaque part of its declared type.**
+§9's `body-type-mpart` is `1*body SP media-subtype` and has no form for a multipart with no
+parts, so a `multipart/mixed` with no `boundary` parameter cannot be described as a multipart at
+all. `media-basic` ends in a bare `string` alternative, which makes `("MULTIPART" "MIXED" …)`
+grammatical as a single part — true, and the closest to true that is available.
+
+**Nesting is taken apart only as deep as a client may address it**, which
+`ImapSection.MaxPartDepth` already bounds. A message nested deeper than that is a decompression
+bomb rather than mail; the part at the limit is still described, opaquely, rather than dropped.
 
 ### ENVELOPE
 

@@ -1168,22 +1168,6 @@ public sealed class ImapCommandProcessor
                 return NotImplemented(command);
             }
 
-            if (item.Item == ImapFetchItem.BodySection)
-            {
-                // A numbered part or a MIME header needs the message's MIME tree walked, which
-                // is not built yet. §6.4.5 separates that from a syntax error - "NO - fetch
-                // error: can't fetch that data" - so the item is named rather than the command
-                // called malformed.
-                if (item.Section!.NeedsMimeTree)
-                {
-                    return ImapCommandResult.Single(ImapResponses.No(
-                        command.Tag,
-                        $"FETCH of {item.Section.Format()} is not implemented yet"));
-                }
-
-                continue;
-            }
-
             if (!ImapFetchItems.Available.Contains(item.Item))
             {
                 return ImapCommandResult.Single(ImapResponses.No(
@@ -1321,6 +1305,12 @@ public sealed class ImapCommandProcessor
 
             List<ImapFetchPart> parts = [];
 
+            // Parsed at most once per message and only when something asks for it, because a
+            // FETCH 1:* BODY[] must not walk every message's MIME structure to answer.
+            ImapBodyPart? tree = null;
+
+            ImapBodyPart Tree() => tree ??= ImapMimeTree.Parse(content);
+
             foreach (ImapFetchRequestItem item in requested)
             {
                 if (item.Item == ImapFetchItem.Envelope)
@@ -1338,6 +1328,25 @@ public sealed class ImapCommandProcessor
                     continue;
                 }
 
+                if (item.Item is ImapFetchItem.Body or ImapFetchItem.BodyStructure)
+                {
+                    // §9's msg-att-static is "BODY" SP body with no NIL alternative, so a
+                    // message whose octets are gone is described as what an empty message is:
+                    // RFC 2045 §5.2's default type, holding nothing.
+                    ImapSegmentBuilder structure = new();
+
+                    ImapBodyStructure.Format(
+                        Tree(),
+                        item.Item == ImapFetchItem.BodyStructure,
+                        structure);
+
+                    parts.Add(ImapFetchPart.Composite(
+                        ImapFetchItems.NameOf(item.Item),
+                        structure.Build()));
+
+                    continue;
+                }
+
                 if (item.Section is null)
                 {
                     // A metadata item alongside a body one: rendered as text, then handed over
@@ -1351,9 +1360,13 @@ public sealed class ImapCommandProcessor
                     continue;
                 }
 
-                parts.Add(ImapFetchPart.Section(
-                    item.ResponseName,
-                    haveContent ? ImapBodySection.Extract(content, item.Section) : null));
+                ReadOnlyMemory<byte>? octets = !haveContent
+                    ? null
+                    : item.Section.NeedsMimeTree
+                        ? ImapMimeTree.Extract(Tree(), content, item.Section)
+                        : ImapBodySection.Extract(content, item.Section);
+
+                parts.Add(ImapFetchPart.Section(item.ResponseName, octets));
             }
 
             // The implicit \Seen is only worth reporting when it changed something, and the

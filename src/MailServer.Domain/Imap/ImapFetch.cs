@@ -40,30 +40,29 @@ public enum ImapFetchItem
     /// <summary><c>ENVELOPE</c> — "the envelope structure of the message".</summary>
     Envelope = 4,
 
-    /// <summary><c>BODY</c> — "non-extensible form of BODYSTRUCTURE". Not answerable yet.</summary>
+    /// <summary><c>BODY</c> — "non-extensible form of BODYSTRUCTURE".</summary>
     Body = 5,
 
-    /// <summary><c>BODYSTRUCTURE</c> — the MIME tree. Not answerable yet.</summary>
+    /// <summary><c>BODYSTRUCTURE</c> — the MIME tree, extension data included.</summary>
     BodyStructure = 6,
 
-    /// <summary><c>RFC822</c> — "functionally equivalent to BODY[]". Not answerable yet.</summary>
+    /// <summary><c>RFC822</c> — "functionally equivalent to BODY[]".</summary>
     Rfc822 = 7,
 
-    /// <summary><c>RFC822.HEADER</c> — equivalent to <c>BODY.PEEK[HEADER]</c>. Not answerable yet.</summary>
+    /// <summary><c>RFC822.HEADER</c> — equivalent to <c>BODY.PEEK[HEADER]</c>.</summary>
     Rfc822Header = 8,
 
-    /// <summary><c>RFC822.TEXT</c> — equivalent to <c>BODY[TEXT]</c>. Not answerable yet.</summary>
+    /// <summary><c>RFC822.TEXT</c> — equivalent to <c>BODY[TEXT]</c>.</summary>
     Rfc822Text = 9,
 
     /// <summary>
     /// <c>BODY[…]</c> or <c>BODY.PEEK[…]</c> — a section of the message.
     /// </summary>
     /// <remarks>
-    /// One enum member for a whole family, because this increment does not parse the section
-    /// specifier. §6.4.5's section grammar is part numbers, <c>HEADER</c>, <c>HEADER.FIELDS</c>,
-    /// <c>HEADER.FIELDS.NOT</c>, <c>MIME</c> and <c>TEXT</c> in combination, and giving it a
-    /// shape before there is a MIME reader to serve it would be designing the parser against a
-    /// consumer that does not exist. Recognising the form is enough to refuse it by name.
+    /// One enum member for a whole family. §6.4.5's section grammar is part numbers,
+    /// <c>HEADER</c>, <c>HEADER.FIELDS</c>, <c>HEADER.FIELDS.NOT</c>, <c>MIME</c> and
+    /// <c>TEXT</c> in combination, and which of them was asked for lives in
+    /// <see cref="ImapFetchRequestItem.Section"/> rather than in this enum.
     /// </remarks>
     BodySection = 10,
 }
@@ -78,9 +77,9 @@ public static class ImapFetchItems
     /// The items this server can answer today.
     /// </summary>
     /// <remarks>
-    /// The four that are columns, and <c>ENVELOPE</c>, which is the message's own header parsed.
-    /// The rest wait on the MIME reader, and <c>docs/Standards.md</c> records IMAP's
-    /// <c>BODY[…]</c> as this product's first real MIME consumer.
+    /// Every item §6.4.5 defines. The list is kept rather than removed so that adding a member to
+    /// <see cref="ImapFetchItem"/> is a decision: an item named here and not handled is a bug,
+    /// and an item handled but not named here is refused by the check in the FETCH handler.
     /// </remarks>
     public static IReadOnlyList<ImapFetchItem> Available { get; } =
     [
@@ -89,6 +88,12 @@ public static class ImapFetchItems
         ImapFetchItem.InternalDate,
         ImapFetchItem.Rfc822Size,
         ImapFetchItem.Envelope,
+        ImapFetchItem.Body,
+        ImapFetchItem.BodyStructure,
+        ImapFetchItem.Rfc822,
+        ImapFetchItem.Rfc822Header,
+        ImapFetchItem.Rfc822Text,
+        ImapFetchItem.BodySection,
     ];
 
     /// <summary>
@@ -220,9 +225,8 @@ public static class ImapFetchItems
     /// <remarks>
     /// Quoted from §6.4.5 rather than reconstructed: <c>ALL</c> is "(FLAGS INTERNALDATE
     /// RFC822.SIZE ENVELOPE)", <c>FAST</c> is "(FLAGS INTERNALDATE RFC822.SIZE)" and
-    /// <c>FULL</c> is "(FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODY)". <c>FAST</c> and
-    /// <c>ALL</c> are answerable; <c>FULL</c> refuses by naming <c>BODY</c> — which is a more
-    /// useful thing to tell a client than that its macro failed.
+    /// <c>FULL</c> is "(FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODY)". All three are
+    /// answerable.
     /// </remarks>
     public static bool TryParseMacro(string name, out IReadOnlyList<ImapFetchItem> items)
     {

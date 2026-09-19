@@ -246,20 +246,13 @@ public sealed class ImapFetchTests
     }
 
     /// <summary>
-    /// The stored columns, and the envelope. Everything else waits on the MIME reader.
+    /// Every item §6.4.5 defines is answerable. The list is kept rather than removed so that
+    /// adding a member to the enum is a decision: one named here and not handled is a bug, and
+    /// one handled but not named here is refused by the FETCH handler's own check.
     /// </summary>
     [Fact]
-    public void The_stored_columns_and_the_envelope_are_available()
-    {
-        ImapFetchItems.Available.ShouldBe(
-        [
-            ImapFetchItem.Flags,
-            ImapFetchItem.Uid,
-            ImapFetchItem.InternalDate,
-            ImapFetchItem.Rfc822Size,
-            ImapFetchItem.Envelope,
-        ]);
-    }
+    public void Every_item_the_grammar_defines_is_available() =>
+        ImapFetchItems.Available.OrderBy(i => i).ShouldBe(ImapFetchItems.All.OrderBy(i => i));
 
     /// <summary>
     /// The two lists agree: an item is answerable from the summary alone exactly when it is

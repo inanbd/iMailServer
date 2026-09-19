@@ -175,6 +175,23 @@ public sealed class ImapSectionTests
         Parse(item).Format().ShouldBe(expected);
 
     /// <summary>
+    /// §9: <c>section-spec = section-msgtext / (section-part ["." section-text])</c> and
+    /// <c>section-part = nz-number *("." nz-number)</c>. The dot separates pieces and never
+    /// trails the last one, so a bare numbered part echoes as <c>BODY[2]</c> — a client that
+    /// matches the echo against what it asked for would not recognise <c>BODY[2.]</c>.
+    /// </summary>
+    [Theory]
+    [InlineData("BODY[1]")]
+    [InlineData("BODY[2]")]
+    [InlineData("BODY[1.2]")]
+    [InlineData("BODY[4.2.2.1]")]
+    [InlineData("BODY[1.MIME]")]
+    [InlineData("BODY[3.HEADER]")]
+    [InlineData("BODY[3.HEADER.FIELDS.NOT (RECEIVED)]")]
+    public void Every_specifier_echoes_as_the_client_wrote_it(string item) =>
+        Parse(item).Format().ShouldBe(item);
+
+    /// <summary>
     /// §7.4.2's response form is BODY[&lt;section&gt;]&lt;&lt;origin octet&gt;&gt; — one number,
     /// the origin. §9 types it ["&lt;" number "&gt;"], with no place for the length.
     /// </summary>
