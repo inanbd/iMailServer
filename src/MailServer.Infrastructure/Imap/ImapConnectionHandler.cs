@@ -24,10 +24,17 @@ namespace MailServer.Infrastructure.Imap;
 /// Longest an authenticated connection may sit idle. RFC 3501 §5.4 requires at least thirty
 /// minutes; see <c>LimitsOptions.ImapInactivityTimeoutSeconds</c>.
 /// </param>
+/// <param name="MaxAppendOctets">
+/// The largest message <c>APPEND</c> will accept. Checked against the literal's declared size
+/// before a byte is read, so an oversized append costs the connection nothing, and enforced
+/// again by the message writer as it fills — a limit checked in one place only is a limit that
+/// stops being checked when a second caller appears.
+/// </param>
 /// <param name="CertificatePurpose">Which certificate this listener presents.</param>
 public sealed record ImapConnectionOptions(
     ImapListenerRole Role,
     ImapProcessorOptions Processor,
+    long MaxAppendOctets,
     int MaxLineOctets,
     TimeSpan PreAuthenticationTimeout,
     TimeSpan InactivityTimeout,
@@ -204,12 +211,25 @@ public sealed class ImapConnectionHandler(
                     return;
             }
 
-            ImapCommandResult result = ImapCommand.TryParse(
-                line.Text,
-                out ImapCommand? command,
-                out ImapTagFailure failure)
-                ? await processor.ExecuteAsync(command, cancellationToken).ConfigureAwait(false)
-                : processor.MalformedLine(failure);
+            ImapCommandResult result;
+
+            if (!ImapCommand.TryParse(line.Text, out ImapCommand? command, out ImapTagFailure failure))
+            {
+                result = processor.MalformedLine(failure);
+            }
+            else if (command.Verb == ImapVerb.Append)
+            {
+                // Intercepted before the ordinary dispatch, because APPEND's last argument is not
+                // on the line: RFC 3501 §6.3.11's "message literal" follows it, and only the loop
+                // owns the stream it arrives on.
+                result = await AppendAsync(
+                    stream, reader, processor, options, command, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                result = await processor.ExecuteAsync(command, cancellationToken).ConfigureAwait(false);
+            }
 
             await WriteAsync(stream, result.Responses, cancellationToken).ConfigureAwait(false);
 
@@ -440,6 +460,111 @@ public sealed class ImapConnectionHandler(
     /// stream has to hold. Nothing here composes text.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Runs an <c>APPEND</c>: continuation, octets, then the command proper.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The continuation comes first and must be flushed.</b> RFC 3501 §4.3: for a
+    /// synchronising literal "the client MUST wait to receive a command continuation request
+    /// […] before sending the octets of the literal". A client that never receives it waits
+    /// forever, and so does the server.
+    /// </para>
+    /// <para>
+    /// <b>A non-synchronising literal skips it</b>, which is the whole of what RFC 7888's
+    /// <c>{n+}</c> buys: the client has already sent the octets, so waiting for permission to
+    /// receive what has arrived would deadlock.
+    /// </para>
+    /// <para>
+    /// <b>The octets go straight to the message store.</b> A message may be tens of megabytes;
+    /// assembling it in memory to hand it over afterwards would double that for no gain, and the
+    /// store enforces the size limit as the writer fills.
+    /// </para>
+    /// <para>
+    /// <b>The trailing line is consumed whether or not the append succeeded.</b> §4.3 has the
+    /// command line resume after the literal, so a CRLF follows the octets; leaving it unread
+    /// would make the next command parse as the tail of this one.
+    /// </para>
+    /// </remarks>
+    private async Task<ImapCommandResult> AppendAsync(
+        Stream stream,
+        ImapLineReader reader,
+        ImapCommandProcessor processor,
+        ImapConnectionOptions options,
+        ImapCommand command,
+        CancellationToken cancellationToken)
+    {
+        ImapAppendRequest? request = processor.PlanAppend(command, out ImapCommandResult refusal);
+
+        if (request is null)
+        {
+            return refusal;
+        }
+
+        if (request.Literal.ByteCount > options.MaxAppendOctets)
+        {
+            // Refused before a byte is read, so an oversized append costs the connection
+            // nothing. A plain tagged NO, which is what §6.3.11 provides for - "NO - append
+            // error: can't append to that mailbox, error in flags or date/time or message text".
+            // No response code: RFC 3501 defines none for this, and inventing one would be a
+            // token a client cannot look up.
+            return ImapCommandResult.Single(ImapResponses.No(
+                command.Tag,
+                "Message is larger than this server accepts"));
+        }
+
+        if (request.Literal.IsSynchronizing)
+        {
+            await WriteAsync(
+                stream,
+                [ImapResponses.ReadyForLiteral()],
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        TimeSpan timeout = CurrentTimeout(processor.Session, options);
+
+        await using IMessageWriter writer = await messageStore
+            .BeginWriteAsync(options.MaxAppendOctets, cancellationToken)
+            .ConfigureAwait(false);
+
+        bool complete;
+
+        try
+        {
+            complete = await reader
+                .ReadLiteralAsync(
+                    request.Literal.ByteCount,
+                    (chunk, ct) => writer.WriteAsync(chunk, ct),
+                    timeout,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (MessageTooLargeException)
+        {
+            // The store enforces the limit too, and reaching it here means the specifier lied
+            // about the size. Nothing is committed, so nothing is left behind.
+            return ImapCommandResult.Single(ImapResponses.No(
+                command.Tag,
+                "Message is larger than this server accepts"));
+        }
+
+        if (!complete)
+        {
+            return new ImapCommandResult(
+                [ImapResponses.Bye("Literal was truncated")],
+                ImapSessionAction.CloseAfterResponse);
+        }
+
+        // The rest of the command line, which for APPEND is just its CRLF.
+        await reader.ReadLineAsync(timeout, cancellationToken).ConfigureAwait(false);
+
+        StoredMessage stored = await writer.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+        return await processor
+            .CompleteAppendAsync(command, request, stored, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     private static async Task WriteAsync(
         Stream stream,
         IReadOnlyList<ImapResponse> responses,

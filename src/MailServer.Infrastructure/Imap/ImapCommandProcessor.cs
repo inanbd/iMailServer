@@ -265,6 +265,7 @@ public sealed class ImapCommandProcessor
             ImapVerb.Unsubscribe => await FolderAsync(command, ImapFolderCommand.Unsubscribe, cancellationToken).ConfigureAwait(false),
             ImapVerb.Copy => await CopyAsync(command, move: false, cancellationToken).ConfigureAwait(false),
             ImapVerb.Move => await CopyAsync(command, move: true, cancellationToken).ConfigureAwait(false),
+            ImapVerb.Append => AppendRefusal(command),
             _ => NotImplemented(command),
         };
     }
@@ -1988,6 +1989,130 @@ public sealed class ImapCommandProcessor
 
         return new ImapCommandResult(responses, ImapSessionAction.Continue);
     }
+
+    /// <summary>
+    /// Plans an <c>APPEND</c>: everything decidable before its octets arrive.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Split from the rest because the processor never sees a stream.</b> The octets are on
+    /// the connection, and this type's whole arrangement is that the loop owns the stream while
+    /// the processor owns the protocol. So the loop asks what the command says, streams the
+    /// literal itself, and comes back with what it stored.
+    /// </para>
+    /// <para>
+    /// Returns null when the line is not a usable <c>APPEND</c>; the refusal is in
+    /// <paramref name="refusal"/> and is already the response to send.
+    /// </para>
+    /// </remarks>
+    public ImapAppendRequest? PlanAppend(ImapCommand command, out ImapCommandResult refusal)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+
+        refusal = ImapCommandResult.Single(ImapResponses.Bad(command.Tag, "APPEND is malformed"));
+
+        if (_writer is null || _messages is null)
+        {
+            refusal = NotImplemented(command);
+            return null;
+        }
+
+        if (_session.AuthenticatedMailboxId is null)
+        {
+            refusal = ImapCommandResult.Single(ImapResponses.Bad(command.Tag, "Not authenticated"));
+            return null;
+        }
+
+        if (!ImapAppend.TryParse(command.Argument, out ImapAppendRequest? request))
+        {
+            refusal = ImapCommandResult.Single(ImapResponses.Bad(
+                command.Tag,
+                "APPEND expects a mailbox name, optional flags, an optional date-time and a literal"));
+
+            return null;
+        }
+
+        return request;
+    }
+
+    /// <summary>
+    /// Finishes an <c>APPEND</c> once its octets are stored.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A missing destination is a <c>NO</c> with <c>[TRYCREATE]</c>, and both halves are
+    /// MUSTs.</b> RFC 3501 §6.3.11: "If the destination mailbox does not exist, a server MUST
+    /// return an error, and MUST NOT automatically create the mailbox. Unless it is certain that
+    /// the destination mailbox can not be created, the server MUST send the response code
+    /// "[TRYCREATE]" as the prefix of the text of the tagged NO response."
+    /// </para>
+    /// <para>
+    /// <b>An untagged <c>EXISTS</c> follows when the client has that mailbox open.</b> §6.3.11:
+    /// "If the mailbox is currently selected, the normal new message actions SHOULD occur.
+    /// Specifically, the server SHOULD notify the client immediately via an untagged EXISTS
+    /// response." Without it a client that appends to the folder it is reading does not see its
+    /// own message until it polls.
+    /// </para>
+    /// <para>
+    /// <c>\Recent</c> is not set, though §6.3.11 says "In either case, the Recent flag is also
+    /// set". This server never sets that flag anywhere — see
+    /// <see cref="ImapResponses.Recent"/> — and setting it here alone would make
+    /// <c>RECENT</c> report a number no other command could ever produce.
+    /// </para>
+    /// </remarks>
+    public async Task<ImapCommandResult> CompleteAppendAsync(
+        ImapCommand command,
+        ImapAppendRequest request,
+        StoredMessage stored,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(stored);
+
+        ImapAppendResult result = await _writer!
+            .AppendAsync(
+                _session.AuthenticatedMailboxId!.Value,
+                request.Mailbox,
+                stored,
+                request.Flags,
+                request.InternalDate ?? _clock.UtcNow,
+                _clock.UtcNow,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result.Outcome != ImapFolderMutation.Done)
+        {
+            return ImapCommandResult.Single(ImapResponses.No(
+                command.Tag,
+                "No such destination mailbox",
+                ImapResponseCode.TryCreate));
+        }
+
+        List<ImapResponse> responses = [];
+
+        if (_session.SelectedFolderId == result.FolderId)
+        {
+            responses.Add(ImapResponses.Exists(result.ExistsCount));
+        }
+
+        responses.Add(ImapResponses.Ok(command.Tag, "APPEND completed"));
+
+        return new ImapCommandResult(responses, ImapSessionAction.Continue);
+    }
+
+    /// <summary>The answer when an <c>APPEND</c> reaches the ordinary dispatch.</summary>
+    /// <remarks>
+    /// It should not: the loop intercepts the verb before dispatching, because only the loop can
+    /// read the literal. Reaching here means no stream owner was available, which is the
+    /// processor-without-a-listener case the tests drive.
+    /// </remarks>
+    private ImapCommandResult AppendRefusal(ImapCommand command) =>
+        _writer is null || _messages is null
+            ? NotImplemented(command)
+            : ImapCommandResult.Single(ImapResponses.Bad(
+                command.Tag,
+                "APPEND requires a message literal"));
 
     private static ImapCommandResult NotImplemented(ImapCommand command) =>
         ImapCommandResult.Single(ImapResponses.No(

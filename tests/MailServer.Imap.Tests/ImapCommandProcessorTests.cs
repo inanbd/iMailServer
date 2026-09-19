@@ -626,6 +626,43 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
         return Task.FromResult<IReadOnlyDictionary<long, StoredMessageId>>(found);
     }
 
+    public Task<ImapAppendResult> AppendAsync(
+        MailboxId mailboxId,
+        string path,
+        StoredMessage stored,
+        MessageFlags flags,
+        DateTimeOffset internalDate,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        string canonical = ImapMailboxPath.Canonical(path);
+
+        if (!_folders.TryGetValue((mailboxId.Value, canonical), out Entry? folder))
+        {
+            return Task.FromResult(new ImapAppendResult(ImapFolderMutation.NotFound, null, 0));
+        }
+
+        if (!_messages.TryGetValue((mailboxId.Value, canonical), out List<ImapMessageSummary>? all))
+        {
+            all = [];
+            _messages[(mailboxId.Value, canonical)] = all;
+        }
+
+        long uid = all.Count == 0 ? 1 : all[^1].Uid + 1;
+
+        all.Add(new ImapMessageSummary(
+            all.Count + 1,
+            uid,
+            flags,
+            internalDate,
+            stored.SizeBytes));
+
+        _contentIds[(mailboxId.Value, canonical, uid)] = stored.Id.Value;
+
+        return Task.FromResult(
+            new ImapAppendResult(ImapFolderMutation.Done, folder.Folder.Id, all.Count));
+    }
+
     /// <summary>Every folder this fake was asked to expunge.</summary>
     public List<(Guid Mailbox, Guid Folder)> Expunged { get; } = [];
 
@@ -688,7 +725,57 @@ internal sealed class ScriptedMessageStore(ScriptedImapMailboxReader source) : I
     public ValueTask<IMessageWriter> BeginWriteAsync(
         long maxSizeBytes,
         CancellationToken cancellationToken) =>
-        throw new NotSupportedException("Writing is not part of what these tests exercise.");
+        ValueTask.FromResult<IMessageWriter>(new ScriptedMessageWriter(source, maxSizeBytes));
+
+    /// <summary>
+    /// Collects an appended message in memory and publishes it on commit.
+    /// </summary>
+    /// <remarks>
+    /// Enforces the size limit as the real writer does, because APPEND relies on it: the
+    /// connection checks the declared literal size and the writer checks what actually arrives,
+    /// and a fake that skipped the second check would leave that path untested.
+    /// </remarks>
+    private sealed class ScriptedMessageWriter(ScriptedImapMailboxReader owner, long maxSizeBytes)
+        : IMessageWriter
+    {
+        private readonly MemoryStream _buffer = new();
+
+        public StoredMessageId Id { get; } = new(Guid.NewGuid());
+
+        public long BytesWritten => _buffer.Length;
+
+        public async ValueTask WriteAsync(
+            ReadOnlyMemory<byte> chunk,
+            CancellationToken cancellationToken)
+        {
+            if (_buffer.Length + chunk.Length > maxSizeBytes)
+            {
+                throw new MessageTooLargeException(maxSizeBytes, _buffer.Length + chunk.Length);
+            }
+
+            await _buffer.WriteAsync(chunk, cancellationToken);
+        }
+
+        public ValueTask<StoredMessage> CommitAsync(CancellationToken cancellationToken)
+        {
+            byte[] octets = _buffer.ToArray();
+
+            owner.Content[Id.Value] = octets;
+
+            return ValueTask.FromResult(new StoredMessage(
+                Id,
+                octets.Length,
+                Sha256Hash.FromBytes(System.Security.Cryptography.SHA256.HashData(octets)),
+                DateTimeOffset.UnixEpoch));
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            _buffer.Dispose();
+
+            return ValueTask.CompletedTask;
+        }
+    }
 
     public ValueTask<Stream> OpenReadAsync(StoredMessageId id, CancellationToken cancellationToken)
     {

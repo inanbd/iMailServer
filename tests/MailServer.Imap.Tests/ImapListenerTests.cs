@@ -60,6 +60,7 @@ public sealed class ImapListenerTests : IAsyncDisposable
         new(
             role,
             new ImapProcessorOptions("AetherMail", role, IsAuthenticationAvailable: true),
+            MaxAppendOctets: 1_000_000,
             MaxLineOctets: 8_000,
             TimeSpan.FromSeconds(preAuthSeconds),
             TimeSpan.FromSeconds(60),

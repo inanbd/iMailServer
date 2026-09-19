@@ -300,6 +300,45 @@ loses mail.
 `COPYUID` is not sent. RFC 6851 §4.3 asks for it only of "Servers supporting UIDPLUS", and this
 server does not advertise UIDPLUS.
 
+## APPEND
+
+`APPEND mailbox [(flags)] [date-time] {literal}`. The two optional arguments are told apart by
+shape rather than position — a flag list opens with `(` and a date-time with `"` — so all four
+conformant forms reach the same parser.
+
+**The literal is intercepted by the connection loop, not the command processor.** RFC 3501
+§6.3.11's last argument is not on the command line, and this server's arrangement is that the
+loop owns the stream while the processor owns the protocol. So the loop asks what the command
+says, streams the octets itself, and comes back with what it stored.
+
+**A synchronising literal gets a continuation first, and it must be flushed.** §4.3: the client
+"MUST wait to receive a command continuation request […] before sending the octets of the
+literal". A non-synchronising `{n+}` literal gets none — the client has already sent the octets,
+so waiting for permission to receive what has arrived would deadlock.
+
+**A literal is counted, never delimited.** §4.3: "The sequence of characters following the literal
+is exactly the number of octets specified." A reader that stopped at a CRLF would truncate every
+message containing a blank line — which is every message with a body.
+
+**The octets stream straight into the message store.** A message may be tens of megabytes;
+assembling it in memory to hand over afterwards would double that for nothing. The declared size
+is checked before a byte is read, and the writer checks again as it fills, because a limit
+checked in one place only stops being checked when a second caller appears.
+
+**The destination is never created.** §6.3.11: "a server MUST return an error, and MUST NOT
+automatically create the mailbox", with `[TRYCREATE]` a MUST in the same sentence. An untagged
+`EXISTS` follows when the client has that mailbox selected, per the same section.
+
+`\Recent` is not set, though §6.3.11 says "In either case, the Recent flag is also set". This
+server never sets that flag anywhere, and setting it here alone would make `RECENT` report a
+number no other command could produce.
+
+The `Messages` row is written after the octets are committed, which the storage schema insists
+on: a crash between the two leaves a file nobody references — which a sweep can remove — rather
+than a row naming a file that does not exist. The row carries the digest the store computed, so
+the schema's truncated-or-altered check works for an appended message as it does for a received
+one.
+
 ## Known divergence: folder-name case depends on the database provider
 
 **On SQLite folder names are matched exactly; on a default-collation SQL Server they are not.**

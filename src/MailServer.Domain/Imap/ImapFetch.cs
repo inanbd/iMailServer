@@ -641,6 +641,64 @@ public static class ImapInternalDate
         return $"\"{day}-{month}-{rest} {zone}\"";
     }
 
+    /// <summary>
+    /// Reads a quoted <c>date-time</c>, as <c>APPEND</c> may carry one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The inverse of <see cref="Format"/>, and deliberately more forgiving in one place: the
+    /// day may arrive space-padded as §9's <c>date-day-fixed</c> requires, or zero-padded, or
+    /// bare. A server that insisted on the fixed form would refuse an <c>APPEND</c> over a
+    /// detail the sending client got cosmetically wrong, losing the message rather than the
+    /// formatting.
+    /// </para>
+    /// <para>
+    /// The zone is not forgiving, because it changes the instant. §9: <c>zone = ("+" / "-")
+    /// 4DIGIT</c>, "Signed four-digit value of hhmm representing hours and minutes east of
+    /// Greenwich" — a missing or malformed zone would make the stored date wrong by hours rather
+    /// than merely ugly.
+    /// </para>
+    /// </remarks>
+    public static bool TryParse(string text, out DateTimeOffset value)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+
+        value = default;
+
+        string trimmed = text.Trim();
+
+        if (trimmed.Length < 2 || trimmed[0] != '"' || trimmed[^1] != '"')
+        {
+            return false;
+        }
+
+        string body = trimmed[1..^1].Trim();
+
+        // "d-MMM-yyyy HH:mm:ss zzz" with the colon the grammar's zone does not have.
+        int lastSpace = body.LastIndexOf(' ');
+
+        if (lastSpace < 0 || body.Length - lastSpace != 6)
+        {
+            return false;
+        }
+
+        string zone = body[(lastSpace + 1)..];
+
+        if (zone[0] is not ('+' or '-'))
+        {
+            return false;
+        }
+
+        string rebuilt = body[..(lastSpace + 1)] + zone[..3] + ":" + zone[3..];
+
+        return DateTimeOffset.TryParseExact(
+            rebuilt,
+            ["d-MMM-yyyy HH:mm:ss zzz", "dd-MMM-yyyy HH:mm:ss zzz"],
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.None,
+            out value);
+    }
+
     private static readonly string[] MonthNames =
     [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun",

@@ -87,10 +87,12 @@ public sealed class ImapWireTests : IDisposable
         ImapListenerRole role = ImapListenerRole.Cleartext,
         bool authAvailable = true,
         int maxLineOctets = 8_000,
+        long maxAppendOctets = 1_000_000,
         int preAuthSeconds = 30) =>
         new(
             role,
             new ImapProcessorOptions("AetherMail", role, authAvailable, MaxAuthenticationAttempts: 3),
+            maxAppendOctets,
             maxLineOctets,
             TimeSpan.FromSeconds(preAuthSeconds),
             TimeSpan.FromSeconds(60),
@@ -691,5 +693,238 @@ public sealed class ImapWireTests : IDisposable
             null!,
             DateTimeOffset.UtcNow,
             CancellationToken.None));
+    }
+    /// <summary>
+    /// Connects, upgrades with STARTTLS and logs in — the shortest route to an authenticated
+    /// session, and the only one: LOGIN is refused in the clear, because
+    /// <c>LOGINDISABLED</c> is advertised until the connection is protected.
+    /// </summary>
+    private async Task<SslStream> AuthenticatedAsync(NetworkStream transport)
+    {
+        await ReadLineAsync(transport);
+        await WriteLineAsync(transport, "x1 STARTTLS");
+        await ReadLineAsync(transport);
+
+        SslStream tls = new(
+            transport,
+            leaveInnerStreamOpen: false,
+            userCertificateValidationCallback: (_, _, _, _) => true);
+
+        await tls.AuthenticateAsClientAsync("mail.example.com");
+
+        await WriteLineAsync(tls, "x2 LOGIN alice@example.com hunter2");
+        (await ReadUntilTaggedAsync(tls, "x2"))[^1].ShouldStartWith("x2 OK ");
+
+        return tls;
+    }
+
+    /// <summary>
+    /// A whole APPEND over the wire, which is the only way to exercise the literal: RFC 3501
+    /// §6.3.11's last argument is not on the command line, and only the connection loop owns the
+    /// stream it arrives on.
+    /// </summary>
+    [Fact]
+    public async Task Append_reads_a_synchronising_literal_and_files_the_message()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox)
+            .Add(authenticator.KnownMailboxId, "Drafts", specialUse: FolderSpecialUse.Drafts);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            const string Message =
+                "From: alice@example.com\r\n" +
+                "Subject: a draft\r\n" +
+                "\r\n" +
+                "Not finished yet.\r\n";
+
+            await WriteLineAsync(
+                tls,
+                $"a2 APPEND Drafts (\\Draft) \"18-Sep-2026 10:00:00 +0000\" {{{Message.Length}}}");
+
+            // §4.3: for a synchronising literal "the client MUST wait to receive a command
+            // continuation request [...] before sending the octets of the literal".
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+
+            await tls.WriteAsync(Encoding.ASCII.GetBytes(Message + "\r\n"));
+            await tls.FlushAsync();
+
+            (await ReadUntilTaggedAsync(tls, "a2"))[^1].ShouldStartWith("a2 OK ");
+
+            await WriteLineAsync(tls, "a3 SELECT Drafts");
+            await ReadUntilTaggedAsync(tls, "a3");
+
+            await WriteLineAsync(tls, "a4 FETCH 1 (FLAGS INTERNALDATE RFC822.SIZE)");
+            List<string> fetched = await ReadUntilTaggedAsync(tls, "a4");
+
+            fetched[0].ShouldBe(
+                "* 1 FETCH (FLAGS (\\Draft) INTERNALDATE \"18-Sep-2026 10:00:00 +0000\" " +
+                $"RFC822.SIZE {Message.Length})");
+
+            await WriteLineAsync(tls, "a5 FETCH 1 BODY.PEEK[]");
+            (await ReadUntilTaggedAsync(tls, "a5"))[0]
+                .ShouldBe($"* 1 FETCH (BODY[] {{{Message.Length}}}");
+
+            await WriteLineAsync(tls, "a6 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a6");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// §6.3.11's MUST: "If the destination mailbox does not exist, a server MUST return an error,
+    /// and MUST NOT automatically create the mailbox. Unless it is certain that the destination
+    /// mailbox can not be created, the server MUST send the response code "[TRYCREATE]"".
+    /// </summary>
+    [Fact]
+    public async Task Append_to_a_missing_mailbox_earns_trycreate()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX");
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(tls, "a2 APPEND Nowhere {5}");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+
+            await tls.WriteAsync(Encoding.ASCII.GetBytes("hello\r\n"));
+            await tls.FlushAsync();
+
+            (await ReadUntilTaggedAsync(tls, "a2"))[^1].ShouldStartWith("a2 NO [TRYCREATE]");
+
+            await WriteLineAsync(tls, "a3 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a3");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// §6.3.11: "If the mailbox is currently selected […] the server SHOULD notify the client
+    /// immediately via an untagged EXISTS response." Without it a client that appends to the
+    /// folder it is reading does not see its own message until it polls.
+    /// </summary>
+    [Fact]
+    public async Task Appending_to_the_selected_mailbox_reports_exists()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(tls, "a2 SELECT INBOX");
+            await ReadUntilTaggedAsync(tls, "a2");
+
+            await WriteLineAsync(tls, "a3 APPEND INBOX {5}");
+            await ReadLineAsync(tls);
+
+            await tls.WriteAsync(Encoding.ASCII.GetBytes("hello\r\n"));
+            await tls.FlushAsync();
+
+            List<string> lines = await ReadUntilTaggedAsync(tls, "a3");
+
+            lines[0].ShouldBe("* 1 EXISTS");
+            lines[^1].ShouldStartWith("a3 OK ");
+
+            await WriteLineAsync(tls, "a4 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a4");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// RFC 7888's non-synchronising literal: the client has already sent the octets, so waiting
+    /// for permission to receive what has arrived would deadlock.
+    /// </summary>
+    [Fact]
+    public async Task A_non_synchronising_literal_gets_no_continuation()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            // The command line and its octets in one write, which is what {n+} is for.
+            await tls.WriteAsync(Encoding.ASCII.GetBytes("a2 APPEND INBOX {5+}\r\nhello\r\n"));
+            await tls.FlushAsync();
+
+            (await ReadUntilTaggedAsync(tls, "a2"))[^1].ShouldStartWith("a2 OK ");
+
+            await WriteLineAsync(tls, "a3 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a3");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// A literal larger than the listener accepts is refused before a byte is read, so an
+    /// oversized append costs the connection nothing.
+    /// </summary>
+    [Fact]
+    public async Task An_oversized_append_is_refused_without_reading_it()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX");
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(maxAppendOctets: 100),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(tls, "a2 APPEND INBOX {1000}");
+
+            // No continuation: the refusal comes first, so the client never sends the octets.
+            (await ReadUntilTaggedAsync(tls, "a2"))[^1].ShouldStartWith("a2 NO ");
+
+            await WriteLineAsync(tls, "a3 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a3");
+        }
+
+        await served;
     }
 }

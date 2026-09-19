@@ -154,6 +154,11 @@ public sealed class ImapListenerService : ResilientBackgroundService
                 role,
                 options.Imap.EnableAuthentication,
                 options.Limits.MaxAuthAttemptsPerSession),
+
+            // The same ceiling SMTP accepts, so a message a client could have sent itself is a
+            // message it can also file with APPEND. A lower limit here would make "save to
+            // Drafts" fail for mail the server would happily have relayed.
+            options.Storage.MaxMessageSizeBytes,
             options.Limits.MaxImapLineBytes,
             TimeSpan.FromSeconds(options.Limits.ImapPreAuthenticationTimeoutSeconds),
             TimeSpan.FromSeconds(options.Limits.ImapInactivityTimeoutSeconds),

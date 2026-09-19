@@ -1,3 +1,5 @@
+using MailServer.Application.Abstractions.Smtp;
+using MailServer.Domain.Enums;
 using MailServer.Domain.Imap;
 using MailServer.Domain.ValueObjects;
 
@@ -251,6 +253,45 @@ public interface IImapMailboxWriter
         DateTimeOffset now,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Records an already-stored message as a new delivery at the end of a folder.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The octets are committed to the message store before this is called</b>, which is the
+    /// order the storage schema insists on: its comment on <c>Messages</c> says the row "is
+    /// written AFTER the file is committed. A crash between the two leaves a file nobody
+    /// references, which the sweep removes - never a row naming a file that does not exist, which
+    /// is a mailbox the owner cannot open."
+    /// </para>
+    /// <para>
+    /// <b>A missing destination is reported, never created.</b> RFC 3501 §6.3.11: "If the
+    /// destination mailbox does not exist, a server MUST return an error, and MUST NOT
+    /// automatically create the mailbox." The handler turns that into the <c>[TRYCREATE]</c> the
+    /// same section also makes a MUST.
+    /// </para>
+    /// <para>
+    /// One transaction, per §6.3.11: "If the append is unsuccessful for any reason, the mailbox
+    /// MUST be restored to its state before the APPEND attempt; no partial appending is
+    /// permitted."
+    /// </para>
+    /// </remarks>
+    /// <param name="stored">
+    /// What the message store committed — its identity, size and content hash. The hash is
+    /// carried rather than recomputed or stubbed: the schema keeps it so that a file truncated
+    /// or altered underneath the row that names it can be noticed rather than served, and a row
+    /// written with a placeholder would defeat that for every appended message.
+    /// </param>
+    /// <returns>The outcome, and the folder's message count afterwards.</returns>
+    Task<ImapAppendResult> AppendAsync(
+        MailboxId mailboxId,
+        string path,
+        StoredMessage stored,
+        MessageFlags flags,
+        DateTimeOffset internalDate,
+        DateTimeOffset now,
+        CancellationToken cancellationToken);
+
     Task<ImapFolderMutation> SetSubscriptionAsync(
         MailboxId mailboxId,
         string path,
@@ -258,6 +299,20 @@ public interface IImapMailboxWriter
         DateTimeOffset now,
         CancellationToken cancellationToken);
 }
+
+/// <summary>What an <c>APPEND</c> did.</summary>
+/// <param name="Outcome">Whether it ran, and why not if it did not.</param>
+/// <param name="FolderId">The destination folder, when there was one.</param>
+/// <param name="ExistsCount">
+/// How many messages the folder holds afterwards — what an untagged <c>EXISTS</c> would carry
+/// if the client has that mailbox selected. §6.3.11: "If the mailbox is currently selected, the
+/// normal new message actions SHOULD occur. Specifically, the server SHOULD notify the client
+/// immediately via an untagged EXISTS response."
+/// </param>
+public sealed record ImapAppendResult(
+    ImapFolderMutation Outcome,
+    MailboxFolderId? FolderId,
+    long ExistsCount);
 
 /// <summary>
 /// What a <c>COPY</c> or <c>MOVE</c> did.

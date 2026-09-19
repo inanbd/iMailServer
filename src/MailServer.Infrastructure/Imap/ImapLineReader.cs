@@ -184,6 +184,84 @@ public sealed class ImapLineReader
     public ReadOnlyMemory<byte> BufferedInput => _buffer.AsMemory(_start, _end - _start);
 
     /// <summary>Ensures at least one unconsumed octet is buffered, reading from the connection if needed.</summary>
+    /// <summary>
+    /// Reads exactly <paramref name="byteCount"/> octets and hands them to a sink.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A literal is counted, not delimited</b> — RFC 3501 §4.3: "The sequence of characters
+    /// following the literal is exactly the number of octets specified." So this reads a count
+    /// and never looks for a terminator: a CRLF inside the octets is content, and a reader that
+    /// stopped at one would truncate every message containing a blank line.
+    /// </para>
+    /// <para>
+    /// <b>Whatever is already buffered is drained first.</b> The line that announced the literal
+    /// and its first octets often arrive in one packet, so the octets are sitting in this
+    /// reader's buffer rather than in the stream; taking them from the stream instead would
+    /// block for data that has already been delivered.
+    /// </para>
+    /// <para>
+    /// The sink is a callback rather than a returned array, so a large message is written
+    /// through to its store as it arrives instead of being assembled in memory first.
+    /// </para>
+    /// </remarks>
+    /// <returns>Whether all the octets arrived.</returns>
+    public async ValueTask<bool> ReadLiteralAsync(
+        long byteCount,
+        Func<ReadOnlyMemory<byte>, CancellationToken, ValueTask> sink,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(sink);
+        ArgumentOutOfRangeException.ThrowIfNegative(byteCount);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
+
+        using CancellationTokenSource timeoutSource =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+        timeoutSource.CancelAfter(timeout);
+
+        long remaining = byteCount;
+
+        while (remaining > 0)
+        {
+            if (_end > _start)
+            {
+                int take = (int)Math.Min(remaining, _end - _start);
+
+                await sink(_buffer.AsMemory(_start, take), cancellationToken).ConfigureAwait(false);
+
+                _start += take;
+                remaining -= take;
+                continue;
+            }
+
+            Compact();
+
+            int read;
+
+            try
+            {
+                read = await _stream
+                    .ReadAsync(_buffer.AsMemory(_end), timeoutSource.Token)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                return false;
+            }
+
+            if (read == 0)
+            {
+                return false;
+            }
+
+            _end += read;
+        }
+
+        return true;
+    }
+
     public async ValueTask<ImapReadResult> FillAsync(TimeSpan timeout, CancellationToken cancellationToken)
     {
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);

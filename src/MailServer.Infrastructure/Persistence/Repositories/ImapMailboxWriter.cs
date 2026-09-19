@@ -1,5 +1,6 @@
 using Dapper;
 using MailServer.Application.Abstractions.Persistence;
+using MailServer.Application.Abstractions.Smtp;
 using MailServer.Application.Abstractions.Repositories;
 using MailServer.Domain.Entities;
 using MailServer.Domain.Enums;
@@ -931,6 +932,132 @@ internal sealed class ImapMailboxWriter(
                     },
                     ct).ConfigureAwait(false);
             },
+            cancellationToken);
+    }
+
+    private const string InsertMessageRow = """
+        INSERT INTO Messages
+                    (Id, SizeBytes, ContentSha256, ReversePath, RemoteAddress, GreetedName,
+                     ListenerRole, TlsActive, AuthenticatedAs, ReceivedUtc)
+        VALUES      (@Id, @SizeBytes, @Hash, NULL, @RemoteAddress, NULL, @ListenerRole, 1, NULL,
+                     @Now)
+        """;
+
+    private const string CountFolderDeliveries = """
+        SELECT  COUNT(*)
+        FROM    Deliveries
+        WHERE   FolderId = @FolderId
+          AND   MailboxId = @MailboxId
+        """;
+
+    public Task<ImapAppendResult> AppendAsync(
+        MailboxId mailboxId,
+        string path,
+        StoredMessage stored,
+        MessageFlags flags,
+        DateTimeOffset internalDate,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+
+        string canonical = ImapMailboxPath.Canonical(path);
+
+        return transactions.ExecuteScopedAsync(
+            ct => ExecuteAsync(
+                async (session, inner) =>
+                {
+                    Guid? folderId = await session.Connection
+                        .QuerySingleOrDefaultAsync<Guid?>(Command(
+                            session,
+                            SelectFolderIdByPath,
+                            new { MailboxId = mailboxId.Value, Path = canonical },
+                            inner))
+                        .ConfigureAwait(false);
+
+                    if (folderId is null)
+                    {
+                        // Detected before anything is written, so §6.3.11's "the mailbox MUST be
+                        // restored to its state before the APPEND attempt" is satisfied by never
+                        // having started. The handler answers [TRYCREATE].
+                        return new ImapAppendResult(ImapFolderMutation.NotFound, null, 0);
+                    }
+
+                    // The Messages row, written after the octets were committed to the store -
+                    // the order the schema's own comment insists on, so a crash leaves an
+                    // unreferenced file rather than a row naming a file that is not there.
+                    await session.Connection.ExecuteAsync(Command(
+                        session,
+                        InsertMessageRow,
+                        new
+                        {
+                            Id = stored.Id.Value,
+                            SizeBytes = stored.SizeBytes,
+
+                            // The digest the store computed at commit, so the schema's
+                            // truncated-or-altered check works for an appended message as it
+                            // does for a received one.
+                            Hash = stored.ContentHash.ToString(),
+
+                            // APPEND has no SMTP envelope: no reverse path, no peer, no EHLO
+                            // name. The loopback address records that the message was submitted
+                            // by the account's own client rather than pretending a peer sent it.
+                            RemoteAddress = "127.0.0.1",
+                            ListenerRole = (int)SmtpListenerRole.Submission,
+                            Now = now,
+                        },
+                        inner)).ConfigureAwait(false);
+
+                    long nextUid = await session.Connection
+                        .ExecuteScalarAsync<long>(Command(
+                            session,
+                            SelectFolderNextUid,
+                            new { MailboxId = mailboxId.Value, Path = canonical },
+                            inner))
+                        .ConfigureAwait(false);
+
+                    await session.Connection.ExecuteAsync(Command(
+                        session,
+                        InsertDelivery,
+                        new
+                        {
+                            Id = Guid.NewGuid(),
+                            MessageId = stored.Id.Value,
+                            MailboxId = mailboxId.Value,
+                            FolderId = folderId.Value,
+                            Uid = nextUid,
+                            Flags = (int)flags,
+                            InternalDate = internalDate,
+                            Now = now,
+                        },
+                        inner)).ConfigureAwait(false);
+
+                    await session.Connection.ExecuteAsync(Command(
+                        session,
+                        UpdateFolderNextUid,
+                        new
+                        {
+                            Id = folderId.Value,
+                            MailboxId = mailboxId.Value,
+                            NextUid = nextUid + 1,
+                            Now = now,
+                        },
+                        inner)).ConfigureAwait(false);
+
+                    long exists = await session.Connection
+                        .ExecuteScalarAsync<long>(Command(
+                            session,
+                            CountFolderDeliveries,
+                            new { FolderId = folderId.Value, MailboxId = mailboxId.Value },
+                            inner))
+                        .ConfigureAwait(false);
+
+                    return new ImapAppendResult(
+                        ImapFolderMutation.Done,
+                        new MailboxFolderId(folderId.Value),
+                        exists);
+                },
+                ct),
             cancellationToken);
     }
 
