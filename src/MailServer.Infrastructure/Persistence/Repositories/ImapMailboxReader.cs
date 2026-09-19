@@ -371,6 +371,23 @@ internal sealed class ImapMailboxReader(
         ORDER BY Ordered.Seq
         """;
 
+    public Task<long> CountMessagesAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        CancellationToken cancellationToken)
+    {
+        return ExecuteAsync(async (session, ct) => await session.Connection
+            .ExecuteScalarAsync<long>(Command(
+                session,
+                """
+                SELECT COUNT(*) FROM Deliveries
+                WHERE  FolderId = @FolderId AND MailboxId = @MailboxId
+                """,
+                new { FolderId = folderId.Value, MailboxId = mailboxId.Value },
+                ct))
+            .ConfigureAwait(false), cancellationToken);
+    }
+
     private const string SelectMessageIds = """
         SELECT  Uid, MessageId
         FROM    Deliveries

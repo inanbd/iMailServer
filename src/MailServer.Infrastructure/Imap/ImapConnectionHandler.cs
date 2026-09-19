@@ -235,6 +235,16 @@ public sealed class ImapConnectionHandler(
 
             switch (result.Action)
             {
+                case ImapSessionAction.Idle:
+                    if (!await IdleAsync(
+                        stream, reader, processor, options, command!, cancellationToken)
+                        .ConfigureAwait(false))
+                    {
+                        return;
+                    }
+
+                    continue;
+
                 case ImapSessionAction.CloseAfterResponse:
                     return;
 
@@ -564,6 +574,137 @@ public sealed class ImapConnectionHandler(
             .CompleteAppendAsync(command, request, stored, cancellationToken)
             .ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Holds a connection idle, pushing mailbox updates, until the client sends <c>DONE</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The updates are real, and they come from polling the folder.</b> RFC 2177 §3: "as long
+    /// as an IDLE command is active, the server is now free to send untagged EXISTS, EXPUNGE, and
+    /// other messages at any time." This server has no cross-session notification bus, so it
+    /// watches the folder's message count on a short timer instead. That matters more than it
+    /// sounds: advertising <c>IDLE</c> and then never pushing would be actively worse than not
+    /// advertising it, because §3 tells a client that without the capability it "must poll for
+    /// mailbox updates" — so a client given a silent IDLE stops polling and sees new mail later
+    /// than it otherwise would.
+    /// </para>
+    /// <para>
+    /// <b>Only growth is pushed.</b> An <c>EXISTS</c> is an absolute count and is always true,
+    /// but a shrink means another session expunged something, and reporting that correctly needs
+    /// the sequence numbers that went — which this poll does not know. Guessing would make a
+    /// client renumber onto the wrong message, which in this response is how mail gets deleted
+    /// on the client. So a shrink is absorbed silently and the client learns of it on its next
+    /// command, which is late but never wrong.
+    /// </para>
+    /// <para>
+    /// <b>The inactivity timeout still applies.</b> §3 permits it outright: "The server MAY
+    /// consider a client inactive if it has an IDLE command running, and if such a server has an
+    /// inactivity timeout it MAY log the client off implicitly at the end of its timeout period."
+    /// The 29-minute figure in that section is advice to clients about re-issuing IDLE, not a
+    /// server-side timer.
+    /// </para>
+    /// <para>
+    /// <b>Anything but <c>DONE</c> ends the idle.</b> §3: "The client MUST NOT send a command
+    /// while the server is waiting for the DONE, since the server will not be able to distinguish
+    /// a command from a continuation." A client that does so gets a tagged <c>BAD</c> and its
+    /// connection back, rather than having its command silently swallowed.
+    /// </para>
+    /// </remarks>
+    /// <returns>False when the connection should close.</returns>
+    private async Task<bool> IdleAsync(
+        Stream stream,
+        ImapLineReader reader,
+        ImapCommandProcessor processor,
+        ImapConnectionOptions options,
+        ImapCommand command,
+        CancellationToken cancellationToken)
+    {
+        long reported = await processor.CountSelectedAsync(cancellationToken).ConfigureAwait(false)
+            ?? 0;
+
+        DateTimeOffset deadline = clock.UtcNow + CurrentTimeout(processor.Session, options);
+
+        while (true)
+        {
+            if (clock.UtcNow >= deadline)
+            {
+                await WriteAsync(
+                    stream,
+                    [ImapResponses.Bye("Autologout; idle for too long")],
+                    cancellationToken).ConfigureAwait(false);
+
+                return false;
+            }
+
+            ImapLineResult line = await reader
+                .ReadLineAsync(IdlePollInterval, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (line.Status == ImapLineStatus.EndOfStream)
+            {
+                return false;
+            }
+
+            if (line.Status == ImapLineStatus.Timeout)
+            {
+                // Nothing from the client: look at the folder instead.
+                long? current = await processor
+                    .CountSelectedAsync(cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (current is null)
+                {
+                    return false;
+                }
+
+                if (current > reported)
+                {
+                    await WriteAsync(
+                        stream,
+                        [ImapResponses.Exists(current.Value)],
+                        cancellationToken).ConfigureAwait(false);
+                }
+
+                reported = current.Value;
+                continue;
+            }
+
+            if (line.Status != ImapLineStatus.Line)
+            {
+                return false;
+            }
+
+            // §3: "The IDLE command is terminated by the receipt of a "DONE" continuation from
+            // the client". Case-insensitively, as every other token is.
+            if (line.Text.Trim().Equals("DONE", StringComparison.OrdinalIgnoreCase))
+            {
+                await WriteAsync(
+                    stream,
+                    [ImapResponses.Ok(command.Tag, "IDLE terminated")],
+                    cancellationToken).ConfigureAwait(false);
+
+                return true;
+            }
+
+            await WriteAsync(
+                stream,
+                [ImapResponses.Bad(command.Tag, "Expected DONE to end IDLE")],
+                cancellationToken).ConfigureAwait(false);
+
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// How often an idling connection looks at its folder.
+    /// </summary>
+    /// <remarks>
+    /// Short enough that "immediate mailbox updates" — RFC 2177 §3's own phrase for what IDLE
+    /// buys a client — is honest, and long enough that a thousand idle connections are a
+    /// thousand cheap counts a few seconds apart rather than a busy loop.
+    /// </remarks>
+    private static readonly TimeSpan IdlePollInterval = TimeSpan.FromSeconds(5);
 
     private static async Task WriteAsync(
         Stream stream,

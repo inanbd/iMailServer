@@ -492,8 +492,32 @@ destroy exactly what the schema keeps them for.
 
 ## IDLE
 
-Held with a server-side timer that emits a keep-alive before the 29-minute RFC 2177 limit, and
-cancelled cleanly on shutdown.
+**The updates are real, and they come from polling the folder.** RFC 2177 §3: "as long as an IDLE
+command is active, the server is now free to send untagged EXISTS, EXPUNGE, and other messages at
+any time." This server has no cross-session notification bus, so an idling connection watches its
+folder's message count on a five-second timer instead.
+
+That distinction matters more than it sounds. §3 tells a client that without the capability it
+"must poll for mailbox updates" — so advertising `IDLE` and then never pushing would be *worse*
+than not advertising it at all: the client would stop polling and see new mail later than before.
+A server that offers IDLE owes the client actual updates.
+
+**Only growth is pushed.** An `EXISTS` is an absolute count and always true, but a shrink means
+another session expunged something, and reporting that correctly needs the sequence numbers that
+went — which the poll does not know. Guessing would make a client renumber onto the wrong message,
+which in this response is how mail gets deleted on the client. A shrink is absorbed silently and
+the client learns of it on its next command: late, but never wrong.
+
+**The inactivity timeout still applies**, which §3 permits outright: "The server MAY consider a
+client inactive if it has an IDLE command running, and if such a server has an inactivity timeout
+it MAY log the client off implicitly at the end of its timeout period." The 29-minute figure in
+that section is advice to *clients* about re-issuing IDLE, not a server-side timer — this
+document previously described it as one, which was wrong.
+
+**Anything but `DONE` ends the idle with a tagged `BAD`.** §3: "The client MUST NOT send a command
+while the server is waiting for the DONE, since the server will not be able to distinguish a
+command from a continuation." A client that does anyway gets its connection back rather than
+having the command silently swallowed.
 
 ## POP3
 

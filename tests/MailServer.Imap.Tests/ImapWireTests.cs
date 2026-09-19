@@ -927,4 +927,163 @@ public sealed class ImapWireTests : IDisposable
 
         await served;
     }
+    /// <summary>
+    /// RFC 2177 §3: the server "requests a response to the IDLE command using the continuation
+    /// ("+") response", and the command "is terminated by the receipt of a "DONE" continuation
+    /// from the client" — after which the server "MUST immediately send the tagged response".
+    /// </summary>
+    [Fact]
+    public async Task Idle_holds_the_connection_until_done()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(tls, "a2 SELECT INBOX");
+            await ReadUntilTaggedAsync(tls, "a2");
+
+            await WriteLineAsync(tls, "a3 IDLE");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+
+            await WriteLineAsync(tls, "DONE");
+            (await ReadLineAsync(tls)).ShouldStartWith("a3 OK ");
+
+            // The connection is usable again straight away.
+            await WriteLineAsync(tls, "a4 NOOP");
+            (await ReadUntilTaggedAsync(tls, "a4"))[^1].ShouldStartWith("a4 OK ");
+
+            await WriteLineAsync(tls, "a5 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a5");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// §3: "as long as an IDLE command is active, the server is now free to send untagged EXISTS,
+    /// EXPUNGE, and other messages at any time." This is the whole point of the command — a
+    /// client told it may stop polling and then told nothing would see new mail later than if it
+    /// had kept polling.
+    /// </summary>
+    [Fact]
+    public async Task Idle_pushes_an_exists_when_the_folder_grows()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 1);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(tls, "a2 SELECT INBOX");
+            await ReadUntilTaggedAsync(tls, "a2");
+
+            await WriteLineAsync(tls, "a3 IDLE");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+
+            // Another delivery arrives while the client is idling.
+            mailboxes.Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2);
+
+            // The push arrives on the poll, without the client having said anything.
+            (await ReadLineAsync(tls)).ShouldBe("* 2 EXISTS");
+
+            await WriteLineAsync(tls, "DONE");
+            (await ReadLineAsync(tls)).ShouldStartWith("a3 OK ");
+
+            await WriteLineAsync(tls, "a4 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a4");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// §3: "The client MUST NOT send a command while the server is waiting for the DONE, since
+    /// the server will not be able to distinguish a command from a continuation." A client that
+    /// does anyway gets its connection back with a tagged BAD rather than having the command
+    /// silently swallowed.
+    /// </summary>
+    [Fact]
+    public async Task Anything_but_done_ends_the_idle_with_a_bad()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(tls, "a2 SELECT INBOX");
+            await ReadUntilTaggedAsync(tls, "a2");
+
+            await WriteLineAsync(tls, "a3 IDLE");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+
+            await WriteLineAsync(tls, "a4 NOOP");
+            (await ReadLineAsync(tls)).ShouldStartWith("a3 BAD ");
+
+            await WriteLineAsync(tls, "a5 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a5");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// §3 makes the capability the precondition: "If the server does not advertise the IDLE
+    /// capability, the client MUST NOT use the IDLE command and must poll for mailbox updates."
+    /// </summary>
+    [Fact]
+    public async Task Idle_is_advertised()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX");
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(tls, "a2 CAPABILITY");
+            List<string> lines = await ReadUntilTaggedAsync(tls, "a2");
+
+            lines[0].ShouldContain("IDLE");
+
+            await WriteLineAsync(tls, "a3 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a3");
+        }
+
+        await served;
+    }
 }

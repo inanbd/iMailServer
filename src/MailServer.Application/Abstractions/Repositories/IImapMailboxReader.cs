@@ -188,6 +188,19 @@ public interface IImapMailboxReader
     /// </para>
     /// </remarks>
     /// <param name="uids">The UIDs to resolve. Scoped to the folder and the mailbox.</param>
+    /// <summary>
+    /// How many messages a folder holds, and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// For <c>IDLE</c>, which asks this repeatedly while a client waits. Reading the summaries
+    /// and counting them would work and would read every row of the folder on every poll; this
+    /// is one aggregate over the index the folder is already keyed by.
+    /// </remarks>
+    Task<long> CountMessagesAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        CancellationToken cancellationToken);
+
     Task<IReadOnlyDictionary<long, StoredMessageId>> ReadMessageIdsAsync(
         MailboxId mailboxId,
         MailboxFolderId folderId,

@@ -42,6 +42,17 @@ public enum ImapSessionAction
     /// <c>BAD</c> it earned.
     /// </remarks>
     ReadAuthenticationResponse = 3,
+
+    /// <summary>
+    /// Hold the connection idle, pushing mailbox updates, until the client sends <c>DONE</c>.
+    /// </summary>
+    /// <remarks>
+    /// RFC 2177 §3: "The IDLE command remains active until the client responds to the
+    /// continuation, and as long as an IDLE command is active, the server is now free to send
+    /// untagged EXISTS, EXPUNGE, and other messages at any time." Only the loop can do that: it
+    /// owns the stream and the clock, and the processor owns neither.
+    /// </remarks>
+    Idle = 4,
 }
 
 /// <summary>Responses to send, and what to do next.</summary>
@@ -267,6 +278,7 @@ public sealed class ImapCommandProcessor
             ImapVerb.Move => await CopyAsync(command, move: true, cancellationToken).ConfigureAwait(false),
             ImapVerb.Append => AppendRefusal(command),
             ImapVerb.Search => await SearchAsync(command, cancellationToken).ConfigureAwait(false),
+            ImapVerb.Idle => Idle(command),
             _ => NotImplemented(command),
         };
     }
@@ -2219,6 +2231,70 @@ public sealed class ImapCommandProcessor
             ImapSessionAction.Continue);
     }
 
+    /// <summary>
+    /// <c>IDLE</c> — RFC 2177 §3.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The command itself is only the continuation; everything that makes it useful happens in
+    /// the connection loop, which owns the stream the updates go out on and the clock that paces
+    /// them. §3: "The server requests a response to the IDLE command using the continuation
+    /// ("+") response."
+    /// </para>
+    /// <para>
+    /// Refused outside the selected state. §3 leaves this to the base specification, and there
+    /// is nothing to report updates about without a mailbox open — a client idling in the
+    /// authenticated state would wait for news that could not arrive.
+    /// </para>
+    /// </remarks>
+    private ImapCommandResult Idle(ImapCommand command)
+    {
+        if (_mailboxes is null)
+        {
+            return NotImplemented(command);
+        }
+
+        if (_session.AuthenticatedMailboxId is null || _session.SelectedFolderId is null)
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, "No mailbox is selected"));
+        }
+
+        if (command.Argument.Trim().Length != 0)
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, "IDLE takes no arguments"));
+        }
+
+        return new ImapCommandResult(
+            [ImapResponse.Continuation("idling")],
+            ImapSessionAction.Idle);
+    }
+
+    /// <summary>
+    /// Reads the selected folder's message count, for an idling connection to watch.
+    /// </summary>
+    /// <remarks>
+    /// Exposed for the loop, which cannot reach the repository itself. Returns null when there
+    /// is nothing to watch, which ends the idle rather than looping on an error.
+    /// </remarks>
+    public async ValueTask<long?> CountSelectedAsync(CancellationToken cancellationToken)
+    {
+        if (_mailboxes is null ||
+            _session.AuthenticatedMailboxId is null ||
+            _session.SelectedFolderId is null)
+        {
+            return null;
+        }
+
+        return await _mailboxes
+            .CountMessagesAsync(
+                _session.AuthenticatedMailboxId.Value,
+                _session.SelectedFolderId.Value,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     private static ImapCommandResult NotImplemented(ImapCommand command) =>
         ImapCommandResult.Single(ImapResponses.No(
             command.Tag,
@@ -2269,6 +2345,11 @@ public sealed class ImapCommandProcessor
         // server which supports this extension indicates this with a capability name of
         // 'UNSELECT'". Advertising both is required in one case and the only way a client can
         // discover the command in the other.
+        // RFC 2177 §3: "The IDLE command may be used with any IMAP4 server implementation that
+        // returns "IDLE" as one of the supported capabilities to the CAPABILITY command. If the
+        // server does not advertise the IDLE capability, the client MUST NOT use the IDLE
+        // command and must poll for mailbox updates."
+        IsIdleAvailable: _mailboxes is not null,
         IsNamespaceAvailable: true,
         IsUnselectAvailable: true,
 

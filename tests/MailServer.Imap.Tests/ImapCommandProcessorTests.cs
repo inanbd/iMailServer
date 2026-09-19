@@ -663,6 +663,25 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
             new ImapAppendResult(ImapFolderMutation.Done, folder.Folder.Id, all.Count));
     }
 
+    public Task<long> CountMessagesAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        CancellationToken cancellationToken)
+    {
+        KeyValuePair<(Guid Mailbox, string Path), Entry> owner = _folders
+            .FirstOrDefault(pair =>
+                pair.Value.Folder.Id.Value == folderId.Value &&
+                pair.Key.Mailbox == mailboxId.Value);
+
+        if (owner.Value is null ||
+            !_messages.TryGetValue(owner.Key, out List<ImapMessageSummary>? all))
+        {
+            return Task.FromResult(0L);
+        }
+
+        return Task.FromResult((long)all.Count);
+    }
+
     /// <summary>Every folder this fake was asked to expunge.</summary>
     public List<(Guid Mailbox, Guid Folder)> Expunged { get; } = [];
 
