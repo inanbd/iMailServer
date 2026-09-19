@@ -1,6 +1,7 @@
 # Deliverability
 
-> **Status: Planned — Milestone 11.**
+> **Status: in progress — Milestone 11.** The check model and the score are built and
+> tested; the checks that feed them are landing one group at a time.
 
 ## What this product promises, and what it does not
 
@@ -31,6 +32,40 @@ actually found, the value expected, the resolver used, the TTL observed.
 
 The UI shows exactly how the total was computed. A bare "94/100" that cannot be explained is
 useless to an operator trying to fix the missing six.
+
+### How the number is arrived at
+
+**A warning is worth half its weight.** Full credit would make the score say nothing about a
+configuration that is one bad day from failing. No credit would make a warning indistinguishable
+from a failure, so an operator with a working setup and one soft-fail SPF record would see the
+same number as one whose SPF is missing entirely — and would not know which to fix first.
+
+**An inconclusive check lowers the ceiling, not the score.** A DNS timeout is not a fact about
+the operator's configuration. Scoring it as a failure sends somebody to fix something that is
+not broken; scoring it as a pass reports readiness the server has no evidence for. Its points
+are therefore excluded from both the numerator and the denominator, and reported as *untested*.
+
+**A category with no checks is entirely untested** — not perfect, not zero. Leaving the
+reputation providers unconfigured neither awards ten points nor deducts them.
+
+**Within a category, checks are weighted relative to each other** and the published share is
+divided in that proportion. Two checks weighted 1 and 3 in a category worth 20 are worth 5 and
+15. A check's weight stays a local decision: adding a seventh identity check does not require
+re-deciding the other six, and the category totals remain exactly the numbers in the table above.
+
+### Readiness is not the score
+
+A report can score 94 with a failing SPF record if everything else is perfect, and 94 is a
+comfortable-looking number that hides a configuration receivers will reject on the very first
+message. So the verdict — **Ready**, **Not ready**, **Unknown** — is decided by the worst outcome
+present and never by arithmetic, and the UI leads with it. Any failure is *Not ready*; any
+inconclusive check is *Unknown*; a report with no checks at all is *Unknown* rather than *Ready*.
+
+For the same reason, a partially judged report never leads with a number out of a hundred. One
+passing check and eighty untested points rescales to 100%, and a sentence beginning "100 out of
+100" is read as perfect however carefully it is qualified afterwards — by an operator skimming,
+by a UI that truncates, by a screenshot. It reads *"20 out of the 20 points that could be judged;
+80 of 100 were not tested"*.
 
 ## Authentication is weighted highest for a reason
 
