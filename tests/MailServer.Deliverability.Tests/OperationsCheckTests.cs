@@ -24,8 +24,9 @@ public sealed class OperationsCheckTests
         int? bounces = 5,
         long? free = OneHundredGb / 2,
         long? total = OneHundredGb,
-        TimeSpan? skew = null) =>
-        new(relays, pending, oldest, deliveries, bounces, free, total, skew ?? TimeSpan.Zero);
+        TimeSpan? skew = null,
+        string? relaySource = "127.0.0.1") =>
+        new(relays, relaySource, pending, oldest, deliveries, bounces, free, total, skew ?? TimeSpan.Zero);
 
     private static DeliverabilityCheck Check(OperationsFacts facts, string id) =>
         OperationsChecks.Evaluate(facts).Single(c => c.Id == id);
@@ -116,7 +117,7 @@ public sealed class OperationsCheckTests
     [Fact]
     public void An_unmeasured_server_is_entirely_unjudged()
     {
-        OperationsFacts facts = new(null, null, null, null, null, null, null, null);
+        OperationsFacts facts = new(null, null, null, null, null, null, null, null, null);
 
         foreach (DeliverabilityCheck check in OperationsChecks.Evaluate(facts))
         {
@@ -143,6 +144,11 @@ public sealed class OperationsCheckTests
 
         check.Outcome.ShouldBe(DeliverabilityOutcome.Fail);
         check.Remedy.ShouldNotBeNull().ShouldContain("off the public network now");
+
+        // The address is named, because this server's only address-based relay path is a list an
+        // operator typed - so an operator who put 127.0.0.1 on it recognises their own doing,
+        // and one who did not knows where to look.
+        check.Detail.ShouldContain("tested from 127.0.0.1");
     }
 
     /// <summary>
@@ -382,7 +388,7 @@ public sealed class OperationsCheckTests
     [Fact]
     public void No_time_reference_leaves_the_clock_unjudged()
     {
-        OperationsFacts facts = new(false, 0, null, 1000, 5, OneHundredGb / 2, OneHundredGb, null);
+        OperationsFacts facts = new(false, "127.0.0.1", 0, null, 1000, 5, OneHundredGb / 2, OneHundredGb, null);
 
         Check(facts, OperationsChecks.ClockSkewId)
             .Outcome.ShouldBe(DeliverabilityOutcome.Inconclusive);

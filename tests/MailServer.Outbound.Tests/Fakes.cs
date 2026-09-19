@@ -155,6 +155,20 @@ internal sealed class FakeOutboundQueueRepository : IOutboundQueueRepository
             return Task.FromResult(new QueueDepth(pending, processing, oldest));
         }
     }
+
+    public Task<DeliveryOutcomeCounts> GetOutcomeCountsAsync(
+        DateTimeOffset sinceUtc,
+        CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            List<DeliveryAttempt> recent = [.. Attempts.Where(a => a.CompletedUtc >= sinceUtc)];
+
+            return Task.FromResult(new DeliveryOutcomeCounts(
+                recent.Count(a => a.Outcome == DeliveryOutcome.Delivered),
+                recent.Count(a => a.Outcome == DeliveryOutcome.Bounced)));
+        }
+    }
 }
 
 /// <summary>A scriptable fake MX resolver: one result per domain, set up by the test.</summary>

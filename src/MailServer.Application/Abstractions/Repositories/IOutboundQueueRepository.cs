@@ -13,6 +13,18 @@ namespace MailServer.Application.Abstractions.Repositories;
 /// </param>
 public sealed record QueueDepth(int Pending, int Processing, DateTimeOffset? OldestPendingUtc);
 
+/// <summary>How recent delivery attempts turned out.</summary>
+/// <param name="Delivered">Attempts that ended in delivery.</param>
+/// <param name="Bounced">Attempts that ended in a permanent failure.</param>
+/// <remarks>
+/// <b>Deferred attempts are counted in neither.</b> A deferral is the queue working: the message
+/// has not failed and has not arrived, and including it in either number would make a busy day
+/// against a slow destination look like a delivery problem. The deliverability report's bounce
+/// rate is <c>Bounced / (Delivered + Bounced)</c>, which is the ratio a receiver's own reputation
+/// system computes from the same two events.
+/// </remarks>
+public sealed record DeliveryOutcomeCounts(int Delivered, int Bounced);
+
 /// <summary>Persists the outbound queue and its delivery attempt history.</summary>
 /// <remarks>
 /// <para>
@@ -76,4 +88,16 @@ public interface IOutboundQueueRepository
 
     /// <summary>Current queue depth, for the health registry.</summary>
     Task<QueueDepth> GetDepthAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// How attempts completed since an instant, for the deliverability report's bounce rate.
+    /// </summary>
+    /// <remarks>
+    /// Counted in the database rather than by loading the attempts: a busy server records one
+    /// row per destination per retry, and a report that pulled a fortnight of them into memory to
+    /// divide two numbers would be the heaviest thing the admin surface does.
+    /// </remarks>
+    Task<DeliveryOutcomeCounts> GetOutcomeCountsAsync(
+        DateTimeOffset sinceUtc,
+        CancellationToken cancellationToken);
 }

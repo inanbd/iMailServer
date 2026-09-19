@@ -298,6 +298,37 @@ means nothing; an operator on their first day would otherwise be shown a catastr
 generated entirely by their own test messages, and would go looking for a problem that does not
 exist.
 
+### Gathering the operations facts
+
+`OperationsProbe` reads the queue, the disk and the clock; the open-relay self-test is passed
+*in*, because it is the one part that opens a connection and a caller who cannot reach the
+listener — or should not, on a host where port 25 is not this server's — must be able to leave it
+out.
+
+**`OpenRelaySelfTest` stops at `RCPT TO` and never sends `DATA`.** The answer to that one command
+is the entire finding, and a test that went on to submit a message would be a test that sends
+mail — from a server whose whole problem, if the test fails, is that it sends mail for strangers.
+Both addresses are in RFC 2606's reserved `.invalid`, "intended for use in online construction of
+domain names that will surely fail", so even an accepted recipient has nowhere to go. `RSET`
+precedes `QUIT`, and the client waits for the `221` (RFC 5321 §4.1.1.10) rather than hanging up.
+
+**A test that did not complete is `null`, never `false`.** A refused connection, or a sender the
+server rejected before the recipient was ever asked about, says nothing about what it does with
+a conversation it accepts. Reporting either as "not an open relay" would be the most dangerous
+false pass in the report.
+
+**An acceptance here means something specific.** `RelayPolicy` has no implicit trust for any
+address — local domains, authenticated submission, and a list an operator typed are the only
+three ways through — so this is not the usual "many servers trust localhost" false positive. The
+finding names the address it tested from, because an acceptance means that address is on the
+authorised relay list, and seeing which address tells a deliberate entry from an accident.
+
+**`SntpTimeReference` is read-only.** Its result reaches one check and stops. A mail server that
+took its time from an unauthenticated UDP packet would hand whoever can answer it the ability to
+expire its own certificates and invalidate its own signatures. It is thirty lines of RFC 4330
+rather than a package: a 48-octet request, and the transmit timestamp at octet 40 read against
+the 1900 epoch. An all-zero timestamp is §4's "unknown or unsynchronised", not the year 1900.
+
 **The clock check names what a skew breaks** — DKIM signatures carrying `x=`, a new certificate
 that looks not-yet-valid, `Received` headers dated wrongly — because none of those looks like a
 clock problem from the outside, and an operator told only "your clock is wrong" has no reason to

@@ -309,6 +309,41 @@ internal sealed class OutboundQueueRepository(
             return new QueueDepth(row.Pending, row.Processing, row.OldestPendingUtc);
         }, cancellationToken);
 
+    /// <summary>
+    /// Counts recent attempt outcomes in the database.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>CompletedUtc</c> rather than <c>CreatedUtc</c>, because the window the report asks
+    /// about is when the destination answered — a row written late by a backlogged worker
+    /// belongs to the attempt's own moment, not to the moment it was persisted.
+    /// </para>
+    /// <para>
+    /// Deferrals are counted in neither column. See <see cref="DeliveryOutcomeCounts"/>: a
+    /// deferral is the queue working, and folding it into either number would make a slow
+    /// destination look like a delivery problem.
+    /// </para>
+    /// </remarks>
+    public Task<DeliveryOutcomeCounts> GetOutcomeCountsAsync(
+        DateTimeOffset sinceUtc,
+        CancellationToken cancellationToken) =>
+        ExecuteAsync(async (session, ct) =>
+        {
+            OutcomeRow row = await session.Connection.QuerySingleAsync<OutcomeRow>(Command(
+                session,
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN Outcome = 0 THEN 1 ELSE 0 END), 0) AS Delivered,
+                    COALESCE(SUM(CASE WHEN Outcome = 2 THEN 1 ELSE 0 END), 0) AS Bounced
+                FROM DeliveryAttempts
+                WHERE CompletedUtc >= @SinceUtc
+                """,
+                new { SinceUtc = sinceUtc },
+                ct)).ConfigureAwait(false);
+
+            return new DeliveryOutcomeCounts(row.Delivered, row.Bounced);
+        }, cancellationToken);
+
     private static OutboundQueueItem ToEntity(QueueItemRow row) =>
         OutboundQueueItem.Rehydrate(
             new QueueId(row.Id),
@@ -336,5 +371,12 @@ internal sealed class OutboundQueueRepository(
         public int Processing { get; set; }
 
         public DateTimeOffset? OldestPendingUtc { get; set; }
+    }
+
+    private sealed class OutcomeRow
+    {
+        public int Delivered { get; set; }
+
+        public int Bounced { get; set; }
     }
 }

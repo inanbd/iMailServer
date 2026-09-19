@@ -276,6 +276,10 @@ public static class DependencyInjection
                 .Select(l => new ReputationList(l.Zone, l.Subject))],
             provider.GetRequiredService<IClock>()));
         services.TryAddScoped<ReputationProbe>();
+        services.TryAddSingleton<IVolumeMeasure, DriveVolumeMeasure>();
+        services.TryAddSingleton<IMessageStoreLocation>(provider => new ConfiguredMessageStoreLocation(
+            provider.GetRequiredService<IOptions<MailServerOptions>>().Value.Storage.DataRoot));
+        services.TryAddScoped<OperationsProbe>();
         services.TryAddScoped<IOutboundDeliveryClient, OutboundSmtpClient>();
         services.TryAddScoped<IDsnComposer, PlainTextDsnComposer>();
 

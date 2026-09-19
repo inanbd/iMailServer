@@ -7,6 +7,12 @@ namespace MailServer.Domain.Deliverability;
 /// Whether the server accepted an unauthenticated message from an outside address to an outside
 /// address, or null when no self-test was run.
 /// </param>
+/// <param name="RelayTestSource">
+/// The address the self-test connected from, or null when it was not run. Named in the finding
+/// because this server has no implicit trust for any address — its only address-based relay path
+/// is a list an operator typed — so an acceptance means that address is on it, and seeing which
+/// address is what tells a deliberate entry from an accident.
+/// </param>
 /// <param name="QueuePending">Messages waiting to go out, or null when the queue was not read.</param>
 /// <param name="OldestPendingAge">How long the oldest of them has waited, or null.</param>
 /// <param name="RecentDeliveries">Delivery outcomes recorded in the window, or null.</param>
@@ -19,6 +25,7 @@ namespace MailServer.Domain.Deliverability;
 /// </param>
 public sealed record OperationsFacts(
     bool? RelaysForStrangers,
+    string? RelayTestSource,
     int? QueuePending,
     TimeSpan? OldestPendingAge,
     int? RecentDeliveries,
@@ -141,28 +148,32 @@ public static class OperationsChecks
             return Unmeasured(Id, Title, Weight, "No relay self-test was run.");
         }
 
+        string from = facts.RelayTestSource is { Length: > 0 } tested ? $" from {tested}" : string.Empty;
+
         DeliverabilityEvidence evidence = new(
             "An unauthenticated message to an outside address is refused",
-            relays ? "accepted" : "refused");
+            (relays ? "accepted" : "refused") + from);
 
         return relays
             ? Fail(
                 Id,
                 Title,
                 Weight,
-                "This server accepted an unauthenticated message from an outside address to an " +
-                "outside address. It is an open relay. Scanners find these within hours; by the " +
-                "time it shows up as a delivery problem, the address is on every blocklist and " +
-                "the domain's reputation is gone.",
+                "This server accepted an unauthenticated message to an outside address" +
+                (facts.RelayTestSource is { Length: > 0 } source ? $", tested from {source}" : "") +
+                ". It is an open relay. Scanners find these within hours; by the time it shows " +
+                "up as a delivery problem, the address is on every blocklist and the domain's " +
+                "reputation is gone.",
                 evidence,
                 "Take the port 25 listener off the public network now, before changing anything " +
-                "else. While it is reachable it is being used. Then require authentication for " +
-                "any recipient this server is not the final destination for.")
+                "else — while it is reachable it is being used. Then check the authorised relay " +
+                "list: it is the only way an unauthenticated address is accepted here, so if " +
+                "the tested address is on it, everything that can reach that address can relay.")
             : Pass(
                 Id,
                 Title,
                 Weight,
-                "An unauthenticated message to an outside address was refused.",
+                $"An unauthenticated message to an outside address was refused{from}.",
                 evidence);
     }
 

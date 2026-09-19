@@ -372,11 +372,11 @@ public sealed class OutboundQueueRepositoryTests
 
         await scope.Outbound.AddAttemptAsync(attempt, CancellationToken.None);
 
-        // A second attempt against the same item, with a failure this time. No read API is
-        // exposed beyond persistence today (Milestone 8's admin surface is deferred - see the
-        // queue-visibility scoping note in docs); this asserts the write path itself never
-        // throws against the real schema and constraints, including nullable diagnostic columns,
-        // which is what would fail if a column were mistyped or a foreign key mis-declared.
+        // A second attempt against the same item, with a failure this time. Beyond the outcome
+        // counts the deliverability report reads (see the test below), no read API is exposed
+        // over these rows; this asserts the write path itself never throws against the real
+        // schema and constraints, including nullable diagnostic columns, which is what would
+        // fail if a column were mistyped or a foreign key mis-declared.
         DeliveryAttempt failure = DeliveryAttempt.Create(
             queueItemId: item.Id,
             attemptNumber: 2,
@@ -431,5 +431,89 @@ public sealed class OutboundQueueRepositoryTests
         depth.Pending.ShouldBe(1);
         depth.Processing.ShouldBe(1);
         depth.OldestPendingUtc.ShouldBe(Now);
+    }
+
+    /// <summary>
+    /// The deliverability report's bounce rate is counted in the database.
+    /// </summary>
+    /// <remarks>
+    /// Three things at once, because they are one SQL statement: that deliveries and bounces are
+    /// counted into the right columns, that deferrals land in neither, and that the window is
+    /// applied to <c>CompletedUtc</c>. Getting the last one wrong would be invisible until a
+    /// backlogged worker wrote an old attempt's row late and moved it into the wrong window.
+    /// </remarks>
+    [Fact]
+    public async Task Outcome_counts_separate_deliveries_from_bounces_and_ignore_deferrals()
+    {
+        await using SqliteTestDatabase database = new();
+        await database.MigrateAsync(CancellationToken.None);
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        (StoredMessageId messageId, Guid recipientId) = await SeedMessageAsync(scope);
+
+        OutboundQueueItem item = OutboundQueueItem.Create(
+            messageId, recipientId,
+            EmailAddress.Parse("recipient@destination.example"),
+            EmailAddress.Parse("sender@origin.example"),
+            requireTls: false, isDsn: false, Now);
+
+        await scope.Outbound.AddAsync(item, CancellationToken.None);
+
+        int attemptNumber = 0;
+
+        async Task RecordAsync(DeliveryOutcome outcome, DateTimeOffset completed)
+        {
+            await scope.Outbound.AddAttemptAsync(
+                DeliveryAttempt.Create(
+                    queueItemId: item.Id,
+                    attemptNumber: ++attemptNumber,
+                    startedUtc: completed.AddSeconds(-1),
+                    completedUtc: completed,
+                    mxHostname: "mx1.destination.example",
+                    remoteAddress: null,
+                    tlsActive: false,
+                    tlsProtocol: null,
+                    tlsCipher: null,
+                    peerCertificateSubject: null,
+                    peerCertificateIssuer: null,
+                    replyCode: outcome == DeliveryOutcome.Delivered ? 250 : 550,
+                    enhancedStatus: null,
+                    replyText: null,
+                    outcome: outcome,
+                    classification: outcome == DeliveryOutcome.Bounced
+                        ? FailureClassification.Permanent
+                        : FailureClassification.None,
+                    errorDetail: null),
+                CancellationToken.None);
+        }
+
+        await RecordAsync(DeliveryOutcome.Delivered, Now.AddHours(1));
+        await RecordAsync(DeliveryOutcome.Delivered, Now.AddHours(2));
+        await RecordAsync(DeliveryOutcome.Bounced, Now.AddHours(3));
+        await RecordAsync(DeliveryOutcome.Deferred, Now.AddHours(4));
+
+        // Outside the window, and so counted in neither.
+        await RecordAsync(DeliveryOutcome.Bounced, Now.AddHours(-1));
+
+        DeliveryOutcomeCounts counts =
+            await scope.Outbound.GetOutcomeCountsAsync(Now, CancellationToken.None);
+
+        counts.Delivered.ShouldBe(2);
+        counts.Bounced.ShouldBe(1);
+    }
+
+    /// <summary>A window with nothing in it counts nothing, rather than failing.</summary>
+    [Fact]
+    public async Task Outcome_counts_of_an_empty_window_are_zero()
+    {
+        await using SqliteTestDatabase database = new();
+        await database.MigrateAsync(CancellationToken.None);
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        DeliveryOutcomeCounts counts =
+            await scope.Outbound.GetOutcomeCountsAsync(Now, CancellationToken.None);
+
+        counts.Delivered.ShouldBe(0);
+        counts.Bounced.ShouldBe(0);
     }
 }
