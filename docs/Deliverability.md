@@ -124,6 +124,72 @@ receiver rejects, while DMARC alignment quietly falls back to SPF and keeps pass
 visibly breaks until an SPF change, at which point the cause is weeks old. The weakest live key
 decides the strength check, since a forger picks which selector to claim.
 
+## The TLS category
+
+**Nothing in this category is required to carry mail, which is exactly why it scores twenty.**
+RFC 3207 makes TLS between MTAs opportunistic — "A publicly-referenced SMTP server MUST NOT
+require use of the STARTTLS extension in order to deliver mail locally" — so a server with no
+certificate at all still exchanges mail with most of the internet. What it cannot do is satisfy
+MTA-STS, DANE, or any mail client, and every one of those failures is silent from this side: the
+sender's report shows it, the receiver's does not.
+
+So the checks judge against RFC 8461 §4.2's bar rather than RFC 3207's — "The certificate
+presented by the receiving MTA MUST not be expired and MUST chain to a root CA that is trusted by
+the Sending MTA. The certificate MUST have a subject alternative name (SAN) [RFC5280] with a
+DNS-ID [RFC6125] matching the hostname" — because that is the bar the senders who care apply.
+
+`TlsChecks` covers the certificate and the listener (14 points); `TransportPolicyChecks` covers
+the published policies (6).
+
+| Id | W | Judged on |
+|---|---|---|
+| `tls.certificate-installed` | 3 | A certificate is bound to the SMTP listeners |
+| `tls.certificate-covers-hostname` | 3 | RFC 8461 §4.2 — a SAN matching the EHLO name |
+| `tls.certificate-trusted` | 3 | Chains to a trusted root; self-signed is its own finding |
+| `tls.certificate-expiry` | 3 | Valid now, and outside the renewal window |
+| `tls.renewal-health` | 1 | Auto-renew on, last attempt did not fail |
+| `tls.starttls-offered` | 1 | STARTTLS advertised on 25 |
+| `tls.mta-sts-record` | 2 | RFC 8461 §3.1 — one `v=STSv1` record, with an `id` |
+| `tls.mta-sts-policy` | 2 | The resource is served, parses, covers the MX, and enforces |
+| `tls.tls-rpt` | 2 | RFC 8460 §3 — a `_smtp._tls` record with `rua` |
+
+**A self-signed certificate fails although mail keeps arriving.** That gap is the point. The
+operator watching their queues sees nothing wrong; §5's enforce mode says senders "MUST NOT
+deliver the message to hosts that fail MX matching or certificate validation", and the mail that
+never arrives leaves no trace here. Self-signed is reported separately from a chain that merely
+fails to build, because the remedies differ: one is a certificate to replace, the other is
+almost always a missing intermediate the server does not send.
+
+**A not-yet-valid certificate names the clock.** It is refused exactly as an expired one is, and
+the cause is far more often this server's clock than the certificate — an operator told only
+"not valid until" goes and reissues a perfectly good certificate.
+
+**Renewal health is judged only for certificates this server can re-obtain.** A hand-installed
+certificate has no renewal process, and inventing a finding about one would send an operator to
+fix nothing. The expiry check still watches the outcome.
+
+**The STARTTLS remedy says not to require it.** RFC 3207 again: requiring it on a
+publicly-referenced server "damages the interoperability of the Internet's SMTP infrastructure".
+A remedy reading "require TLS" would be telling the operator to break inbound mail in the name of
+securing it.
+
+**Two MTA-STS records fail where none only warns.** §3.1: "If the number of resulting records is
+not one […] senders MUST assume the recipient domain does not have an available MTA-STS Policy
+and skip the remaining steps of policy discovery." Publishing none is a choice; publishing two is
+the same effect while the record on screen says otherwise.
+
+**A record with no reachable policy is worse than neither** — every sender follows it, spends a
+request per refresh and gets nothing, while the operator sees a correct TXT record. Each way the
+fetch can fail is its own finding: unreachable, no policy at the path, a policy host whose
+certificate is invalid (a browser that clicks through the warning shows the file perfectly), and
+the wrong media type, which §3.2 has senders reject. The fetch happens only when a record says
+there is a policy — otherwise this server would be making an outbound request to a host named by
+the domain under test on the strength of nothing that domain published.
+
+**A policy omitting a live MX host is the one MTA-STS fault that loses mail**, so it is reported
+ahead of the mode. A testing-mode policy that omits an MX starts losing mail the moment the
+operator follows the other finding and moves to enforce.
+
 ## The DNS category
 
 The reverse question from Identity: not whether receivers accept what this server sends, but

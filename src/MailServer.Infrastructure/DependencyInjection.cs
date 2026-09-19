@@ -2,6 +2,7 @@ using MailServer.Application.Abstractions.Monitoring;
 using MailServer.Application.Abstractions.Acme;
 using MailServer.Application.Abstractions.Certificates;
 using MailServer.Application.Abstractions.Dkim;
+using MailServer.Application.Abstractions.Deliverability;
 using MailServer.Application.Abstractions.Dns;
 using MailServer.Application.Abstractions.Persistence;
 using MailServer.Application.Abstractions.Platform;
@@ -263,6 +264,8 @@ public static class DependencyInjection
         services.TryAddScoped<IdentityProbe>();
         services.TryAddScoped<AuthenticationProbe>();
         services.TryAddScoped<DnsProbe>();
+        services.TryAddSingleton<IMtaStsPolicyFetcher, MtaStsPolicyFetcher>();
+        services.TryAddScoped<TransportPolicyProbe>();
         services.TryAddScoped<IOutboundDeliveryClient, OutboundSmtpClient>();
         services.TryAddScoped<IDsnComposer, PlainTextDsnComposer>();
 
