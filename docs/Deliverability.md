@@ -269,10 +269,46 @@ arrived that should not have.
 
 ## Reputation providers
 
-`IReputationProvider` is an abstraction with caching and rate limiting.
+`IReputationProvider` is an abstraction with caching and rate limiting. `DnsBlockListProvider`
+implements it over `IDnsDiagnosticsService`; `ReputationChecks` judges what it returns.
 
 Naïve DNSBL querying from a busy MTA gets you blocked by the DNSBL operator and is an abuse of
-volunteer infrastructure. Results are cached and queries are rate-limited by default.
+volunteer infrastructure. Results are cached for fifteen minutes and queries to one zone are
+spaced two seconds apart. A delisting takes hours to days to take effect, so a fresher answer
+buys an operator nothing and costs the list a great deal.
+
+**No list is configured by default, and that is not an omission.** Querying a list is a request
+this server makes, on the operator's behalf, to an organisation they have not chosen; several
+forbid automated use without an arrangement. `MailServer:Deliverability:BlockLists` is empty
+until they fill it.
+
+### The self-test, and why it is the important part
+
+RFC 5782 §5: "IPv4-based DNSxLs MUST contain an entry for 127.0.0.2 for testing purposes.
+IPv4-based DNSxLs MUST NOT contain an entry for 127.0.0.1." Domain lists get RFC 2606's `TEST`
+and `INVALID` instead.
+
+Every list is asked those two questions before it is asked anything real, because **a list that
+has stopped serving this server commonly answers "listed" for every query it is given** — which
+is what a public resolver or an exceeded free-use quota looks like, and which is indistinguishable
+from a genuine listing. Believing it would send an operator to file delisting requests with
+several organisations for a problem they do not have.
+
+So a verdict from a list that failed its self-test is not counted. It is not silently dropped
+either: `reputation.lists-usable` reports it, with a remedy pointing at the resolver rather than
+at anything the operator publishes, because nothing they publish can change it. And with no
+believable list at all the verdict is *Unknown*, never *clean* — "nobody listed you" and "nobody
+answered" are different facts and only one is good news.
+
+| Id | W | Judged on |
+|---|---|---|
+| `reputation.ip-not-listed` | 6 | The sending address, on lists that passed their self-test |
+| `reputation.domain-not-listed` | 3 | The domain, likewise |
+| `reputation.lists-usable` | 1 | RFC 5782 §5's test entries |
+
+Ten points, the second lowest, deliberately. Everything else in this report is something the
+operator controls and can verify before sending a message; a blocklist entry is somebody else's
+judgement, arrives after the fact, and is often about the previous tenant of an address.
 
 ## Behaviour this product will not implement
 

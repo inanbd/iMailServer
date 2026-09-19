@@ -266,6 +266,16 @@ public static class DependencyInjection
         services.TryAddScoped<DnsProbe>();
         services.TryAddSingleton<IMtaStsPolicyFetcher, MtaStsPolicyFetcher>();
         services.TryAddScoped<TransportPolicyProbe>();
+
+        // The blocklists are whatever the operator named, and nothing by default: see
+        // DeliverabilityOptions.BlockLists for why shipping a default set would be wrong.
+        services.TryAddSingleton<IReputationProvider>(provider => new DnsBlockListProvider(
+            provider.GetRequiredService<IDnsDiagnosticsService>(),
+            [.. provider.GetRequiredService<IOptions<MailServerOptions>>().Value
+                .Deliverability.BlockLists
+                .Select(l => new ReputationList(l.Zone, l.Subject))],
+            provider.GetRequiredService<IClock>()));
+        services.TryAddScoped<ReputationProbe>();
         services.TryAddScoped<IOutboundDeliveryClient, OutboundSmtpClient>();
         services.TryAddScoped<IDsnComposer, PlainTextDsnComposer>();
 

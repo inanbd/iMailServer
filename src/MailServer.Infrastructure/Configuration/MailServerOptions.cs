@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using MailServer.Domain.Enums;
+using MailServer.Infrastructure.Deliverability;
 
 namespace MailServer.Infrastructure.Configuration;
 
@@ -52,6 +53,8 @@ public sealed class MailServerOptions
     public ImapOptions Imap { get; set; } = new();
 
     public Pop3Options Pop3 { get; set; } = new();
+
+    public DeliverabilityOptions Deliverability { get; set; } = new();
 
     public OutboundOptions Outbound { get; set; } = new();
 }
@@ -125,6 +128,56 @@ public sealed class Pop3Options
     /// capability "indicates that the USER and PASS commands are supported".
     /// </remarks>
     public bool EnableAuthentication { get; set; }
+}
+
+/// <summary>The deliverability report's settings.</summary>
+/// <remarks>
+/// Only the reputation lists so far. Everything else the report needs it reads from the
+/// configuration the mail server already has — the hostname, the certificate, the domains — and
+/// a diagnostic tool that had its own idea of any of those would be diagnosing a server nobody
+/// is running.
+/// </remarks>
+public sealed class DeliverabilityOptions
+{
+    /// <summary>
+    /// The DNS blocklists to query, empty by default.
+    /// </summary>
+    /// <remarks>
+    /// <b>Empty is the correct default and not an omission.</b> Querying a list is a request this
+    /// server makes, on the operator's behalf, to an organisation they have not chosen; most of
+    /// these lists are run by volunteers, and several forbid automated use without an
+    /// arrangement. Shipping a default set would have every installation start querying them on
+    /// somebody else's say-so.
+    /// </remarks>
+    public IList<ReputationListOptions> BlockLists { get; set; } = [];
+}
+
+/// <summary>One DNS blocklist to query.</summary>
+public sealed class ReputationListOptions
+{
+    /// <summary>
+    /// The list's DNS zone, such as <c>zen.spamhaus.org</c>.
+    /// </summary>
+    /// <remarks>
+    /// The zone alone, with no query prefix: RFC 5782 §2.1 builds the name by prepending the
+    /// reversed address to it, and a value that already carried one would produce a name no
+    /// list serves — which looks exactly like never being listed.
+    /// </remarks>
+    [Required]
+    [RegularExpression(
+        @"^(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))+$",
+        ErrorMessage = "A blocklist zone must be a domain name, such as zen.spamhaus.org.")]
+    public string Zone { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether this list is about addresses or about domains.
+    /// </summary>
+    /// <remarks>
+    /// Not inferred, because getting it wrong is silent: RFC 5782 §5 gives the two kinds
+    /// different test entries, so a domain list asked with an address list's test entries reports
+    /// as not answering, and its verdicts are discarded without anybody being told why.
+    /// </remarks>
+    public ReputationListSubject Subject { get; set; } = ReputationListSubject.Address;
 }
 
 /// <summary>One POP3 listener's endpoint.</summary>
