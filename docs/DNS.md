@@ -1,6 +1,6 @@
 # DNS Architecture
 
-> **Status: `IDnsResolver` implemented in Milestone 8. `IDnsDiagnosticsService` planned — Milestone 11.**
+> **Status: `IDnsResolver` implemented in Milestone 8. `IDnsDiagnosticsService` implemented in Milestone 11.**
 
 ## Two consumers, two abstractions
 
@@ -12,6 +12,17 @@ see `DnsMxResolverTests` for the classification matrix this page describes.
 authoritative nameservers directly, because "it works on my resolver" is exactly the problem a
 diagnostic tool exists to solve. It reports the TTL, the answering server, and the actual
 versus expected value.
+
+It is backed by its own `LookupClient` rather than a flag on the shared one, because the two
+want opposite things — and an operator who has just corrected a record and is asking whether the
+correction took would otherwise be told about the old one. Failed results are not cached either,
+for the same reason. The TTL it reports is the **smallest** in the answer, since that is the one
+that decides how long a correction takes to become visible.
+
+**An empty answer is a success, not a failure.** A name that exists and has no TXT record is a
+fact about the configuration, and only the caller knows whether the absence matters. Reporting it
+as a lookup failure would make every "you have not published this yet" finding indistinguishable
+from a resolver outage — which is the one distinction the whole readiness score depends on.
 
 `DnsClient.NET` underpins both. `Dns.GetHostEntry` cannot do MX, TXT or PTR at all.
 

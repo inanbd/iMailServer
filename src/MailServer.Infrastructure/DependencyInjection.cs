@@ -18,6 +18,7 @@ using MailServer.Infrastructure.Certificates;
 using MailServer.Infrastructure.Configuration;
 using MailServer.Infrastructure.Dkim;
 using MailServer.Infrastructure.Dmarc;
+using MailServer.Infrastructure.Deliverability;
 using MailServer.Infrastructure.Dns;
 using MailServer.Infrastructure.Monitoring;
 using MailServer.Infrastructure.Smtp.Outbound;
@@ -243,6 +244,23 @@ public static class DependencyInjection
         }));
         services.TryAddSingleton<IMxDnsClient, LookupClientMxAdapter>();
         services.TryAddSingleton<IDnsResolver, DnsMxResolver>();
+
+        // A second client, and deliberately not the one above. docs/DNS.md requires the
+        // diagnostic resolver to bypass the cache: an operator who has just corrected a record
+        // and is asking whether the correction took would otherwise be told about the old one,
+        // which is the one question a diagnostic tool exists to answer. Failed results are not
+        // cached either, for the same reason.
+        services.TryAddSingleton<IDiagnosticDnsClient>(_ =>
+            new LookupClientDiagnosticAdapter(new LookupClient(new LookupClientOptions
+            {
+                UseCache = false,
+                CacheFailedResults = false,
+                Timeout = TimeSpan.FromSeconds(10),
+                Retries = 2,
+                ThrowDnsErrors = false,
+            })));
+        services.TryAddSingleton<IDnsDiagnosticsService, DnsDiagnosticsService>();
+        services.TryAddScoped<IdentityProbe>();
         services.TryAddScoped<IOutboundDeliveryClient, OutboundSmtpClient>();
         services.TryAddScoped<IDsnComposer, PlainTextDsnComposer>();
 
