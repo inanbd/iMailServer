@@ -621,6 +621,200 @@ public sealed class ImapMimeTreeTests
         $"Content-Type: multipart/mixed; boundary=\"b{depth}\"";
 
     /// <summary>
+    /// RFC 2046 §5.1.1: "(If a boundary delimiter line appears to end with white space, the white
+    /// space must be presumed to have been added by a gateway, and must be deleted.)" The
+    /// unquoted spelling of the same parameter is already trimmed by the parameter reader, so
+    /// without this the two spellings of one header disagree — and the quoted one loses every
+    /// part of the multipart.
+    /// </summary>
+    [Theory]
+    [InlineData("boundary=\"x \"")]
+    [InlineData("boundary=\"x\t\"")]
+    [InlineData("boundary=x ")]
+    public void A_boundary_ending_in_white_space_is_trimmed(string parameter)
+    {
+        string message =
+            $"Content-Type: multipart/mixed; {parameter}\r\n" +
+            "\r\n" +
+            "--x\r\n" +
+            "Content-Type: text/plain\r\n" +
+            "\r\n" +
+            "the body\r\n" +
+            "--x--\r\n";
+
+        Section(message, "1").ShouldBe("the body");
+    }
+
+    /// <summary>
+    /// A closing delimiter carrying trailing text still closes the multipart. RFC 2046 §5.1.1's
+    /// note to implementors — "An exact match of the entire candidate line is not required; it is
+    /// sufficient that the boundary appear in its entirety following the CRLF" — and, more to the
+    /// point, the same section's "implementations must ignore anything that appears […] after the
+    /// last one". A server that missed the close runs the final part to the end of the content
+    /// and hands the client the epilogue as message data, with an octet count to match.
+    /// </summary>
+    [Fact]
+    public void A_closing_delimiter_with_trailing_text_still_closes()
+    {
+        const string Message =
+            "Content-Type: multipart/mixed; boundary=\"x\"\r\n" +
+            "\r\n" +
+            "--x\r\n" +
+            "Content-Type: text/plain\r\n" +
+            "\r\n" +
+            "the body\r\n" +
+            "--x--junk\r\n" +
+            "\r\n" +
+            "This is the epilogue. It is also to be ignored.\r\n";
+
+        Section(Message, "1").ShouldBe("the body");
+        Section(Message, "1").ShouldNotContain("epilogue");
+    }
+
+    /// <summary>
+    /// RFC 2045 §1: every MIME header field except <c>Content-Disposition</c> "can include RFC
+    /// 822 comments, which have no semantic content and should be ignored during MIME
+    /// processing". The content type is already read that way; the encoding was not, so a client
+    /// matching the token against "BASE64" would refuse to decode and show the user raw base64.
+    /// </summary>
+    [Fact]
+    public void An_encoding_carrying_a_comment_reports_only_the_token() =>
+        Structure(
+            "Content-Type: text/plain\r\nContent-Transfer-Encoding: base64 (encoded)\r\n\r\naGk=\r\n",
+            extended: false)
+            .ShouldBe("(\"TEXT\" \"PLAIN\" NIL NIL NIL \"BASE64\" 6 1)");
+
+    /// <summary>
+    /// RFC 2045 §6.1: "This is the default value -- that is, "Content-Transfer-Encoding: 7BIT" is
+    /// assumed if the Content-Transfer-Encoding header field is not present." A field that is
+    /// present but empty declares nothing, so the default applies to it too — and §9's
+    /// <c>body-fld-enc</c> has no empty form to report instead.
+    /// </summary>
+    [Fact]
+    public void An_empty_encoding_field_falls_back_to_the_default() =>
+        Structure(
+            "Content-Type: text/plain\r\nContent-Transfer-Encoding:\r\n\r\nhi\r\n",
+            extended: false)
+            .ShouldBe("(\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 4 1)");
+
+    /// <summary>
+    /// §9's <c>body-type-basic</c> is annotated "MESSAGE subtype MUST NOT be "RFC822"", and
+    /// <c>body-type-msg</c> requires an envelope, a nested body and a line count after the basic
+    /// fields. A part that stopped at the nesting limit had neither form: it kept the type and
+    /// dropped the three fields, producing a node that matches no alternative of §9's
+    /// <c>body</c>. A client parsing positionally would read the next token as this part's and
+    /// mis-read the rest of the structure.
+    /// </summary>
+    [Fact]
+    public void A_message_part_at_the_nesting_limit_is_still_grammatical()
+    {
+        StringBuilder message = new();
+
+        for (int depth = 0; depth < ImapMimeTree.MaxDepth + 2; depth++)
+        {
+            message.Append("Content-Type: message/rfc822\r\n\r\n");
+        }
+
+        message.Append("Content-Type: text/plain\r\n\r\nx\r\n");
+
+        string structure = Structure(message.ToString(), extended: false);
+
+        // The message really does nest past the limit, so the loop below is not vacuous: one
+        // node per level from 0 to MaxDepth inclusive, and Split returns one more piece than
+        // there are occurrences. The level past the limit is the one Terminal re-types, which is
+        // why it does not appear.
+        structure.Split("\"MESSAGE\" \"RFC822\"").Length
+            .ShouldBe(ImapMimeTree.MaxDepth + 2);
+
+        // Every MESSAGE/RFC822 node must be followed by its envelope, which begins with "(".
+        int at = 0;
+
+        while ((at = structure.IndexOf("\"MESSAGE\" \"RFC822\"", at, StringComparison.Ordinal)) >= 0)
+        {
+            string rest = structure[at..];
+
+            rest.ShouldContain("\"7BIT\" ");
+
+            int fields = rest.IndexOf("\"7BIT\" ", StringComparison.Ordinal) + 7;
+            string afterOctets = rest[fields..];
+            int space = afterOctets.IndexOf(' ', StringComparison.Ordinal);
+
+            // §9's body-type-msg puts an envelope after the octet count, and an envelope
+            // begins with "(".
+            space.ShouldBeGreaterThan(0);
+            afterOctets[(space + 1)..].ShouldStartWith("(");
+
+            at += 1;
+        }
+    }
+
+    /// <summary>
+    /// Breadth is bounded as depth is. Every delimiter line becomes a part, so a message that is
+    /// nothing but delimiter lines expands into a tree many times its own size and renders into a
+    /// response many times larger again — and the FETCH handler holds the whole response set in
+    /// memory before writing a byte of it. A message that is small enough to accept must not be
+    /// able to cost the server hundreds of times its size to describe.
+    /// </summary>
+    [Fact]
+    public void A_multipart_with_absurdly_many_parts_is_bounded()
+    {
+        StringBuilder message = new("Content-Type: multipart/mixed; boundary=\"A\"\r\n\r\n");
+
+        for (int part = 0; part < ImapMimeTree.MaxPartCount * 3; part++)
+        {
+            message.Append("--A\r\n");
+        }
+
+        message.Append("--A--\r\n");
+
+        ImapBodyPart root = ImapMimeTree.Parse(Octets(message.ToString()));
+
+        Count(root).ShouldBeLessThanOrEqualTo(ImapMimeTree.MaxPartCount + 1);
+    }
+
+    /// <summary>The same bound holds when the breadth is spread across nesting levels.</summary>
+    [Fact]
+    public void A_deeply_and_broadly_nested_message_is_bounded()
+    {
+        StringBuilder message = new("Content-Type: multipart/mixed; boundary=\"A\"\r\n\r\n");
+
+        for (int part = 0; part < 400; part++)
+        {
+            message.Append("--A\r\nContent-Type: multipart/mixed; boundary=\"B\"\r\n\r\n");
+
+            for (int child = 0; child < 400; child++)
+            {
+                message.Append("--B\r\n");
+            }
+
+            message.Append("--B--\r\n");
+        }
+
+        message.Append("--A--\r\n");
+
+        Count(ImapMimeTree.Parse(Octets(message.ToString())))
+            .ShouldBeLessThanOrEqualTo(ImapMimeTree.MaxPartCount + 1);
+    }
+
+    /// <summary>Every node of a tree, including the ones an encapsulated message carries.</summary>
+    private static int Count(ImapBodyPart part)
+    {
+        int total = 1;
+
+        foreach (ImapBodyPart child in part.Children)
+        {
+            total += Count(child);
+        }
+
+        if (part.Message is { } message)
+        {
+            total += Count(message);
+        }
+
+        return total;
+    }
+
+    /// <summary>
     /// The count a part reports and the octets it hands over are the same number. They come from
     /// one slice, and a client reading a literal of one size into a buffer sized by the other is
     /// how a connection desynchronises.
@@ -636,7 +830,7 @@ public sealed class ImapMimeTreeTests
         ReadOnlyMemory<byte> octets = Octets(Complex);
         ImapBodyPart root = ImapMimeTree.Parse(octets);
 
-        int[] numbers = [.. specifier.Split('.').Select(int.Parse)];
+        long[] numbers = [.. specifier.Split('.').Select(long.Parse)];
 
         ImapBodyPart part = ImapMimeTree.Find(root, numbers).ShouldNotBeNull();
 

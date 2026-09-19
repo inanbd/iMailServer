@@ -175,6 +175,51 @@ public sealed class ImapSectionTests
         Parse(item).Format().ShouldBe(expected);
 
     /// <summary>
+    /// §9: <c>section-part = nz-number *("." nz-number)</c>, so a period always has a number
+    /// after it. A trailing or doubled period is not a specifier the grammar has, and accepting
+    /// one silently renames the data item: the response would echo <c>BODY[3]</c> to a client
+    /// that asked for <c>BODY[3.]</c>, and two differently-spelled requests for one part would
+    /// collapse into a single answer while the client waited for the second.
+    /// </summary>
+    [Theory]
+    [InlineData("BODY[3.]")]
+    [InlineData("BODY[1.2.]")]
+    [InlineData("BODY[1..2]")]
+    [InlineData("BODY[.1]")]
+    public void A_specifier_with_an_empty_part_number_is_refused(string item) =>
+        ImapSection.TryParse(item, out _).ShouldBeFalse($"{item} is not in §9's grammar");
+
+    /// <summary>
+    /// §9: <c>nz-number = digit-nz *DIGIT</c> and <c>digit-nz = %x31-39</c> — the first digit is
+    /// one to nine, so a leading zero is not a part number. It is refused rather than normalised,
+    /// for the reason above: the response must echo the item the client asked for.
+    /// </summary>
+    [Theory]
+    [InlineData("BODY[01]")]
+    [InlineData("BODY[1.02]")]
+    [InlineData("BODY[001.2]")]
+    public void A_part_number_with_a_leading_zero_is_refused(string item) =>
+        ImapSection.TryParse(item, out _).ShouldBeFalse($"{item} is not in §9's grammar");
+
+    /// <summary>
+    /// §9 annotates <c>nz-number</c> "Non-zero unsigned 32-bit integer; (0 &lt; n &lt;
+    /// 4,294,967,296)", so a part number above <c>int.MaxValue</c> is a grammatical argument
+    /// naming a part that does not exist. §6.4.5 separates "arguments invalid" from a part that
+    /// cannot be fetched, so it must parse and be answered NIL rather than earning a BAD.
+    /// </summary>
+    [Theory]
+    [InlineData("BODY[2147483648]")]
+    [InlineData("BODY[3000000000]")]
+    [InlineData("BODY[4294967295]")]
+    public void A_part_number_the_grammar_admits_parses_however_large(string item) =>
+        ImapSection.TryParse(item, out _).ShouldBeTrue($"{item} is inside §9's nz-number range");
+
+    /// <summary>One past the top of <c>nz-number</c>'s range is not a part number.</summary>
+    [Fact]
+    public void A_part_number_past_the_grammars_range_is_refused() =>
+        ImapSection.TryParse("BODY[4294967296]", out _).ShouldBeFalse();
+
+    /// <summary>
     /// §9: <c>section-spec = section-msgtext / (section-part ["." section-text])</c> and
     /// <c>section-part = nz-number *("." nz-number)</c>. The dot separates pieces and never
     /// trails the last one, so a bare numbered part echoes as <c>BODY[2]</c> — a client that
@@ -198,6 +243,48 @@ public sealed class ImapSectionTests
     [Fact]
     public void The_response_echoes_the_origin_and_not_the_length() =>
         Parse("BODY[]<100.2048>").Format().ShouldBe("BODY[]<100>");
+
+    /// <summary>
+    /// §6.4.5 ends the blank-line rule on an exception: "the blank line is included in all
+    /// header fetches, except in the case of a message which has no body and no blank line."
+    /// A subset that appended one anyway would hand the client two octets the message does not
+    /// contain, and would disagree with <c>BODY[HEADER]</c> of the same message — which slices
+    /// the stored octets and so cannot invent anything.
+    /// </summary>
+    [Fact]
+    public void A_header_subset_of_a_message_with_no_body_invents_no_blank_line()
+    {
+        ReadOnlyMemory<byte> message = System.Text.Encoding.ASCII.GetBytes(
+            "Subject: x\r\nFrom: a@b\r\n");
+
+        Extract(message, "BODY[HEADER.FIELDS (SUBJECT)]").ShouldBe("Subject: x\r\n");
+        Extract(message, "BODY[HEADER.FIELDS.NOT (SUBJECT)]").ShouldBe("From: a@b\r\n");
+        Extract(message, "BODY[HEADER]").ShouldBe("Subject: x\r\nFrom: a@b\r\n");
+    }
+
+    /// <summary>
+    /// The control: a message that does have a body keeps the blank line in every header fetch,
+    /// which is the rule the exception above is an exception to.
+    /// </summary>
+    [Fact]
+    public void A_header_subset_of_an_ordinary_message_keeps_the_blank_line()
+    {
+        ReadOnlyMemory<byte> message = System.Text.Encoding.ASCII.GetBytes(
+            "Subject: x\r\nFrom: a@b\r\n\r\nbody\r\n");
+
+        Extract(message, "BODY[HEADER.FIELDS (SUBJECT)]").ShouldBe("Subject: x\r\n\r\n");
+    }
+
+    private static string Extract(ReadOnlyMemory<byte> message, string item)
+    {
+        ImapSection.TryParse(item, out ImapSection? section).ShouldBeTrue($"could not parse {item}");
+
+        ReadOnlyMemory<byte>? octets = ImapBodySection.Extract(message, section!);
+
+        return octets is null
+            ? "<NIL>"
+            : System.Text.Encoding.ASCII.GetString(octets.Value.Span);
+    }
 
     // ---------------------------------------------------------------------------------------
     // Extraction.

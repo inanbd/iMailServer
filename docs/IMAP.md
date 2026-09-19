@@ -190,6 +190,20 @@ Note which `RFC822` forms peek: §6.4.5 makes `RFC822.HEADER` equivalent to `BOD
 and `RFC822.TEXT` equivalent to `BODY[TEXT]`. Fetching a header alone does not mark a message
 read; fetching its text does. The contrast is the RFC's.
 
+**A header subset of a message with no body invents no blank line.** §6.4.5 ends the rule on an
+exception: "the blank line is included in all header fetches, except in the case of a message
+which has no body and no blank line." A subset that appended one regardless handed the client two
+octets the message does not contain, and disagreed with `BODY[HEADER]` of the same message —
+which slices the stored octets and so cannot invent anything.
+
+**`Content-Transfer-Encoding` is read down to its one token.** RFC 2045 §6.1 makes the value "a
+single token", and §1 adds that every field it defines except `Content-Disposition` "can include
+RFC 822 comments, which have no semantic content and should be ignored during MIME processing" —
+so `base64 (encoded)` declares `BASE64`. A server that reported the comment too would have every
+client that matches the token against `BASE64` refuse to decode and show the user raw base64. A
+field that is present but empty declares nothing, so §6.1's `7BIT` default applies to it as it
+does to an absent one.
+
 **Header field subsets carry folded continuation lines.** RFC 2822 folds a long header onto
 following lines beginning with whitespace, and a subset that kept the first line of a folded
 `Subject` and dropped the rest would hand the client a truncated subject with no sign of it. The
@@ -232,8 +246,26 @@ first of its extension fields.
 considered to be attached to the boundary delimiter line rather than part of the preceding
 part." A server that kept it reports every part two octets longer than it is and hands the
 client two octets that are not its own. The preamble and the epilogue are dropped, as §5.1.1
-requires, and a boundary is matched exactly — one that merely begins with another belongs to a
-nested multipart, and treating it as the outer one's would cut the nested message in half.
+requires.
+
+**A trailing space in the boundary parameter is gateway damage and is deleted.** §5.1.1: "(If a
+boundary delimiter line appears to end with white space, the white space must be presumed to have
+been added by a gateway, and must be deleted.)" Without that, the quoted spelling of the parameter
+disagreed with the unquoted one — which the parameter reader already trims — and the quoted one
+then matched no line in the body, so *every* part of the multipart disappeared.
+
+**An opening delimiter must be the whole line; a closing one need not be.** The two halves of
+§5.1.1 pull in opposite directions: its BNF is `dash-boundary transport-padding CRLF`, which
+admits only white space after the boundary, while its note to implementors says "An exact match of
+the entire candidate line is not required; it is sufficient that the boundary appear in its
+entirety following the CRLF". Taking the note for the *opening* delimiter would mean `--xy`
+matched a declared boundary of `x`, cutting a nested multipart in half, so the BNF wins there — as
+it does in the widely deployed parsers. For the *closing* delimiter the trailing `--` has already
+been matched and no longer boundary can be mistaken for it, while the cost of missing one is
+concrete: the final part runs to the end of the content, handing the client the epilogue that
+§5.1.1 says "implementations must ignore" as message data, with an octet count to match. There the
+note wins. A delimiter with trailing text that is *not* a close is still rejected, and
+`docs/Standards.md` records that as a deliberate strictness.
 
 **Defaults are applied where the standards put them.** RFC 2045 §5.2 makes a message with no
 `Content-Type` "plain text in the US-ASCII character set"; §6.1 assumes `7BIT` when no encoding
@@ -251,9 +283,18 @@ a level in between — the example numbers the parts of part 3's encapsulated mu
 **A part that is not there is `NIL`, not an error.** Whether a part exists is a fact about one
 message and a `FETCH 1:*` covers many, so a specifier naming nothing gets §9's `nstring` NIL. A
 specifier the *grammar* does not have is different and gets `BAD`: §9's `section-part` is
-`nz-number *("." nz-number)`, so there is no part 0, and §6.4.5 says "The MIME part specifier
-MUST be prefixed by one or more numeric part specifiers", so a bare `BODY[MIME]` is a syntax
-error.
+`nz-number *("." nz-number)`, so there is no part 0 and no trailing period, `digit-nz` is
+`%x31-39` so `BODY[01]` is not another way to spell `BODY[1]`, and §6.4.5 says "The MIME part
+specifier MUST be prefixed by one or more numeric part specifiers", so a bare `BODY[MIME]` is a
+syntax error. The distinction is not pedantry: a specifier that parsed and was then re-rendered
+canonically would put a *different* data item name in the response than the client wrote, and two
+spellings of one part would collapse into a single answer while the client waited for a second
+that never came.
+
+**A part number is read as a 64-bit value, because §9's is a 32-bit unsigned one.** `nz-number`
+is annotated "(0 < n < 4,294,967,296)", a range no signed 32-bit type covers — so `BODY[3000000000]`
+is a grammatical argument naming a part that does not exist, and earns a `NIL` rather than the
+`BAD` that an `int.TryParse` produced.
 
 **A structure that cannot be taken apart is described as an opaque part of its declared type.**
 §9's `body-type-mpart` is `1*body SP media-subtype` and has no form for a multipart with no
@@ -264,6 +305,24 @@ grammatical as a single part — true, and the closest to true that is available
 **Nesting is taken apart only as deep as a client may address it**, which
 `ImapSection.MaxPartDepth` already bounds. A message nested deeper than that is a decompression
 bomb rather than mail; the part at the limit is still described, opaquely, rather than dropped.
+
+**Breadth is bounded too, and depth alone would not have done it.** Every boundary delimiter line
+becomes a part, so a message that is nothing but delimiter lines yielded one node per five octets
+— and in a `multipart/digest` each of those also dragged an envelope and a nested node behind it.
+A 35 MiB message, which this server accepts by default, parsed into a 1.36 GB tree and rendered
+into a 543 MB `BODYSTRUCTURE`, all of it resident because the `FETCH` handler builds its whole
+response set before writing a byte. `ImapMimeTree.MaxPartCount` is a budget of ten thousand nodes
+*per message* rather than per multipart — a thousand multiparts of a thousand parts each is a
+million nodes, so a per-multipart cap bounds nothing on its own. The same message now parses in
+49 ms into 3.8 MB; a genuine 2,000-message digest still parses in full.
+
+**A `MESSAGE/RFC822` part that stops at a limit still carries an envelope and a body.** §9's
+`body-type-basic` is annotated "MESSAGE subtype MUST NOT be `RFC822`" and its `body-type-msg`
+requires `SP envelope SP body SP body-fld-lines` after the basic fields — so a node that kept the
+type and dropped those three fields matches *no* alternative of `body`, and a client reading the
+structure positionally would take the next token for this part's. The envelope is read and the
+body described without recursing; the one type that would need another level, another encapsulated
+message, is described with RFC 2045 §5.2's default instead, which terminates by construction.
 
 ### ENVELOPE
 

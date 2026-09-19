@@ -44,6 +44,10 @@ public enum ImapSectionKind
 /// <param name="Part">
 /// The numeric prefix, outermost first. Empty for a specifier with none. RFC 3501 §6.4.5:
 /// "Multipart messages are assigned consecutive part numbers, as they occur in the message."
+/// Held as 64-bit values because §9's <c>nz-number</c> is annotated "Non-zero unsigned 32-bit
+/// integer; (0 &lt; n &lt; 4,294,967,296)" — a range no signed 32-bit type covers, and a part
+/// number above <c>int.MaxValue</c> is a grammatical argument naming a part that does not exist
+/// rather than a syntax error.
 /// </param>
 /// <param name="Fields">The field names of a <c>HEADER.FIELDS</c> list, in the order written.</param>
 /// <param name="Peek">
@@ -57,7 +61,7 @@ public enum ImapSectionKind
 /// <param name="Length">How many octets at most, when a partial was asked for.</param>
 public sealed record ImapSection(
     ImapSectionKind Kind,
-    IReadOnlyList<int> Part,
+    IReadOnlyList<long> Part,
     IReadOnlyList<string> Fields,
     bool Peek,
     long? Origin,
@@ -211,7 +215,7 @@ public sealed record ImapSection(
             return false;
         }
 
-        if (!TryParseSpecifier(inner, out ImapSectionKind kind, out int[] part, out string[] fields))
+        if (!TryParseSpecifier(inner, out ImapSectionKind kind, out long[] part, out string[] fields))
         {
             return false;
         }
@@ -279,7 +283,7 @@ public sealed record ImapSection(
     private static bool TryParseSpecifier(
         string inner,
         out ImapSectionKind kind,
-        out int[] part,
+        out long[] part,
         out string[] fields)
     {
         kind = ImapSectionKind.Full;
@@ -310,21 +314,27 @@ public sealed record ImapSection(
             specifier = inner[..bracket].TrimEnd();
         }
 
-        List<int> numbers = [];
+        List<long> numbers = [];
         string[] pieces = specifier.Split('.');
         int index = 0;
 
-        while (index < pieces.Length && int.TryParse(
-            pieces[index], NumberStyles.None, CultureInfo.InvariantCulture, out int number))
+        while (index < pieces.Length && TryReadPartNumber(pieces[index], out long number))
         {
-            // §9's part numbers are nz-number: there is no part zero.
-            if (number < 1)
+            numbers.Add(number);
+            index++;
+        }
+
+        // §9: section-part = nz-number *("." nz-number) - a period always has a number after it,
+        // so an empty piece means a trailing or doubled one and is not a specifier the grammar
+        // has. Accepting it would silently rename the item: a client that asked for BODY[3.]
+        // would be answered BODY[3], and two spellings of one part would collapse into one
+        // answer while the client waited for a second that never came.
+        foreach (string piece in pieces)
+        {
+            if (piece.Length == 0)
             {
                 return false;
             }
-
-            numbers.Add(number);
-            index++;
         }
 
         if (numbers.Count > MaxPartDepth)
@@ -403,6 +413,43 @@ public sealed record ImapSection(
     /// "printable US-ASCII characters […] except colon"; anything else could not have come from a
     /// real header and must not reach the wire.
     /// </remarks>
+    /// <summary>
+    /// Reads one <c>nz-number</c>.
+    /// </summary>
+    /// <remarks>
+    /// §9: <c>nz-number = digit-nz *DIGIT</c> with <c>digit-nz = %x31-39</c>, annotated
+    /// "Non-zero unsigned 32-bit integer; (0 &lt; n &lt; 4,294,967,296)". Three things follow and
+    /// all three matter: there is no part zero; <b>a leading zero is not a part number</b>,
+    /// because <c>digit-nz</c> excludes it — so <c>BODY[01]</c> is a syntax error rather than a
+    /// second way to spell <c>BODY[1]</c>, which is what keeps the response's item name equal to
+    /// the one the client wrote; and the range runs past <c>int.MaxValue</c>, so a value up to
+    /// 4,294,967,295 parses and is answered NIL by the tree walk rather than earning a BAD for an
+    /// argument the grammar allows.
+    /// </remarks>
+    private static bool TryReadPartNumber(string piece, out long number)
+    {
+        number = 0;
+
+        // Ten digits is the most 4,294,967,295 needs. Refusing anything longer up front is what
+        // keeps the accumulation below from overflowing.
+        if (piece.Length is 0 or > 10 || piece[0] is < '1' or > '9')
+        {
+            return false;
+        }
+
+        foreach (char c in piece)
+        {
+            if (c is < '0' or > '9')
+            {
+                return false;
+            }
+
+            number = (number * 10) + (c - '0');
+        }
+
+        return number <= uint.MaxValue;
+    }
+
     private static bool IsFieldName(string name)
     {
         if (name.Length is 0 or > 128)

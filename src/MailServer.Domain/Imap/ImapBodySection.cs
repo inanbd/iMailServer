@@ -225,10 +225,32 @@ public static class ImapBodySection
             position = lineEnd;
         }
 
-        kept.AddRange("\r\n"u8);
+        // §6.4.5's exception, which the sentence quoted above ends on: "the blank line is
+        // included in all header fetches, EXCEPT in the case of a message which has no body and
+        // no blank line." A message whose header runs to the end of the file has neither, so
+        // appending one would hand the client two octets the message does not contain - and
+        // BODY[HEADER] of the same message, which slices the stored octets, would disagree about
+        // it. HeaderLength has already made the distinction: it returns past a blank line when
+        // it found one and the whole length when it ran off the end.
+        if (EndsWithBlankLine(header))
+        {
+            kept.AddRange("\r\n"u8);
+        }
 
         return kept.ToArray();
     }
+
+    /// <summary>Whether a header block ends with the blank line that separates it from a body.</summary>
+    private static bool EndsWithBlankLine(ReadOnlySpan<byte> header) =>
+        header.Length switch
+        {
+            0 => false,
+            1 => header[0] == (byte)'\n',
+            _ => header[^1] == (byte)'\n' &&
+                 (header[^2] == (byte)'\n' ||
+                  (header[^2] == (byte)'\r' &&
+                   (header.Length == 2 || header[^3] == (byte)'\n'))),
+        };
 
     /// <summary>The offset just past this line's terminator.</summary>
     private static int LineEnd(ReadOnlySpan<byte> header, int start)

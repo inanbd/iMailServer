@@ -126,8 +126,48 @@ public static class ImapMimeTree
     /// </remarks>
     public const int MaxDepth = ImapSection.MaxPartDepth;
 
+    /// <summary>
+    /// The most parts one message is taken apart into.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Depth alone does not bound this.</b> Every delimiter line becomes a part, so a message
+    /// that is nothing but delimiter lines yields one node per five octets — and each node is a
+    /// record, which in a <c>multipart/digest</c> also drags an envelope and a nested node behind
+    /// it. A message small enough for this server to accept therefore parsed into a tree many
+    /// times its own size and rendered into a <c>BODYSTRUCTURE</c> many times larger again, all
+    /// of it resident: <see cref="ImapCommandProcessor"/> builds a whole <c>FETCH</c> response
+    /// set before writing a byte of it.
+    /// </para>
+    /// <para>
+    /// The budget is per message rather than per multipart, because a per-multipart cap bounds
+    /// nothing on its own — a thousand multiparts of a thousand parts each is a million nodes.
+    /// Ten thousand is far past any real message and still describes in well under a megabyte.
+    /// A message that exceeds it has its remaining multiparts described as the opaque parts they
+    /// would be if their boundary were missing, which is a shape the grammar and this file
+    /// already have a path for.
+    /// </para>
+    /// </remarks>
+    public const int MaxPartCount = 10_000;
+
     /// <summary>Parses a whole stored message.</summary>
-    public static ImapBodyPart Parse(ReadOnlyMemory<byte> message) => Build(message, false, 0);
+    public static ImapBodyPart Parse(ReadOnlyMemory<byte> message) =>
+        Build(message, false, 0, new PartBudget(MaxPartCount));
+
+    /// <summary>How many more parts this message may be taken apart into.</summary>
+    private sealed class PartBudget(int remaining)
+    {
+        public bool TrySpend()
+        {
+            if (remaining <= 0)
+            {
+                return false;
+            }
+
+            remaining--;
+            return true;
+        }
+    }
 
     /// <summary>
     /// Builds one part from the octets that make it up, header and all.
@@ -139,7 +179,15 @@ public static class ImapMimeTree
     /// 'message/rfc822'."
     /// </param>
     /// <param name="depth">How far down the tree this is.</param>
-    private static ImapBodyPart Build(ReadOnlyMemory<byte> part, bool inDigest, int depth)
+    /// <summary>
+    /// Reads one part's header into a node, without looking inside it.
+    /// </summary>
+    /// <remarks>
+    /// Everything a part says about itself and nothing about what it contains. Split out from
+    /// <see cref="Build"/> so that <see cref="Terminal"/> can describe a part it has decided not
+    /// to recurse into without duplicating a line of header handling.
+    /// </remarks>
+    private static ImapBodyPart Describe(ReadOnlyMemory<byte> part, bool inDigest)
     {
         ReadOnlyMemory<byte> header = ImapBodySection.HeaderBlock(part);
         ReadOnlyMemory<byte> content = ImapBodySection.BodyBlock(part);
@@ -157,8 +205,7 @@ public static class ImapMimeTree
             Parameters = type.Parameters,
             Id = ImapHeaderFields.First(fields, "Content-ID"),
             Description = ImapHeaderFields.First(fields, "Content-Description"),
-            Encoding = Upper(ImapHeaderFields.First(fields, "Content-Transfer-Encoding"))
-                ?? DefaultEncoding,
+            Encoding = ReadEncoding(ImapHeaderFields.First(fields, "Content-Transfer-Encoding")),
             MimeHeader = header,
             Content = content,
             LineCount = CountLines(content.Span),
@@ -177,9 +224,46 @@ public static class ImapMimeTree
             };
         }
 
+        return node;
+    }
+
+    /// <summary>
+    /// Reads <c>Content-Transfer-Encoding</c> down to the one token it names.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// RFC 2045 §6.1: "The Content-Transfer-Encoding field's value is a single token specifying
+    /// the type of encoding". RFC 2045 §1 adds that every field this document defines except
+    /// <c>Content-Disposition</c> "can include RFC 822 comments, which have no semantic content
+    /// and should be ignored during MIME processing" — so <c>base64 (encoded)</c> declares
+    /// <c>BASE64</c>, and a server that reported the comment too would have every client that
+    /// matches the token against "BASE64" refuse to decode and show the user raw base64.
+    /// </para>
+    /// <para>
+    /// §6.1: "This is the default value -- that is, "Content-Transfer-Encoding: 7BIT" is assumed
+    /// if the Content-Transfer-Encoding header field is not present." A field that is present and
+    /// empty declares nothing, so the default applies to it too — and §9's <c>body-fld-enc</c>
+    /// has no empty form to report instead.
+    /// </para>
+    /// </remarks>
+    private static string ReadEncoding(string? value) =>
+        ImapContentType.FirstToken(value) is { Length: > 0 } token
+            ? token.ToUpperInvariant()
+            : DefaultEncoding;
+
+    private static ImapBodyPart Build(
+        ReadOnlyMemory<byte> part,
+        bool inDigest,
+        int depth,
+        PartBudget budget)
+    {
+        ImapBodyPart node = Describe(part, inDigest);
+        ReadOnlyMemory<byte> content = node.Content;
+        ImapContentType type = new(node.Type, node.Subtype, node.Parameters);
+
         if (depth >= MaxDepth)
         {
-            return node;
+            return Terminal(node, content);
         }
 
         if (type.Type.Equals("MULTIPART", StringComparison.Ordinal))
@@ -188,7 +272,8 @@ public static class ImapMimeTree
                 content,
                 ParameterOf(type.Parameters, "BOUNDARY"),
                 type.Subtype.Equals("DIGEST", StringComparison.Ordinal),
-                depth);
+                depth,
+                budget);
 
             // A multipart whose parts cannot be found is reported as what it is: an opaque part
             // of type MULTIPART. §9's body-type-mpart is "1*body SP media-subtype" and has no
@@ -196,17 +281,69 @@ public static class ImapMimeTree
             return children.Count == 0 ? node : node with { IsMultipart = true, Children = children };
         }
 
-        if (type.Type.Equals("MESSAGE", StringComparison.Ordinal) &&
-            type.Subtype.Equals("RFC822", StringComparison.Ordinal))
+        if (IsEncapsulatedMessage(type.Type, type.Subtype))
         {
-            return node with
-            {
-                Envelope = ImapEnvelopes.Read(content),
-                Message = Build(content, false, depth + 1),
-            };
+            return budget.TrySpend()
+                ? node with
+                {
+                    Envelope = ImapEnvelopes.Read(content),
+                    Message = Build(content, false, depth + 1, budget),
+                }
+                : Terminal(node, content);
         }
 
         return node;
+    }
+
+    /// <summary>Whether a type names a message this server would look inside.</summary>
+    private static bool IsEncapsulatedMessage(string type, string subtype) =>
+        type.Equals("MESSAGE", StringComparison.Ordinal) &&
+        subtype.Equals("RFC822", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Finishes a part that could not be taken apart, leaving something the grammar has.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A <c>MESSAGE/RFC822</c> part cannot simply stop.</b> §9's <c>body-type-basic</c> is
+    /// annotated "MESSAGE subtype MUST NOT be "RFC822"" and its <c>body-type-msg</c> requires
+    /// "<c>SP envelope SP body SP body-fld-lines</c>" after the basic fields — so a node that
+    /// kept the type and dropped those three fields matches no alternative of <c>body</c>, and a
+    /// client reading the structure positionally would take the next token for this part's and
+    /// mis-read everything after it.
+    /// </para>
+    /// <para>
+    /// So the envelope is read and the body described without recursing: the header is still
+    /// parsed, and the one type that would need another level — another encapsulated message —
+    /// is described with RFC 2045 §5.2's default instead. That is what a reader which declined to
+    /// look inside would say, it terminates by construction, and it keeps the octet counts and
+    /// the section addressing of the part itself exact.
+    /// </para>
+    /// </remarks>
+    private static ImapBodyPart Terminal(ImapBodyPart node, ReadOnlyMemory<byte> content)
+    {
+        if (!IsEncapsulatedMessage(node.Type, node.Subtype))
+        {
+            return node;
+        }
+
+        ImapBodyPart inner = Describe(content, inDigest: false);
+
+        if (IsEncapsulatedMessage(inner.Type, inner.Subtype))
+        {
+            inner = inner with
+            {
+                Type = ImapContentType.Default.Type,
+                Subtype = ImapContentType.Default.Subtype,
+                Parameters = ImapContentType.Default.Parameters,
+            };
+        }
+
+        return node with
+        {
+            Envelope = ImapEnvelopes.Read(content),
+            Message = inner,
+        };
     }
 
     /// <summary>
@@ -231,14 +368,24 @@ public static class ImapMimeTree
         ReadOnlyMemory<byte> content,
         string? boundary,
         bool digest,
-        int depth)
+        int depth,
+        PartBudget budget)
     {
-        if (string.IsNullOrEmpty(boundary))
+        // RFC 2046 §5.1.1: the boundary consists of characters "NOT ending with white space. (If
+        // a boundary delimiter line appears to end with white space, the white space must be
+        // presumed to have been added by a gateway, and must be deleted.)" Trimming only the end
+        // is what that licenses; leading white space is part of the boundary. Without it the
+        // quoted spelling of a parameter disagrees with the unquoted one, which the parameter
+        // reader already trims - and the quoted one then matches no line in the body, so every
+        // part of the multipart disappears.
+        string? trimmed = boundary?.TrimEnd(' ', '\t');
+
+        if (string.IsNullOrEmpty(trimmed))
         {
             return [];
         }
 
-        byte[] marker = System.Text.Encoding.Latin1.GetBytes(boundary);
+        byte[] marker = System.Text.Encoding.Latin1.GetBytes(trimmed);
 
         List<ImapBodyPart> parts = [];
         ReadOnlySpan<byte> span = content.Span;
@@ -261,7 +408,19 @@ public static class ImapMimeTree
             {
                 if (start >= 0)
                 {
-                    parts.Add(Build(content[start..TrimTerminator(span, start, index)], digest, depth + 1));
+                    // The budget is spent per part rather than checked once, so a message that
+                    // runs out stops being taken apart there and is described as the opaque part
+                    // a multipart with no discoverable parts already becomes.
+                    if (!budget.TrySpend())
+                    {
+                        return [];
+                    }
+
+                    parts.Add(Build(
+                        content[start..TrimTerminator(span, start, index)],
+                        digest,
+                        depth + 1,
+                        budget));
                 }
 
                 if (closing)
@@ -279,7 +438,12 @@ public static class ImapMimeTree
         // client would see if it cut the message up itself.
         if (start >= 0 && start <= span.Length)
         {
-            parts.Add(Build(content[start..span.Length], digest, depth + 1));
+            if (!budget.TrySpend())
+            {
+                return [];
+            }
+
+            parts.Add(Build(content[start..span.Length], digest, depth + 1, budget));
         }
 
         return parts;
@@ -307,10 +471,25 @@ public static class ImapMimeTree
     /// Whether a line is this multipart's delimiter.
     /// </summary>
     /// <remarks>
-    /// §5.1.1's <c>delimiter := CRLF dash-boundary</c> and <c>close-delimiter := delimiter "--"</c>,
-    /// with "transport padding" — white space — permitted after either. The match on the boundary
-    /// itself is exact: a longer boundary that merely begins with this one belongs to a nested
-    /// multipart, and treating it as this one's would cut the nested message in half.
+    /// <para>
+    /// §5.1.1's <c>delimiter := CRLF dash-boundary</c> and
+    /// <c>close-delimiter := delimiter "--"</c>, with "transport padding" — white space —
+    /// permitted after either.
+    /// </para>
+    /// <para>
+    /// <b>An opening delimiter must be the whole line; a closing one need not be.</b> The two
+    /// halves of §5.1.1 pull in opposite directions here: its BNF is
+    /// <c>dash-boundary transport-padding CRLF</c>, which admits only white space, while its note
+    /// to implementors says "An exact match of the entire candidate line is not required; it is
+    /// sufficient that the boundary appear in its entirety following the CRLF". Taking the note
+    /// for the opening delimiter would mean <c>--xy</c> matched a declared boundary of <c>x</c>,
+    /// which cuts a nested multipart in half — so the BNF wins there, as it does in the widely
+    /// deployed parsers. For the closing delimiter the trailing <c>--</c> has already been
+    /// matched and no longer boundary can be mistaken for it, and the cost of missing one is
+    /// concrete: the final part runs to the end of the content, so the client is handed the
+    /// epilogue that §5.1.1 says "implementations must ignore" as message data, with an octet
+    /// count to match. There the note wins.
+    /// </para>
     /// </remarks>
     private static bool IsDelimiter(ReadOnlySpan<byte> line, ReadOnlySpan<byte> marker, out bool closing)
     {
@@ -329,7 +508,7 @@ public static class ImapMimeTree
         if (rest.Length >= 2 && rest[0] == (byte)'-' && rest[1] == (byte)'-')
         {
             closing = true;
-            rest = rest[2..];
+            return true;
         }
 
         foreach (byte b in rest)
@@ -409,9 +588,6 @@ public static class ImapMimeTree
 
         return tags;
     }
-
-    private static string? Upper(string? value) =>
-        value is null ? null : value.Trim(' ', '\t').ToUpperInvariant();
 
     // -------------------------------------------------------------------------------------------
     // Finding what a section specifier names.
@@ -501,7 +677,7 @@ public static class ImapMimeTree
     /// <c>3.2</c> rather than <c>3.1.1</c> and <c>3.1.2</c>.
     /// </para>
     /// </remarks>
-    public static ImapBodyPart? Find(ImapBodyPart root, IReadOnlyList<int> numbers)
+    public static ImapBodyPart? Find(ImapBodyPart root, IReadOnlyList<long> numbers)
     {
         ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(numbers);
@@ -527,7 +703,7 @@ public static class ImapMimeTree
         while (index < numbers.Count)
         {
             ImapBodyPart container = current.Message ?? current;
-            int number = numbers[index];
+            long number = numbers[index];
 
             if (container.IsMultipart)
             {
@@ -536,7 +712,7 @@ public static class ImapMimeTree
                     return null;
                 }
 
-                current = container.Children[number - 1];
+                current = container.Children[(int)(number - 1)];
             }
             else if (!ReferenceEquals(container, current) && number == 1)
             {
@@ -649,6 +825,29 @@ public sealed record ImapContentType(
     /// parameter names case-insensitive; the value is kept exactly as written, because a
     /// <c>name</c> or <c>filename</c> parameter carries a user's filename and its case is theirs.
     /// </remarks>
+    /// <summary>
+    /// The first token of a structured header value, with comments removed.
+    /// </summary>
+    /// <remarks>
+    /// RFC 2045 §1: every field that document defines except <c>Content-Disposition</c> "can
+    /// include RFC 822 comments, which have no semantic content and should be ignored during MIME
+    /// processing". Used for <c>Content-Transfer-Encoding</c>, whose §6.1 value is "a single
+    /// token" — so anything after the token, comment or not, is not the encoding.
+    /// </remarks>
+    public static string? FirstToken(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        IReadOnlyList<string> pieces = SplitOnSemicolons(value);
+        string head = (pieces.Count == 0 ? string.Empty : pieces[0]).Trim(' ', '\t');
+        int space = head.AsSpan().IndexOfAny(' ', '\t');
+
+        return space < 0 ? head : head[..space];
+    }
+
     private static IReadOnlyList<string> ReadParameters(IReadOnlyList<string> pieces)
     {
         List<string> parameters = [];
