@@ -23,6 +23,17 @@ internal sealed class ScriptedDiagnosticsService : IDnsDiagnosticsService
         return this;
     }
 
+    /// <summary>Scripts an answer that carries a TTL, which some checks judge.</summary>
+    public ScriptedDiagnosticsService WithTtl(
+        string name,
+        DnsDiagnosticRecordType type,
+        TimeSpan ttl,
+        params string[] values)
+    {
+        _answers[(name, type)] = DnsDiagnosticAnswer.Success(values, ttl);
+        return this;
+    }
+
     /// <summary>Scripts a lookup that does not answer — a timeout or SERVFAIL.</summary>
     public ScriptedDiagnosticsService WithNoAnswer(string name, DnsDiagnosticRecordType type)
     {

@@ -124,6 +124,60 @@ receiver rejects, while DMARC alignment quietly falls back to SPF and keeps pass
 visibly breaks until an SPF change, at which point the cause is weeks old. The weakest live key
 decides the strength check, since a forger picks which selector to claim.
 
+## The DNS category
+
+The reverse question from Identity: not whether receivers accept what this server sends, but
+whether anything arrives. A server can pass one completely while failing the other, which is why
+the findings stay separate.
+
+`DnsChecks` (Domain, pure) and `DnsProbe` (Infrastructure). Fifteen points:
+
+| Id | W | Judged on |
+|---|---|---|
+| `dns.mx-published` | 4 | An MX record exists, and is not RFC 7505's null MX |
+| `dns.mx-resolves` | 4 | RFC 5321 §5.1 — every target returns an address record |
+| `dns.mx-not-alias` | 2 | RFC 2181 §10.3 — no target is a CNAME |
+| `dns.mx-redundancy` | 1 | §5.1's "SHOULD try at least two addresses" |
+| `dns.mx-points-here` | 2 | Some MX names this server |
+| `dns.ttl-sanity` | 1 | 5 minutes to 1 day — advice, not conformance |
+| `dns.caa-allows-issuer` | 1 | RFC 8659 — CAA does not forbid the ACME issuer |
+
+**The SPF lookup limit is not here**, although the table above lists it under DNS. It is a
+property of the SPF record rather than of the zone, an operator fixes it by editing that record,
+and it is already `auth.spf-lookup-budget`. Scoring it twice would weight one fault at four
+points across two categories and make the Authentication total mean something other than what it
+says.
+
+**No MX warns; a null MX fails.** §5.1: "If an empty list of MXs is returned, the address is
+treated as if it was associated with an implicit MX RR, with a preference of 0, pointing to that
+host." So a domain with no MX does receive mail — wherever its A record points, which for many
+domains is a web server that refuses it. Calling that a failure would be wrong about the
+mechanism; calling it a pass would hide the dependency. RFC 7505's `0 .` is different in kind: an
+explicit refusal to accept mail, and assessing a mail server for a domain that publishes one is a
+contradiction worth naming. A null MX is then excluded from every check that judges *routes* —
+counting "." as a route would produce three more findings, all restating the first.
+
+**An aliased MX fails rather than warns.** RFC 2181 §10.3 forbids it outright, and §5.1 says the
+behaviour "lies outside the scope of this Standard" — so each sender decides for itself, the loss
+is partial and intermittent, and it gets attributed to anything but DNS.
+
+**`dns.mx-points-here` warns and never fails.** A filtering service or relay in front is a real
+architecture whose DNS is indistinguishable from an operator who built a mail server and never
+pointed the domain at it. The check describes the arrangement and lets them recognise their own.
+
+**The TTL check says in its own text that no RFC sets a range.** RFC 2181 §8 defines a TTL as "an
+unsigned number, with a minimum value of 0, and a maximum value of 2147483647" and stops there;
+every value conforms. What is left is a trade between the lookups a short TTL costs and the delay
+a long one adds to a correction — so both ends warn, neither fails, and an operator mid-migration
+is told what a low TTL costs rather than that they are wrong.
+
+**CAA is a mail check because of what it breaks.** A renewal the CA refuses ends in an expired
+certificate, and that ends STARTTLS, MTA-STS and every receiver requiring them — sixty days after
+the record was published, when nobody connects the two. The probe walks up the tree as RFC 8659
+§3 requires, because a restriction published once at the registered domain and forgotten is the
+case that catches people. Absence of CAA is a pass: §4 makes a restriction exist only where an
+RRset does.
+
 ## Delivery test
 
 Sends a real message to an address you nominate and records the whole conversation:
