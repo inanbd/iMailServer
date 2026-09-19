@@ -168,6 +168,61 @@ of.
 a million messages builds a million response objects before any of them is written. That is
 within the current `ImapCommandResult` shape and is the next thing to change for large mailboxes.
 
+## Folder management
+
+`CREATE`, `DELETE`, `RENAME`, `SUBSCRIBE` and `UNSUBSCRIBE` share one handler, because they
+differ only in which repository call they make and how many mailbox names they take. Every
+failure is a tagged `NO`: RFC 3501 §6.3.3 phrases them as ordinary outcomes — "Any error in
+creation will return a tagged NO response" — and a client creating a folder that already exists
+has done something reasonable with stale information.
+
+**`CREATE` builds the superior levels it needs** (§6.3.3's SHOULD) and drops a trailing
+delimiter, which "is a declaration that the client intends to create mailbox names under this
+name" and never part of the name. `INBOX` may be neither created nor deleted.
+
+**`DELETE` leaves inferior names alone** — §6.3.4's MUST — and the deleted name then "will
+acquire the `\Noselect` mailbox name attribute", which needs no code here: with the row gone the
+name exists only as a hierarchy level, and a hierarchy level is exactly what this server reports
+`\Noselect` for.
+
+**`RENAME` carries the whole subtree** (§6.3.5's MUST), and renaming the inbox is a different
+operation: "It moves all messages in INBOX to a new mailbox with the given name, leaving INBOX
+empty. If the server implementation supports inferior hierarchical names of INBOX, these are
+unaffected." The inbox survives, it is emptied, and its children stay put.
+
+### Subscriptions are a table of names, not a flag on a folder
+
+§6.3.6: a server "MUST NOT unilaterally remove an existing mailbox name from the subscription
+list even if a mailbox by that name no longer exists", and the RFC's note gives the case — "a
+server site can choose to routinely remove a mailbox with a well-known name (e.g.,
+"system-alerts") after its contents expire, with the intention of recreating it when new contents
+are appropriate."
+
+A subscription stored on the folder row could not survive that, so `DELETE` would quietly
+unsubscribe a user from a name they never gave up. Migration 0012 gives subscriptions their own
+table, seeded from the column it supersedes. `MailboxFolders.IsSubscribed` is no longer read; it
+is left in place because dropping a column alters a table, which would make the migration
+destructive and therefore unapplicable until Milestone 13.
+
+`LSUB`'s name set is the subscription list, so a subscribed name whose mailbox is gone is still
+reported — flagged `\Noselect`, which is what §7.2.2 defines the attribute to mean: "It is not
+possible to use this name as a selectable mailbox." `SUBSCRIBE` validates that the name exists,
+which §6.3.6 explicitly permits; `UNSUBSCRIBE` must not, or a user could never stop following a
+deleted mailbox.
+
+### UIDVALIDITY is issued from a high-water mark
+
+§6.3.3 requires a mailbox created with a deleted mailbox's name to use UIDs greater than the
+previous incarnation's, **unless** its UIDVALIDITY differs. This server takes the exception
+rather than preserving a UID counter per deleted name — so the value must genuinely differ every
+time.
+
+A value derived from surviving folders cannot promise that: the deleted folder's UIDVALIDITY
+leaves with its row, so a delete and an immediate recreate would reissue the same number with
+UIDs restarting at 1, and a client would serve cached mail under UIDs that now name different
+messages. Migration 0012 therefore adds `MailboxUidValidity`, a per-mailbox high-water mark that
+outlives the folder, and every issued value is `max(clock, high-water + 1)`.
+
 ## Known divergence: folder-name case depends on the database provider
 
 **On SQLite folder names are matched exactly; on a default-collation SQL Server they are not.**

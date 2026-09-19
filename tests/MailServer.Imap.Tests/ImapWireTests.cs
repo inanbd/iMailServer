@@ -1,3 +1,4 @@
+using MailServer.Infrastructure.Time;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
@@ -129,6 +130,7 @@ public sealed class ImapWireTests : IDisposable
             authenticator ?? new ScriptedImapAuthenticator(),
             store,
             store,
+            new SystemClock(),
             NullLogger<ImapConnectionHandler>.Instance);
 
         Task served = Task.Run(
@@ -664,6 +666,7 @@ public sealed class ImapWireTests : IDisposable
             new ScriptedImapAuthenticator(),
             store,
             store,
+            new SystemClock(),
             NullLogger<ImapConnectionHandler>.Instance);
 
         await Should.ThrowAsync<ArgumentNullException>(async () => await handler.HandleAsync(

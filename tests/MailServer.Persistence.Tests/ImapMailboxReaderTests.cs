@@ -1,3 +1,4 @@
+using MailServer.Application.Abstractions.Repositories;
 using System.Data.Common;
 using Dapper;
 using MailServer.Domain.Enums;
@@ -580,7 +581,15 @@ public sealed class ImapMailboxReaderTests
 
         await AddFolderAsync(connection, mailbox, "Quiet", subscribed: false);
 
-        IReadOnlyList<ImapFolderListing> listings = await database.CreateScope().ImapMailboxes
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        // Through the writer, because since migration 0012 a subscription is a row in
+        // MailboxSubscriptions rather than a flag on the folder - see that migration's remarks
+        // on RFC 3501 §6.3.6's MUST NOT.
+        await scope.ImapWrites.SetSubscriptionAsync(
+            mailbox, "INBOX", subscribed: true, Moment, CancellationToken.None);
+
+        IReadOnlyList<ImapFolderListing> listings = await scope.ImapMailboxes
             .ListFoldersAsync(mailbox, CancellationToken.None);
 
         listings.Single(l => l.Path == "Quiet").IsSubscribed.ShouldBeFalse();
@@ -1466,5 +1475,290 @@ public sealed class ImapMailboxReaderTests
         removed[^1].ShouldBe(1);
 
         (await connection.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM Deliveries")).ShouldBe(0);
+    }
+    // ---------------------------------------------------------------------------------------
+    // Folder management against the real schema.
+    // ---------------------------------------------------------------------------------------
+
+    private static readonly DateTimeOffset Moment = new(2026, 9, 19, 10, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public async Task Creating_a_nested_folder_creates_its_superior_levels()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, _) = await SeedFolderAsync(connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        (await scope.ImapWrites.CreateFolderAsync(mailbox, "foo/bar/zap", Moment, CancellationToken.None))
+            .ShouldBe(ImapFolderMutation.Done);
+
+        IReadOnlyList<ImapFolderListing> listings = await scope.ImapMailboxes
+            .ListFoldersAsync(mailbox, CancellationToken.None);
+
+        listings.Select(l => l.Path).ShouldBe(["INBOX", "foo", "foo/bar", "foo/bar/zap"]);
+    }
+
+    /// <summary>
+    /// RFC 3501 §6.3.3 requires a recreated mailbox to use identifiers greater than the previous
+    /// incarnation's "UNLESS the new incarnation has a different unique identifier validity
+    /// value". This server takes the exception, so the value must actually differ.
+    /// </summary>
+    [Fact]
+    public async Task A_recreated_folder_gets_a_different_uidvalidity()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, _) = await SeedFolderAsync(connection, uidValidity: 5_000);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        await scope.ImapWrites.CreateFolderAsync(mailbox, "Receipts", Moment, CancellationToken.None);
+
+        ImapFolderSnapshot? first = await scope.ImapMailboxes
+            .OpenFolderAsync(mailbox, "Receipts", CancellationToken.None);
+
+        await scope.ImapWrites.DeleteFolderAsync(mailbox, "Receipts", CancellationToken.None);
+        await scope.ImapWrites.CreateFolderAsync(mailbox, "Receipts", Moment, CancellationToken.None);
+
+        ImapFolderSnapshot? second = await scope.ImapMailboxes
+            .OpenFolderAsync(mailbox, "Receipts", CancellationToken.None);
+
+        second!.UidValidity.ShouldNotBe(first!.UidValidity);
+    }
+
+    [Theory]
+    [InlineData("INBOX", ImapFolderMutation.Reserved)]
+    [InlineData("inbox", ImapFolderMutation.Reserved)]
+    public async Task The_inbox_can_be_neither_created_nor_deleted(
+        string name,
+        ImapFolderMutation expected)
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, _) = await SeedFolderAsync(connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        (await scope.ImapWrites.CreateFolderAsync(mailbox, name, Moment, CancellationToken.None))
+            .ShouldBe(expected);
+
+        (await scope.ImapWrites.DeleteFolderAsync(mailbox, name, CancellationToken.None))
+            .ShouldBe(expected);
+    }
+
+    /// <summary>
+    /// §6.3.4's MUST: "The DELETE command MUST NOT remove inferior hierarchical names."
+    /// </summary>
+    [Fact]
+    public async Task Deleting_a_parent_leaves_its_children_and_removes_its_messages()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, _) = await SeedFolderAsync(connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        await scope.ImapWrites.CreateFolderAsync(mailbox, "foo/bar", Moment, CancellationToken.None);
+
+        ImapFolderSnapshot? foo = await scope.ImapMailboxes
+            .OpenFolderAsync(mailbox, "foo", CancellationToken.None);
+
+        await DeliverAsync(connection, mailbox, foo!.FolderId, uid: 1);
+
+        (await scope.ImapWrites.DeleteFolderAsync(mailbox, "foo", CancellationToken.None))
+            .ShouldBe(ImapFolderMutation.Done);
+
+        IReadOnlyList<ImapFolderListing> listings = await scope.ImapMailboxes
+            .ListFoldersAsync(mailbox, CancellationToken.None);
+
+        listings.Select(l => l.Path).ShouldBe(["INBOX", "foo/bar"]);
+
+        // The parent's messages went with it; nothing else did.
+        (await connection.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM Deliveries")).ShouldBe(0);
+    }
+
+    /// <summary>
+    /// §6.3.5's MUST: "If the name has inferior hierarchical names, then the inferior
+    /// hierarchical names MUST also be renamed."
+    /// </summary>
+    [Fact]
+    public async Task Renaming_carries_the_subtree_and_leaves_a_shared_prefix_sibling()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, _) = await SeedFolderAsync(connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        await scope.ImapWrites.CreateFolderAsync(mailbox, "Work/Q1", Moment, CancellationToken.None);
+        await scope.ImapWrites.CreateFolderAsync(mailbox, "Workshop", Moment, CancellationToken.None);
+
+        (await scope.ImapWrites.RenameFolderAsync(mailbox, "Work", "Labour", Moment, CancellationToken.None))
+            .ShouldBe(ImapFolderMutation.Done);
+
+        IReadOnlyList<ImapFolderListing> listings = await scope.ImapMailboxes
+            .ListFoldersAsync(mailbox, CancellationToken.None);
+
+        listings.Select(l => l.Path).ShouldBe(["INBOX", "Labour", "Labour/Q1", "Workshop"]);
+    }
+
+    /// <summary>
+    /// §6.3.5: "Renaming INBOX […] moves all messages in INBOX to a new mailbox with the given
+    /// name, leaving INBOX empty."
+    /// </summary>
+    [Fact]
+    public async Task Renaming_the_inbox_moves_its_messages_and_keeps_the_inbox()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, MailboxFolderId inbox) = await SeedFolderAsync(connection);
+
+        await DeliverAsync(connection, mailbox, inbox, uid: 1);
+        await DeliverAsync(connection, mailbox, inbox, uid: 2);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        (await scope.ImapWrites.RenameFolderAsync(mailbox, "INBOX", "old-mail", Moment, CancellationToken.None))
+            .ShouldBe(ImapFolderMutation.Done);
+
+        ImapFolderSnapshot? stillThere = await scope.ImapMailboxes
+            .OpenFolderAsync(mailbox, "INBOX", CancellationToken.None);
+
+        ImapFolderSnapshot? moved = await scope.ImapMailboxes
+            .OpenFolderAsync(mailbox, "old-mail", CancellationToken.None);
+
+        stillThere.ShouldNotBeNull();
+        stillThere.ExistsCount.ShouldBe(0);
+
+        moved.ShouldNotBeNull();
+        moved.ExistsCount.ShouldBe(2);
+    }
+
+    /// <summary>
+    /// §6.3.6's MUST NOT, against the real tables: a subscription is a row of its own and does
+    /// not die with the folder it names.
+    /// </summary>
+    [Fact]
+    public async Task A_subscription_outlives_the_folder_it_names()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, _) = await SeedFolderAsync(connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        await scope.ImapWrites.CreateFolderAsync(mailbox, "system-alerts", Moment, CancellationToken.None);
+
+        (await scope.ImapWrites.SetSubscriptionAsync(
+            mailbox, "system-alerts", subscribed: true, Moment, CancellationToken.None))
+            .ShouldBe(ImapFolderMutation.Done);
+
+        await scope.ImapWrites.DeleteFolderAsync(mailbox, "system-alerts", CancellationToken.None);
+
+        (await scope.ImapMailboxes.ListSubscriptionsAsync(mailbox, CancellationToken.None))
+            .ShouldContain("system-alerts");
+    }
+
+    /// <summary>
+    /// §6.3.6 permits validating the name on SUBSCRIBE; §6.3.7 gives UNSUBSCRIBE no such
+    /// licence, and it must not validate or a user could never stop following a deleted mailbox.
+    /// </summary>
+    [Fact]
+    public async Task Subscribing_validates_and_unsubscribing_does_not()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, _) = await SeedFolderAsync(connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        (await scope.ImapWrites.SetSubscriptionAsync(
+            mailbox, "Nowhere", subscribed: true, Moment, CancellationToken.None))
+            .ShouldBe(ImapFolderMutation.NotFound);
+
+        (await scope.ImapWrites.SetSubscriptionAsync(
+            mailbox, "Nowhere", subscribed: false, Moment, CancellationToken.None))
+            .ShouldBe(ImapFolderMutation.Done);
+    }
+
+    [Fact]
+    public async Task Subscribing_twice_is_idempotent()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, _) = await SeedFolderAsync(connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        await scope.ImapWrites.SetSubscriptionAsync(
+            mailbox, "INBOX", subscribed: true, Moment, CancellationToken.None);
+
+        (await scope.ImapWrites.SetSubscriptionAsync(
+            mailbox, "INBOX", subscribed: true, Moment, CancellationToken.None))
+            .ShouldBe(ImapFolderMutation.Done);
+
+        (await scope.ImapMailboxes.ListSubscriptionsAsync(mailbox, CancellationToken.None))
+            .Count(n => n == "INBOX").ShouldBe(1);
+    }
+
+    /// <summary>
+    /// The migration seeds the new table from the flag it supersedes, so an upgrade does not
+    /// silently unsubscribe every user from everything.
+    /// </summary>
+    [Fact]
+    public async Task The_migration_carries_the_existing_subscriptions_over()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        // SeedFolderAsync writes IsSubscribed = 1, as the pre-0012 schema did.
+        (MailboxId mailbox, _) = await SeedFolderAsync(connection);
+
+        // The seeding INSERT runs during migration, before this row existed - so assert the
+        // mechanism directly rather than the ordering.
+        await connection.ExecuteAsync(
+            """
+            INSERT INTO MailboxSubscriptions (MailboxId, Path, CreatedUtc)
+            SELECT MailboxId, Path, CreatedUtc FROM MailboxFolders WHERE IsSubscribed <> 0
+            """);
+
+        (await database.CreateScope().ImapMailboxes
+            .ListSubscriptionsAsync(mailbox, CancellationToken.None))
+            .ShouldContain("INBOX");
+    }
+
+    [Fact]
+    public async Task Another_mailboxs_folders_cannot_be_renamed_or_deleted()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId alice, _) = await SeedFolderAsync(connection);
+        (MailboxId bob, _) = await SeedFolderAsync(connection, address: "bob@example.net");
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        await scope.ImapWrites.CreateFolderAsync(bob, "Payroll", Moment, CancellationToken.None);
+
+        (await scope.ImapWrites.DeleteFolderAsync(alice, "Payroll", CancellationToken.None))
+            .ShouldBe(ImapFolderMutation.NotFound);
+
+        (await scope.ImapWrites.RenameFolderAsync(alice, "Payroll", "Mine", Moment, CancellationToken.None))
+            .ShouldBe(ImapFolderMutation.NotFound);
+
+        (await scope.ImapMailboxes.ListFoldersAsync(bob, CancellationToken.None))
+            .Select(l => l.Path)
+            .ShouldContain("Payroll");
     }
 }

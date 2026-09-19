@@ -108,4 +108,142 @@ public interface IImapMailboxWriter
         MailboxId mailboxId,
         MailboxFolderId folderId,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Creates a folder, and every superior level it needs.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// RFC 3501 §6.3.3: "If the server's hierarchy separator character appears elsewhere in the
+    /// name, the server SHOULD create any superior hierarchical names that are needed for the
+    /// CREATE command to be successfully completed. In other words, an attempt to create
+    /// "foo/bar/zap" […] SHOULD create foo/ and foo/bar/ if they do not already exist."
+    /// </para>
+    /// <para>
+    /// <b>A recreated name gets a fresh UIDVALIDITY, which is what licenses reusing UIDs from
+    /// 1.</b> §6.3.3 requires that a new mailbox with a deleted mailbox's name uses identifiers
+    /// "greater than any unique identifiers used in the previous incarnation […] <i>UNLESS the
+    /// new incarnation has a different unique identifier validity value</i>". Taking the
+    /// exception is cheaper and safer than preserving a high-water mark per deleted name, and it
+    /// is the branch that tells every client to discard its cache — which is correct, because
+    /// the mailbox genuinely is a different one.
+    /// </para>
+    /// </remarks>
+    Task<ImapFolderMutation> CreateFolderAsync(
+        MailboxId mailboxId,
+        string path,
+        DateTimeOffset now,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Removes a folder and its messages, leaving anything nested beneath it alone.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>§6.3.4's MUST: "The DELETE command MUST NOT remove inferior hierarchical names."</b>
+    /// Deleting <c>foo</c> leaves <c>foo/bar</c> exactly where it was. The RFC then describes what
+    /// the surviving name becomes: "It is permitted to delete a name that has inferior
+    /// hierarchical names and does not have the <c>\Noselect</c> mailbox name attribute. In this
+    /// case, all messages in that mailbox are removed, and the name will acquire the
+    /// <c>\Noselect</c> mailbox name attribute." That acquisition needs no code here: with the
+    /// row gone the name exists only as a hierarchy level, and a hierarchy level is precisely
+    /// what this server reports <c>\Noselect</c>.
+    /// </para>
+    /// <para>
+    /// <b>The subscription is not touched</b>, per §6.3.6's MUST NOT — see
+    /// <see cref="IImapMailboxReader.ListSubscriptionsAsync"/>.
+    /// </para>
+    /// </remarks>
+    Task<ImapFolderMutation> DeleteFolderAsync(
+        MailboxId mailboxId,
+        string path,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Renames a folder and everything nested beneath it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>§6.3.5's MUST: "If the name has inferior hierarchical names, then the inferior
+    /// hierarchical names MUST also be renamed. For example, a rename of "foo" to "zap" will
+    /// rename "foo/bar" […] to "zap/bar"."</b> So this is a subtree operation, not a row update,
+    /// and it happens in one transaction: a half-renamed subtree is a mailbox whose folders have
+    /// two different parents.
+    /// </para>
+    /// <para>
+    /// <b>Renaming the inbox is a different operation entirely.</b> §6.3.5: "Renaming INBOX is
+    /// permitted, and has special behavior. It moves all messages in INBOX to a new mailbox with
+    /// the given name, leaving INBOX empty. If the server implementation supports inferior
+    /// hierarchical names of INBOX, these are unaffected by a rename of INBOX." So the inbox
+    /// survives under its own reserved name, its messages move out, and its children stay put —
+    /// three departures from the ordinary case, and the reason the inbox is handled separately
+    /// rather than as a special path prefix.
+    /// </para>
+    /// </remarks>
+    Task<ImapFolderMutation> RenameFolderAsync(
+        MailboxId mailboxId,
+        string from,
+        string to,
+        DateTimeOffset now,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Adds or removes a name from the subscription list.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Subscribing validates that the name exists; unsubscribing does not.</b> §6.3.6 permits
+    /// the check — "A server MAY validate the mailbox argument to SUBSCRIBE to verify that it
+    /// exists" — and this server takes it, because a typo that silently succeeds leaves a user
+    /// with a folder list that never populates. Unsubscribing must not validate, because the
+    /// whole point of the list is that it can name something gone.
+    /// </para>
+    /// <para>
+    /// Both are idempotent. §6.3.6 and §6.3.7 ask only that the tagged <c>OK</c> mean the list is
+    /// in the requested state, not that it changed.
+    /// </para>
+    /// </remarks>
+    Task<ImapFolderMutation> SetSubscriptionAsync(
+        MailboxId mailboxId,
+        string path,
+        bool subscribed,
+        DateTimeOffset now,
+        CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// What a folder-shaped command did, or why it did nothing.
+/// </summary>
+/// <remarks>
+/// An enum rather than an exception, because none of these is exceptional: RFC 3501 §6.3.3 and
+/// §6.3.4 both describe their failures as ordinary outcomes answered with "a tagged NO response",
+/// and a client creating a folder that already exists is a client doing something reasonable
+/// with stale information.
+/// </remarks>
+public enum ImapFolderMutation
+{
+    /// <summary>The mailbox is now in the requested state.</summary>
+    Done = 0,
+
+    /// <summary>
+    /// The name is already taken — §6.3.3: "It is an error to attempt to create INBOX or a
+    /// mailbox with a name that refers to an extant mailbox."
+    /// </summary>
+    AlreadyExists = 1,
+
+    /// <summary>
+    /// No mailbox of that name — §6.3.4: "It is an error to attempt to delete INBOX or a mailbox
+    /// name that does not exist."
+    /// </summary>
+    NotFound = 2,
+
+    /// <summary>
+    /// The name is reserved. <c>INBOX</c> may be neither created nor deleted, per §6.3.3 and
+    /// §6.3.4; it may be renamed, which is a different operation — see
+    /// <see cref="IImapMailboxWriter.RenameFolderAsync"/>.
+    /// </summary>
+    Reserved = 3,
+
+    /// <summary>The name is not one this server can store — too long, too deep, or malformed.</summary>
+    Invalid = 4,
 }

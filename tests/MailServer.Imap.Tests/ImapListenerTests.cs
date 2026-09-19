@@ -1,3 +1,5 @@
+using MailServer.Infrastructure.Time;
+using MailServer.Application.Abstractions.Time;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -38,6 +40,7 @@ public sealed class ImapListenerTests : IAsyncDisposable
         services.AddSingleton<ScriptedImapMailboxReader>();
         services.AddSingleton<IImapMailboxReader>(p => p.GetRequiredService<ScriptedImapMailboxReader>());
         services.AddSingleton<IImapMailboxWriter>(p => p.GetRequiredService<ScriptedImapMailboxReader>());
+        services.AddSingleton<IClock, SystemClock>();
         services.AddScoped<ImapConnectionHandler>();
 
         _services = services.BuildServiceProvider();

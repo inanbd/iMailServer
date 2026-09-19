@@ -838,6 +838,29 @@ public static class ImapResponses
         return SequenceNumber(sequenceNumber, $"FETCH ({string.Join(' ', pairs)})");
     }
 
+    /// <summary>
+    /// <c>* NAMESPACE …</c> — the server's namespace layout. RFC 2342 §5.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// RFC 2342's Example 5.1 is this server's situation exactly — "A server that supports a
+    /// single personal namespace. No leading prefix is used on personal mailboxes and "/" is the
+    /// hierarchy delimiter" — and its answer is <c>* NAMESPACE (("" "/")) NIL NIL</c>. So the
+    /// response is a constant, and writing it as one is honest rather than lazy: there is no
+    /// configuration that could make it otherwise until shared mailboxes exist.
+    /// </para>
+    /// <para>
+    /// <b>The two <c>NIL</c>s are the point of answering at all.</b> §5: "The response will
+    /// contain a NIL for any namespace class that is not available." A client that is told there
+    /// are no Other Users' and no Shared namespaces stops probing for them; one that is told
+    /// nothing has to guess, and some guess by issuing <c>LIST</c> against prefixes like
+    /// <c>#news.</c> and <c>~</c> that mean nothing here.
+    /// </para>
+    /// </remarks>
+    public static ImapResponse Namespace() =>
+        ImapResponse.Data(
+            $"NAMESPACE ((\"\" \"{Entities.MailboxFolder.PathSeparator}\")) NIL NIL");
+
     /// <summary><c>* FLAGS (…)</c> — the flags defined in the selected mailbox. RFC 3501 §7.2.6.</summary>
     public static ImapResponse Flags(MessageFlags flags) =>
         ImapResponse.Data($"FLAGS ({ImapFlagNames.Format(flags)})");

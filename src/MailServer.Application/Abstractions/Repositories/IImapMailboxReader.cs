@@ -144,6 +144,33 @@ public interface IImapMailboxReader
     /// sequence set argument are unique identifiers instead of message sequence numbers".
     /// </param>
     /// <returns>The matching messages, in ascending sequence order.</returns>
+    /// <summary>
+    /// Every name a mailbox's owner has subscribed to, whether or not it still names a folder.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Read from the subscription list rather than from the folders, and that is the whole
+    /// reason the list exists.</b> RFC 3501 §6.3.6: a server "MUST NOT unilaterally remove an
+    /// existing mailbox name from the subscription list even if a mailbox by that name no longer
+    /// exists", with the RFC's own note explaining the case — "a server site can choose to
+    /// routinely remove a mailbox with a well-known name (e.g., "system-alerts") after its
+    /// contents expire, with the intention of recreating it when new contents are appropriate."
+    /// A subscription derived from a folder row could not survive that, so <c>LSUB</c> would
+    /// quietly stop reporting a name the user never unsubscribed from.
+    /// </para>
+    /// <para>
+    /// Consequently <c>LSUB</c>'s name set is this, not <see cref="ListFoldersAsync"/>'s — and a
+    /// subscribed name with no folder behind it is reported <c>\Noselect</c>, which is exactly
+    /// what §7.2.2 defines the attribute to mean: "It is not possible to use this name as a
+    /// selectable mailbox."
+    /// </para>
+    /// </remarks>
+    /// <param name="mailboxId">The authenticated mailbox. Scopes the read; never optional.</param>
+    /// <returns>The subscribed names, ordered.</returns>
+    Task<IReadOnlyList<string>> ListSubscriptionsAsync(
+        MailboxId mailboxId,
+        CancellationToken cancellationToken);
+
     Task<IReadOnlyList<ImapMessageSummary>> ReadSummariesAsync(
         MailboxId mailboxId,
         MailboxFolderId folderId,

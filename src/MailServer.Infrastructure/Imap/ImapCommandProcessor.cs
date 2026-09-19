@@ -1,4 +1,6 @@
 using MailServer.Application.Abstractions.Repositories;
+using MailServer.Application.Abstractions.Time;
+using MailServer.Infrastructure.Time;
 using MailServer.Application.Abstractions.Smtp;
 using MailServer.Domain.Enums;
 using MailServer.Domain.Imap;
@@ -116,6 +118,18 @@ public sealed class ImapCommandProcessor
 
     private readonly IImapMailboxWriter? _writer;
 
+    /// <summary>
+    /// The clock for anything this session writes.
+    /// </summary>
+    /// <remarks>
+    /// Not <see cref="ImapSessionContext.StartedAt"/>, which is when the connection opened. An
+    /// IMAP session can stay open for hours - RFC 3501 §5.4 requires a server to tolerate 30
+    /// minutes of silence and clients hold connections far longer than that - so stamping a
+    /// folder created near the end of one with the time it began would be wrong by the length of
+    /// the session, and UIDVALIDITY is derived from that stamp.
+    /// </remarks>
+    private readonly IClock _clock;
+
     /// <summary>The mechanism mid-exchange, or null when no <c>AUTHENTICATE</c> is in flight.</summary>
     private ISaslMechanism? _mechanism;
 
@@ -134,7 +148,8 @@ public sealed class ImapCommandProcessor
         ILogger logger,
         IMailboxAuthenticator? authenticator = null,
         IImapMailboxReader? mailboxes = null,
-    IImapMailboxWriter? writer = null)
+    IImapMailboxWriter? writer = null,
+    IClock? clock = null)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(options);
@@ -153,6 +168,7 @@ public sealed class ImapCommandProcessor
         // built without a reader refuses every mailbox command instead of pretending.
         _mailboxes = mailboxes;
         _writer = writer;
+        _clock = clock ?? new SystemClock();
     }
 
     /// <summary>The session this processor drives.</summary>
@@ -234,6 +250,14 @@ public sealed class ImapCommandProcessor
             ImapVerb.Store => await StoreAsync(command, cancellationToken).ConfigureAwait(false),
             ImapVerb.Expunge => await ExpungeAsync(command, cancellationToken).ConfigureAwait(false),
             ImapVerb.Close => await CloseAsync(command, cancellationToken).ConfigureAwait(false),
+            ImapVerb.Check => Check(command),
+            ImapVerb.Unselect => Unselect(command),
+            ImapVerb.Namespace => Namespace(command),
+            ImapVerb.Create => await FolderAsync(command, ImapFolderCommand.Create, cancellationToken).ConfigureAwait(false),
+            ImapVerb.Delete => await FolderAsync(command, ImapFolderCommand.Delete, cancellationToken).ConfigureAwait(false),
+            ImapVerb.Rename => await FolderAsync(command, ImapFolderCommand.Rename, cancellationToken).ConfigureAwait(false),
+            ImapVerb.Subscribe => await FolderAsync(command, ImapFolderCommand.Subscribe, cancellationToken).ConfigureAwait(false),
+            ImapVerb.Unsubscribe => await FolderAsync(command, ImapFolderCommand.Unsubscribe, cancellationToken).ConfigureAwait(false),
             _ => NotImplemented(command),
         };
     }
@@ -829,10 +853,20 @@ public sealed class ImapCommandProcessor
             .ListFoldersAsync(_session.AuthenticatedMailboxId.Value, cancellationToken)
             .ConfigureAwait(false);
 
+        // LSUB's names come from the subscription list, not from the folders. A subscription may
+        // name a mailbox that no longer exists and RFC 3501 §6.3.6 requires it to survive that,
+        // so deriving the set from the folders would silently drop exactly the names the MUST NOT
+        // exists to protect.
+        IReadOnlyList<string> subscribed = subscribedOnly
+            ? await _mailboxes
+                .ListSubscriptionsAsync(_session.AuthenticatedMailboxId.Value, cancellationToken)
+                .ConfigureAwait(false)
+            : [];
+
         List<ImapResponse> responses = [];
 
         foreach ((string name, ImapMailboxAttribute attributes) in
-            Matches(folders, pattern, subscribedOnly))
+            Matches(folders, subscribed, pattern, subscribedOnly))
         {
             responses.Add(subscribedOnly
                 ? ImapResponses.Lsub(attributes, name)
@@ -865,34 +899,59 @@ public sealed class ImapCommandProcessor
     /// </remarks>
     private static IEnumerable<(string Name, ImapMailboxAttribute Attributes)> Matches(
         IReadOnlyList<ImapFolderListing> folders,
+        IReadOnlyList<string> subscribed,
         ImapMailboxPattern pattern,
         bool subscribedOnly)
     {
-        List<ImapFolderListing> eligible = [];
+        Dictionary<string, ImapFolderListing> byPath = new(StringComparer.Ordinal);
 
         foreach (ImapFolderListing folder in folders)
         {
-            if (!subscribedOnly || folder.IsSubscribed)
+            byPath[folder.Path] = folder;
+        }
+
+        // The eligible names, paired with what this server can honestly say about each.
+        List<(string Path, ImapMailboxAttribute Attributes)> eligible = [];
+
+        if (subscribedOnly)
+        {
+            foreach (string name in subscribed)
             {
-                eligible.Add(folder);
+                eligible.Add(byPath.TryGetValue(name, out ImapFolderListing? listing)
+
+                    // A subscribed name with a folder behind it says what the folder says.
+                    ? (name, listing.Attributes)
+
+                    // One without is exactly what §7.2.2 defines \Noselect for: "It is not
+                    // possible to use this name as a selectable mailbox." No child attribute is
+                    // offered, because there is no mailbox whose children could be counted -
+                    // and RFC 3348 §3 anticipates their absence from LSUB in any case.
+                    : (name, ImapMailboxAttribute.NoSelect));
+            }
+        }
+        else
+        {
+            foreach (ImapFolderListing folder in folders)
+            {
+                eligible.Add((folder.Path, folder.Attributes));
             }
         }
 
         Dictionary<string, ImapMailboxAttribute> selected = new(StringComparer.Ordinal);
 
-        foreach (ImapFolderListing folder in eligible)
+        foreach ((string path, ImapMailboxAttribute attributes) in eligible)
         {
-            if (pattern.Matches(folder.Path))
+            if (pattern.Matches(path))
             {
-                selected[folder.Path] = folder.Attributes;
+                selected[path] = attributes;
             }
         }
 
         if (pattern.EndsWithHierarchyWildcard)
         {
-            foreach (ImapFolderListing folder in eligible)
+            foreach ((string path, _) in eligible)
             {
-                foreach (string level in ImapMailboxPattern.HierarchyLevelsOf(folder.Path))
+                foreach (string level in ImapMailboxPattern.HierarchyLevelsOf(path))
                 {
                     // A level that is itself eligible has already been added with its real
                     // attributes, and must not be overwritten with \Noselect.
@@ -1373,6 +1432,257 @@ public sealed class ImapCommandProcessor
         return ImapCommandResult.Single(ImapResponses.Ok(command.Tag, "CLOSE completed"));
     }
 
+    /// <summary>
+    /// <c>CHECK</c> — RFC 3501 §6.4.1.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A checkpoint of the selected mailbox, meaning "any implementation-dependent housekeeping
+    /// associated with the mailbox (e.g., resolving the server's in-memory state of the mailbox
+    /// with the state on its disk) that is not normally executed as part of each command". This
+    /// server keeps no such state: every command reads and writes through the database, which
+    /// owns durability. §6.4.1 anticipates exactly that — "If a server implementation has no such
+    /// housekeeping considerations, CHECK is equivalent to NOOP" — so answering <c>OK</c> and
+    /// doing nothing is the specified behaviour rather than a shortcut.
+    /// </para>
+    /// <para>
+    /// Nothing untagged is sent, deliberately. §6.4.1: "There is no guarantee that an EXISTS
+    /// untagged response will happen as a result of CHECK. NOOP, not CHECK, SHOULD be used for
+    /// new message polling."
+    /// </para>
+    /// </remarks>
+    private ImapCommandResult Check(ImapCommand command)
+    {
+        if (_session.SelectedFolderId is null)
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, "No mailbox is selected"));
+        }
+
+        if (command.Argument.Trim().Length != 0)
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, "CHECK takes no arguments"));
+        }
+
+        return ImapCommandResult.Single(ImapResponses.Ok(command.Tag, "CHECK completed"));
+    }
+
+    /// <summary>
+    /// <c>UNSELECT</c> — RFC 3691 §2.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// §2: it "frees server's resources associated with the selected mailbox and returns the
+    /// server to the authenticated state. This command performs the same actions as CLOSE, except
+    /// that no messages are permanently removed from the currently selected mailbox." So this is
+    /// <see cref="CloseAsync"/> minus the expunge, and the abstract says why a client wants it:
+    /// the alternatives are "a SELECT command with a nonexistent mailbox name or reselecting the
+    /// same mailbox with EXAMINE command", both of which work by side effect.
+    /// </para>
+    /// <para>
+    /// <b>Without a selected mailbox this is <c>BAD</c>, not <c>NO</c>.</b> §2's result list says
+    /// so in as many words: "BAD - no mailbox selected, or argument supplied but none permitted."
+    /// The command is out of sequence rather than refused, and the state machine reaches the same
+    /// verdict first.
+    /// </para>
+    /// </remarks>
+    private ImapCommandResult Unselect(ImapCommand command)
+    {
+        if (_session.SelectedFolderId is null)
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, "No mailbox is selected"));
+        }
+
+        if (command.Argument.Trim().Length != 0)
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, "UNSELECT takes no arguments"));
+        }
+
+        _session.Deselect();
+
+        return ImapCommandResult.Single(ImapResponses.Ok(command.Tag, "UNSELECT completed"));
+    }
+
+    /// <summary>
+    /// <c>NAMESPACE</c> — RFC 2342 §5.
+    /// </summary>
+    /// <remarks>
+    /// One personal namespace with no prefix and <c>/</c> as its delimiter, and <c>NIL</c> for
+    /// the other two classes — RFC 2342's own Example 5.1. See
+    /// <see cref="ImapResponses.Namespace"/> for why the <c>NIL</c>s earn their place.
+    /// </remarks>
+    private ImapCommandResult Namespace(ImapCommand command)
+    {
+        if (command.Argument.Trim().Length != 0)
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Bad(command.Tag, "NAMESPACE takes no arguments"));
+        }
+
+        return new ImapCommandResult(
+            [
+                ImapResponses.Namespace(),
+                ImapResponses.Ok(command.Tag, "NAMESPACE completed"),
+            ],
+            ImapSessionAction.Continue);
+    }
+
+    /// <summary>Which folder-shaped command is being run.</summary>
+    private enum ImapFolderCommand
+    {
+        Create,
+        Delete,
+        Rename,
+        Subscribe,
+        Unsubscribe,
+    }
+
+    /// <summary>
+    /// <c>CREATE</c>, <c>DELETE</c>, <c>RENAME</c>, <c>SUBSCRIBE</c> and <c>UNSUBSCRIBE</c> —
+    /// RFC 3501 §6.3.3 to §6.3.7.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>One handler, because the five differ only in which repository call they make and how
+    /// many mailbox names they take.</b> Everything around that — the argument shape, decoding
+    /// modified UTF-7, refusing a name that will not decode without echoing it back, and turning
+    /// a repository outcome into a tagged response — is identical, and writing it five times
+    /// would be five chances for the refusals to drift apart.
+    /// </para>
+    /// <para>
+    /// <b>Every failure is a tagged <c>NO</c>, not a <c>BAD</c>.</b> §6.3.3 and §6.3.4 both phrase
+    /// theirs as ordinary outcomes — "Any error in creation will return a tagged NO response" —
+    /// because a client creating a folder that already exists has done something reasonable with
+    /// stale information. <c>BAD</c> is reserved for a line the grammar does not admit.
+    /// </para>
+    /// <para>
+    /// <b><c>RENAME</c> takes two names and is the only one that does</b>, which is the whole of
+    /// why the argument reading is not shared with the others.
+    /// </para>
+    /// </remarks>
+    private async ValueTask<ImapCommandResult> FolderAsync(
+        ImapCommand command,
+        ImapFolderCommand which,
+        CancellationToken cancellationToken)
+    {
+        if (_writer is null)
+        {
+            return NotImplemented(command);
+        }
+
+        if (_session.AuthenticatedMailboxId is null)
+        {
+            return ImapCommandResult.Single(ImapResponses.Bad(command.Tag, "Not authenticated"));
+        }
+
+        ImapAstringReader reader = new(command.Argument);
+
+        if (!reader.TryReadText(out string? wireName))
+        {
+            return ImapCommandResult.Single(ImapResponses.Bad(
+                command.Tag,
+                $"{Describe(command.Verb)} expects a mailbox name"));
+        }
+
+        string? wireTarget = null;
+
+        if (which == ImapFolderCommand.Rename && !reader.TryReadText(out wireTarget))
+        {
+            return ImapCommandResult.Single(ImapResponses.Bad(
+                command.Tag,
+                "RENAME expects an existing mailbox name and a new one"));
+        }
+
+        if (!reader.AtEnd)
+        {
+            return ImapCommandResult.Single(ImapResponses.Bad(
+                command.Tag,
+                $"{Describe(command.Verb)} has too many arguments"));
+        }
+
+        if (!ImapMailboxName.TryDecode(wireName, out string? path) ||
+            (wireTarget is not null && !ImapMailboxName.TryDecode(wireTarget, out _)))
+        {
+            // Refused without being echoed, as everywhere else: a malformed name is client text.
+            return ImapCommandResult.Single(ImapResponses.No(
+                command.Tag,
+                "Mailbox name is not valid modified UTF-7"));
+        }
+
+        MailboxId mailboxId = _session.AuthenticatedMailboxId.Value;
+        DateTimeOffset now = _clock.UtcNow;
+
+        ImapFolderMutation outcome = which switch
+        {
+            ImapFolderCommand.Create =>
+                await _writer.CreateFolderAsync(mailboxId, path, now, cancellationToken)
+                    .ConfigureAwait(false),
+
+            ImapFolderCommand.Delete =>
+                await _writer.DeleteFolderAsync(mailboxId, path, cancellationToken)
+                    .ConfigureAwait(false),
+
+            ImapFolderCommand.Rename =>
+                await RenameAsync(mailboxId, path, wireTarget!, now, cancellationToken)
+                    .ConfigureAwait(false),
+
+            ImapFolderCommand.Subscribe =>
+                await _writer
+                    .SetSubscriptionAsync(mailboxId, path, subscribed: true, now, cancellationToken)
+                    .ConfigureAwait(false),
+
+            _ => await _writer
+                .SetSubscriptionAsync(mailboxId, path, subscribed: false, now, cancellationToken)
+                .ConfigureAwait(false),
+        };
+
+        if (outcome == ImapFolderMutation.Done)
+        {
+            return ImapCommandResult.Single(
+                ImapResponses.Ok(command.Tag, $"{Describe(command.Verb)} completed"));
+        }
+
+        return ImapCommandResult.Single(ImapResponses.No(command.Tag, Explain(command.Verb, outcome)));
+    }
+
+    private async ValueTask<ImapFolderMutation> RenameAsync(
+        MailboxId mailboxId,
+        string from,
+        string wireTarget,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        ImapMailboxName.TryDecode(wireTarget, out string? to);
+
+        return await _writer!
+            .RenameFolderAsync(mailboxId, from, to!, now, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>The refusal text for one outcome, in the terms the RFC uses for that command.</summary>
+    private static string Explain(ImapVerb verb, ImapFolderMutation outcome) => outcome switch
+    {
+        ImapFolderMutation.AlreadyExists => "Mailbox already exists",
+
+        ImapFolderMutation.NotFound => verb == ImapVerb.Subscribe
+
+            // §6.3.6 permits validating the name, and this server does - so say which check failed
+            // rather than leaving a user to wonder why a subscription did not take.
+            ? "No such mailbox to subscribe to"
+            : "No such mailbox",
+
+        // §6.3.3 and §6.3.4 both name INBOX as the one mailbox that may be neither created nor
+        // deleted. RENAME reaches this only for a destination of INBOX, which would be a create.
+        ImapFolderMutation.Reserved => "INBOX is reserved and cannot be created or deleted",
+
+        ImapFolderMutation.Invalid => "Mailbox name is not valid",
+
+        _ => "Command failed",
+    };
+
     private static ImapCommandResult NotImplemented(ImapCommand command) =>
         ImapCommandResult.Single(ImapResponses.No(
             command.Tag,
@@ -1414,5 +1724,15 @@ public sealed class ImapCommandProcessor
         // Tied to whether LIST can run at all. Without a mailbox reader every LIST is answered
         // "not implemented", and advertising CHILDREN would be undertaking to send attributes on
         // a response this session will never produce.
-        IsChildrenAvailable: _mailboxes is not null);
+        IsChildrenAvailable: _mailboxes is not null,
+
+        // Both are implemented outright and depend on nothing optional, so they are advertised
+        // unconditionally. The two RFCs put it differently and the difference is worth keeping
+        // straight: RFC 2342 §4 is a MUST - "IMAP4 servers that support this extension MUST list
+        // the keyword NAMESPACE in their CAPABILITY response" - while RFC 3691 §1 only says "A
+        // server which supports this extension indicates this with a capability name of
+        // 'UNSELECT'". Advertising both is required in one case and the only way a client can
+        // discover the command in the other.
+        IsNamespaceAvailable: true,
+        IsUnselectAvailable: true);
 }

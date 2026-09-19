@@ -1,7 +1,9 @@
 using Dapper;
 using MailServer.Application.Abstractions.Persistence;
 using MailServer.Application.Abstractions.Repositories;
+using MailServer.Domain.Entities;
 using MailServer.Domain.Enums;
+using MailServer.Domain.Exceptions;
 using MailServer.Domain.Imap;
 using MailServer.Domain.ValueObjects;
 
@@ -254,6 +256,557 @@ internal sealed class ImapMailboxWriter(
                     },
                     ct).ConfigureAwait(false);
             },
+            cancellationToken);
+    }
+
+    private const string SelectFolderIdByPath = """
+        SELECT  Id
+        FROM    MailboxFolders
+        WHERE   MailboxId = @MailboxId
+          AND   Path = @Path
+        """;
+
+    private const string SelectSubtreePaths = """
+        SELECT  Id, Path
+        FROM    MailboxFolders
+        WHERE   MailboxId = @MailboxId
+        """;
+
+    private const string InsertFolder = """
+        INSERT INTO MailboxFolders
+                    (Id, MailboxId, Path, SpecialUse, UidValidity, NextUid, IsSubscribed,
+                     CreatedUtc)
+        VALUES      (@Id, @MailboxId, @Path, 0, @UidValidity, 1, 0, @Now)
+        """;
+
+    private const string UpdateFolderPath = """
+        UPDATE  MailboxFolders
+        SET     Path = @Path, ModifiedUtc = @Now
+        WHERE   Id = @Id
+          AND   MailboxId = @MailboxId
+        """;
+
+    private const string DeleteFolderRow = """
+        DELETE  FROM MailboxFolders
+        WHERE   Id = @Id
+          AND   MailboxId = @MailboxId
+        """;
+
+    private const string DeleteFolderDeliveries = """
+        DELETE  FROM Deliveries
+        WHERE   FolderId = @FolderId
+          AND   MailboxId = @MailboxId
+        """;
+
+    private const string MoveDeliveries = """
+        UPDATE  Deliveries
+        SET     FolderId = @ToFolderId
+        WHERE   FolderId = @FromFolderId
+          AND   MailboxId = @MailboxId
+        """;
+
+    /// <summary>One folder's identity and name, for the subtree walks below.</summary>
+    private sealed class FolderIdentityRow
+    {
+        public Guid Id { get; set; }
+
+        public string Path { get; set; } = string.Empty;
+    }
+
+    public Task<ImapFolderMutation> CreateFolderAsync(
+        MailboxId mailboxId,
+        string path,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+
+        // §6.3.3: "In any case, the name created is without the trailing hierarchy delimiter."
+        // The suffix is a declaration of intent, not part of the name, and the RFC tells a server
+        // that does not need the declaration to "MUST ignore" it.
+        string wanted = path.TrimEnd(MailboxFolder.PathSeparator);
+
+        if (ImapMailboxPath.IsInbox(wanted))
+        {
+            return Task.FromResult(ImapFolderMutation.Reserved);
+        }
+
+        return transactions.ExecuteScopedAsync(
+            ct => ExecuteAsync(
+                async (session, inner) =>
+                {
+                    HashSet<string> existing = await ExistingPathsAsync(session, mailboxId, inner)
+                        .ConfigureAwait(false);
+
+                    if (existing.Contains(wanted))
+                    {
+                        return ImapFolderMutation.AlreadyExists;
+                    }
+
+                    long uidValidity = await NextUidValidityAsync(session, inner, mailboxId, now)
+                        .ConfigureAwait(false);
+
+                    // Every level from the outermost inwards, so a parent is always inserted
+                    // before its child - §6.3.3's "SHOULD create any superior hierarchical names".
+                    List<string> levels = [.. ImapMailboxPattern.HierarchyLevelsOf(wanted), wanted];
+
+                    foreach (string level in levels)
+                    {
+                        if (existing.Contains(level))
+                        {
+                            continue;
+                        }
+
+                        MailboxFolder folder;
+
+                        try
+                        {
+                            // Constructed through the entity so its own validation runs: path
+                            // length, depth and control characters are refused in one place.
+                            folder = MailboxFolder.Create(
+                                mailboxId,
+                                level,
+                                FolderSpecialUse.None,
+                                uidValidity,
+                                now);
+                        }
+                        catch (DomainRuleViolationException)
+                        {
+                            return ImapFolderMutation.Invalid;
+                        }
+
+                        await session.Connection.ExecuteAsync(Command(
+                            session,
+                            InsertFolder,
+                            new
+                            {
+                                Id = folder.Id.Value,
+                                MailboxId = mailboxId.Value,
+                                Path = folder.Path,
+                                UidValidity = folder.UidValidity,
+                                Now = now,
+                            },
+                            inner)).ConfigureAwait(false);
+                    }
+
+                    return ImapFolderMutation.Done;
+                },
+                ct),
+            cancellationToken);
+    }
+
+    public Task<ImapFolderMutation> DeleteFolderAsync(
+        MailboxId mailboxId,
+        string path,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+
+        if (ImapMailboxPath.IsInbox(path))
+        {
+            return Task.FromResult(ImapFolderMutation.Reserved);
+        }
+
+        return transactions.ExecuteScopedAsync(
+            ct => ExecuteAsync(
+                async (session, inner) =>
+                {
+                    Guid? folderId = await session.Connection
+                        .QuerySingleOrDefaultAsync<Guid?>(Command(
+                            session,
+                            SelectFolderIdByPath,
+                            new { MailboxId = mailboxId.Value, Path = path },
+                            inner))
+                        .ConfigureAwait(false);
+
+                    if (folderId is null)
+                    {
+                        return ImapFolderMutation.NotFound;
+                    }
+
+                    // The deliveries first, then the row. Nothing nested beneath the name is
+                    // touched - §6.3.4's "MUST NOT remove inferior hierarchical names" - and
+                    // nothing in MailboxSubscriptions is touched either, per §6.3.6.
+                    await session.Connection.ExecuteAsync(Command(
+                        session,
+                        DeleteFolderDeliveries,
+                        new { FolderId = folderId.Value, MailboxId = mailboxId.Value },
+                        inner)).ConfigureAwait(false);
+
+                    await session.Connection.ExecuteAsync(Command(
+                        session,
+                        DeleteFolderRow,
+                        new { Id = folderId.Value, MailboxId = mailboxId.Value },
+                        inner)).ConfigureAwait(false);
+
+                    return ImapFolderMutation.Done;
+                },
+                ct),
+            cancellationToken);
+    }
+
+    public Task<ImapFolderMutation> RenameFolderAsync(
+        MailboxId mailboxId,
+        string from,
+        string to,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(from);
+        ArgumentNullException.ThrowIfNull(to);
+
+        string target = to.TrimEnd(MailboxFolder.PathSeparator);
+
+        if (ImapMailboxPath.IsInbox(target))
+        {
+            // The destination is the one reserved name, so this would be a create of INBOX.
+            return Task.FromResult(ImapFolderMutation.AlreadyExists);
+        }
+
+        return transactions.ExecuteScopedAsync(
+            ct => ExecuteAsync(
+                async (session, inner) =>
+                {
+                    IEnumerable<FolderIdentityRow> rows = await session.Connection
+                        .QueryAsync<FolderIdentityRow>(Command(
+                            session,
+                            SelectSubtreePaths,
+                            new { MailboxId = mailboxId.Value },
+                            inner))
+                        .ConfigureAwait(false);
+
+                    List<FolderIdentityRow> all = [.. rows];
+
+                    if (all.Exists(r => string.Equals(r.Path, target, StringComparison.Ordinal)))
+                    {
+                        return ImapFolderMutation.AlreadyExists;
+                    }
+
+                    FolderIdentityRow? source = all.Find(
+                        r => string.Equals(r.Path, ImapMailboxPath.Canonical(from), StringComparison.Ordinal));
+
+                    if (source is null)
+                    {
+                        return ImapFolderMutation.NotFound;
+                    }
+
+                    if (ImapMailboxPath.IsInbox(from))
+                    {
+                        return await RenameInboxAsync(
+                            session, inner, mailboxId, source, target, now).ConfigureAwait(false);
+                    }
+
+                    // The subtree: the folder itself and everything strictly beneath it. The
+                    // prefix is path + separator, so a sibling whose name merely starts the same
+                    // way is untouched - the distinction ImapMailboxPattern.ParentsAmong makes.
+                    string prefix = source.Path + MailboxFolder.PathSeparator;
+
+                    List<FolderIdentityRow> subtree =
+                    [
+                        source,
+                        .. all.Where(r => r.Path.StartsWith(prefix, StringComparison.Ordinal)),
+                    ];
+
+                    // Superior levels of the destination, per §6.3.5's SHOULD.
+                    ImapFolderMutation parents = await EnsureParentsAsync(
+                        session, inner, mailboxId, all, target, now).ConfigureAwait(false);
+
+                    if (parents != ImapFolderMutation.Done)
+                    {
+                        return parents;
+                    }
+
+                    foreach (FolderIdentityRow row in subtree)
+                    {
+                        string renamed = target + row.Path[source.Path.Length..];
+
+                        if (renamed.Length > MailboxFolder.MaxPathLength)
+                        {
+                            return ImapFolderMutation.Invalid;
+                        }
+
+                        await session.Connection.ExecuteAsync(Command(
+                            session,
+                            UpdateFolderPath,
+                            new
+                            {
+                                Id = row.Id,
+                                MailboxId = mailboxId.Value,
+                                Path = renamed,
+                                Now = now,
+                            },
+                            inner)).ConfigureAwait(false);
+                    }
+
+                    return ImapFolderMutation.Done;
+                },
+                ct),
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// RFC 3501 §6.3.5's special case: the inbox stays, its messages leave, its children stay.
+    /// </summary>
+    /// <remarks>
+    /// "It moves all messages in INBOX to a new mailbox with the given name, leaving INBOX empty.
+    /// If the server implementation supports inferior hierarchical names of INBOX, these are
+    /// unaffected by a rename of INBOX." Three departures from an ordinary rename, which is why
+    /// this is a separate method rather than a branch inside one.
+    /// </remarks>
+    private async Task<ImapFolderMutation> RenameInboxAsync(
+        IDbSession session,
+        CancellationToken cancellationToken,
+        MailboxId mailboxId,
+        FolderIdentityRow inbox,
+        string target,
+        DateTimeOffset now)
+    {
+        MailboxFolder created;
+
+        try
+        {
+            created = MailboxFolder.Create(
+                mailboxId,
+                target,
+                FolderSpecialUse.None,
+                await NextUidValidityAsync(session, cancellationToken, mailboxId, now)
+                    .ConfigureAwait(false),
+                now);
+        }
+        catch (DomainRuleViolationException)
+        {
+            return ImapFolderMutation.Invalid;
+        }
+
+        await session.Connection.ExecuteAsync(Command(
+            session,
+            InsertFolder,
+            new
+            {
+                Id = created.Id.Value,
+                MailboxId = mailboxId.Value,
+                Path = created.Path,
+                UidValidity = created.UidValidity,
+                Now = now,
+            },
+            cancellationToken)).ConfigureAwait(false);
+
+        // The messages move; the inbox row and its children stay exactly where they are.
+        await session.Connection.ExecuteAsync(Command(
+            session,
+            MoveDeliveries,
+            new
+            {
+                ToFolderId = created.Id.Value,
+                FromFolderId = inbox.Id,
+                MailboxId = mailboxId.Value,
+            },
+            cancellationToken)).ConfigureAwait(false);
+
+        return ImapFolderMutation.Done;
+    }
+
+    /// <summary>Creates any superior level of <paramref name="target"/> that is missing.</summary>
+    private async Task<ImapFolderMutation> EnsureParentsAsync(
+        IDbSession session,
+        CancellationToken cancellationToken,
+        MailboxId mailboxId,
+        IReadOnlyList<FolderIdentityRow> existing,
+        string target,
+        DateTimeOffset now)
+    {
+        HashSet<string> present = new(existing.Select(r => r.Path), StringComparer.Ordinal);
+
+        foreach (string level in ImapMailboxPattern.HierarchyLevelsOf(target))
+        {
+            if (present.Contains(level))
+            {
+                continue;
+            }
+
+            MailboxFolder folder;
+
+            try
+            {
+                folder = MailboxFolder.Create(
+                    mailboxId,
+                    level,
+                    FolderSpecialUse.None,
+                    await NextUidValidityAsync(session, cancellationToken, mailboxId, now)
+                        .ConfigureAwait(false),
+                    now);
+            }
+            catch (DomainRuleViolationException)
+            {
+                return ImapFolderMutation.Invalid;
+            }
+
+            await session.Connection.ExecuteAsync(Command(
+                session,
+                InsertFolder,
+                new
+                {
+                    Id = folder.Id.Value,
+                    MailboxId = mailboxId.Value,
+                    Path = folder.Path,
+                    UidValidity = folder.UidValidity,
+                    Now = now,
+                },
+                cancellationToken)).ConfigureAwait(false);
+
+            present.Add(level);
+        }
+
+        return ImapFolderMutation.Done;
+    }
+
+    /// <summary>
+    /// A UIDVALIDITY for a folder about to be created.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The clock, floored to one above the highest value this mailbox has ever issued. The clock
+    /// alone is what
+    /// <c>MailboxCommands.CreateStandardFoldersAsync</c> uses and it is fine for provisioning,
+    /// where the folders are new; it is not fine here, where a name can be deleted and created
+    /// again. RFC 3501 §6.3.3 requires a recreated mailbox's UIDs to exceed the previous
+    /// incarnation's "UNLESS the new incarnation has a different unique identifier validity
+    /// value", and this server takes the exception — so the value must actually differ, or a
+    /// client serves cached mail under UIDs that now name different messages.
+    /// </para>
+    /// <para>
+    /// <b>A value derived only from surviving folders would not be enough, and the gap is not
+    /// narrow.</b> The deleted folder's UIDVALIDITY leaves with its row, so a delete and an
+    /// immediate recreate would reissue whatever the clock says — the same number, with UIDs
+    /// restarting at 1. That is why <c>MailboxUidValidity</c> exists: a per-mailbox high-water
+    /// mark that outlives the folder, in the same shape and for the same reason as the
+    /// subscription list.
+    /// </para>
+    /// </remarks>
+    private static async Task<long> NextUidValidityAsync(
+        IDbSession session,
+        CancellationToken cancellationToken,
+        MailboxId mailboxId,
+        DateTimeOffset now)
+    {
+        // Two sources, because neither alone is enough. The high-water mark remembers values
+        // whose folders have been deleted; the folder maximum covers a mailbox that predates the
+        // mark or was written by an older build. The clock keeps the numbers meaningful.
+        long stored = await session.Connection
+            .ExecuteScalarAsync<long?>(Command(
+                session,
+                "SELECT Highest FROM MailboxUidValidity WHERE MailboxId = @MailboxId",
+                new { MailboxId = mailboxId.Value },
+                cancellationToken))
+            .ConfigureAwait(false) ?? 0;
+
+        long inUse = await session.Connection
+            .ExecuteScalarAsync<long?>(Command(
+                session,
+                "SELECT MAX(UidValidity) FROM MailboxFolders WHERE MailboxId = @MailboxId",
+                new { MailboxId = mailboxId.Value },
+                cancellationToken))
+            .ConfigureAwait(false) ?? 0;
+
+        long next = Math.Max(now.ToUnixTimeSeconds(), Math.Max(stored, inUse) + 1);
+
+        // Delete-then-insert rather than an UPSERT, which SQLite and SQL Server spell
+        // differently. Inside the caller's transaction, so the mark and the folder that used it
+        // are written together or not at all.
+        await session.Connection.ExecuteAsync(Command(
+            session,
+            "DELETE FROM MailboxUidValidity WHERE MailboxId = @MailboxId",
+            new { MailboxId = mailboxId.Value },
+            cancellationToken)).ConfigureAwait(false);
+
+        await session.Connection.ExecuteAsync(Command(
+            session,
+            "INSERT INTO MailboxUidValidity (MailboxId, Highest) VALUES (@MailboxId, @Highest)",
+            new { MailboxId = mailboxId.Value, Highest = next },
+            cancellationToken)).ConfigureAwait(false);
+
+        return next;
+    }
+
+    private static async Task<HashSet<string>> ExistingPathsAsync(
+        IDbSession session,
+        MailboxId mailboxId,
+        CancellationToken cancellationToken)
+    {
+        IEnumerable<string> paths = await session.Connection
+            .QueryAsync<string>(Command(
+                session,
+                "SELECT Path FROM MailboxFolders WHERE MailboxId = @MailboxId",
+                new { MailboxId = mailboxId.Value },
+                cancellationToken))
+            .ConfigureAwait(false);
+
+        return new HashSet<string>(paths, StringComparer.Ordinal);
+    }
+
+    private const string InsertSubscription = """
+        INSERT INTO MailboxSubscriptions (MailboxId, Path, CreatedUtc)
+        VALUES (@MailboxId, @Path, @Now)
+        """;
+
+    private const string DeleteSubscription = """
+        DELETE FROM MailboxSubscriptions
+        WHERE  MailboxId = @MailboxId AND Path = @Path
+        """;
+
+    public Task<ImapFolderMutation> SetSubscriptionAsync(
+        MailboxId mailboxId,
+        string path,
+        bool subscribed,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+
+        string canonical = ImapMailboxPath.Canonical(path);
+
+        return transactions.ExecuteScopedAsync(
+            ct => ExecuteAsync(
+                async (session, inner) =>
+                {
+                    if (subscribed)
+                    {
+                        // §6.3.6's permitted validation. Unsubscribing deliberately skips it:
+                        // the list must be able to name something that is gone.
+                        Guid? folderId = await session.Connection
+                            .QuerySingleOrDefaultAsync<Guid?>(Command(
+                                session,
+                                SelectFolderIdByPath,
+                                new { MailboxId = mailboxId.Value, Path = canonical },
+                                inner))
+                            .ConfigureAwait(false);
+
+                        if (folderId is null)
+                        {
+                            return ImapFolderMutation.NotFound;
+                        }
+                    }
+
+                    // Idempotent in both directions: delete first, then insert if wanted, so a
+                    // repeat subscribe cannot violate the primary key.
+                    await session.Connection.ExecuteAsync(Command(
+                        session,
+                        DeleteSubscription,
+                        new { MailboxId = mailboxId.Value, Path = canonical },
+                        inner)).ConfigureAwait(false);
+
+                    if (subscribed)
+                    {
+                        await session.Connection.ExecuteAsync(Command(
+                            session,
+                            InsertSubscription,
+                            new { MailboxId = mailboxId.Value, Path = canonical, Now = now },
+                            inner)).ConfigureAwait(false);
+                    }
+
+                    return ImapFolderMutation.Done;
+                },
+                ct),
             cancellationToken);
     }
 }

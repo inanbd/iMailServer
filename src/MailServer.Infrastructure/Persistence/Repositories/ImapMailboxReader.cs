@@ -173,10 +173,53 @@ internal sealed class ImapMailboxReader(
     /// </para>
     /// </remarks>
     private const string SelectFolderPaths = """
-        SELECT  Path, SpecialUse, IsSubscribed
-        FROM    MailboxFolders
+        SELECT  f.Path,
+                f.SpecialUse,
+                CASE WHEN s.Path IS NULL THEN 0 ELSE 1 END AS IsSubscribed
+        FROM    MailboxFolders f
+        LEFT JOIN MailboxSubscriptions s
+               ON s.MailboxId = f.MailboxId
+              AND s.Path = f.Path
+        WHERE   f.MailboxId = @MailboxId
+        """;
+
+    /// <summary>
+    /// The subscribed names of one mailbox.
+    /// </summary>
+    /// <remarks>
+    /// No join to <c>MailboxFolders</c>, deliberately: a subscription may name a mailbox that no
+    /// longer exists, and RFC 3501 §6.3.6 requires it to survive that. Joining would reintroduce
+    /// exactly the coupling the table was created to remove.
+    /// </remarks>
+    private const string SelectSubscriptions = """
+        SELECT  Path
+        FROM    MailboxSubscriptions
         WHERE   MailboxId = @MailboxId
         """;
+
+    public Task<IReadOnlyList<string>> ListSubscriptionsAsync(
+        MailboxId mailboxId,
+        CancellationToken cancellationToken)
+    {
+        return ExecuteAsync(async (session, ct) =>
+        {
+            IEnumerable<string> paths = await session.Connection
+                .QueryAsync<string>(Command(
+                    session,
+                    SelectSubscriptions,
+                    new { MailboxId = mailboxId.Value },
+                    ct))
+                .ConfigureAwait(false);
+
+            List<string> ordered = [.. paths];
+
+            // Ordinally in memory, for the reason SelectFolderPaths gives: no database
+            // guarantees the collation this server's ordering assumes.
+            ordered.Sort(string.CompareOrdinal);
+
+            return (IReadOnlyList<string>)ordered;
+        }, cancellationToken);
+    }
 
     public Task<IReadOnlyList<ImapFolderListing>> ListFoldersAsync(
         MailboxId mailboxId,

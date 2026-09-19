@@ -98,6 +98,17 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
             DateTimeOffset.UnixEpoch,
             null);
 
+        if (subscribed)
+        {
+            if (!_subscriptions.TryGetValue(mailboxId.Value, out HashSet<string>? subscribedNames))
+            {
+                subscribedNames = new HashSet<string>(StringComparer.Ordinal);
+                _subscriptions[mailboxId.Value] = subscribedNames;
+            }
+
+            subscribedNames.Add(path);
+        }
+
         _folders[(mailboxId.Value, path)] = new Entry(
             folder,
             existsCount,
@@ -307,6 +318,181 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
         }
 
         return after;
+    }
+
+    /// <summary>The subscription list, which is separate from the folders on purpose.</summary>
+    /// <remarks>
+    /// A set of names rather than a flag per folder, mirroring MailboxSubscriptions — so a test
+    /// can subscribe to a name, delete the folder, and see LSUB still report it, which is RFC
+    /// 3501 §6.3.6's MUST NOT.
+    /// </remarks>
+    private readonly Dictionary<Guid, HashSet<string>> _subscriptions = [];
+
+    public Task<IReadOnlyList<string>> ListSubscriptionsAsync(
+        MailboxId mailboxId,
+        CancellationToken cancellationToken)
+    {
+        if (!_subscriptions.TryGetValue(mailboxId.Value, out HashSet<string>? names))
+        {
+            return Task.FromResult<IReadOnlyList<string>>([]);
+        }
+
+        List<string> ordered = [.. names];
+        ordered.Sort(string.CompareOrdinal);
+
+        return Task.FromResult<IReadOnlyList<string>>(ordered);
+    }
+
+    public Task<ImapFolderMutation> CreateFolderAsync(
+        MailboxId mailboxId,
+        string path,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        string wanted = path.TrimEnd(MailboxFolder.PathSeparator);
+
+        if (ImapMailboxPath.IsInbox(wanted))
+        {
+            return Task.FromResult(ImapFolderMutation.Reserved);
+        }
+
+        if (_folders.ContainsKey((mailboxId.Value, wanted)))
+        {
+            return Task.FromResult(ImapFolderMutation.AlreadyExists);
+        }
+
+        foreach (string level in ImapMailboxPattern.HierarchyLevelsOf(wanted).Append(wanted))
+        {
+            if (!_folders.ContainsKey((mailboxId.Value, level)))
+            {
+                Add(mailboxId, level, subscribed: false);
+            }
+        }
+
+        return Task.FromResult(ImapFolderMutation.Done);
+    }
+
+    public Task<ImapFolderMutation> DeleteFolderAsync(
+        MailboxId mailboxId,
+        string path,
+        CancellationToken cancellationToken)
+    {
+        if (ImapMailboxPath.IsInbox(path))
+        {
+            return Task.FromResult(ImapFolderMutation.Reserved);
+        }
+
+        if (!_folders.Remove((mailboxId.Value, path)))
+        {
+            return Task.FromResult(ImapFolderMutation.NotFound);
+        }
+
+        _messages.Remove((mailboxId.Value, path));
+
+        // The subscription is deliberately left alone - §6.3.6's MUST NOT.
+        return Task.FromResult(ImapFolderMutation.Done);
+    }
+
+    public Task<ImapFolderMutation> RenameFolderAsync(
+        MailboxId mailboxId,
+        string from,
+        string to,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        string target = to.TrimEnd(MailboxFolder.PathSeparator);
+
+        if (ImapMailboxPath.IsInbox(target) || _folders.ContainsKey((mailboxId.Value, target)))
+        {
+            return Task.FromResult(ImapFolderMutation.AlreadyExists);
+        }
+
+        string source = ImapMailboxPath.Canonical(from);
+
+        if (!_folders.ContainsKey((mailboxId.Value, source)))
+        {
+            return Task.FromResult(ImapFolderMutation.NotFound);
+        }
+
+        if (ImapMailboxPath.IsInbox(from))
+        {
+            // §6.3.5's special case: the inbox stays, its messages move out.
+            Add(mailboxId, target, subscribed: false);
+
+            if (_messages.Remove((mailboxId.Value, source), out List<ImapMessageSummary>? moved))
+            {
+                _messages[(mailboxId.Value, target)] = moved;
+            }
+
+            return Task.FromResult(ImapFolderMutation.Done);
+        }
+
+        string prefix = source + MailboxFolder.PathSeparator;
+
+        List<string> subtree =
+        [
+            .. _folders.Keys
+                .Where(k => k.Mailbox == mailboxId.Value &&
+                            (k.Path == source || k.Path.StartsWith(prefix, StringComparison.Ordinal)))
+                .Select(k => k.Path),
+        ];
+
+        foreach (string old in subtree)
+        {
+            string renamed = target + old[source.Length..];
+
+            if (_folders.Remove((mailboxId.Value, old), out Entry? entry))
+            {
+                _folders[(mailboxId.Value, renamed)] = entry with
+                {
+                    Folder = MailboxFolder.Create(
+                        mailboxId,
+                        renamed,
+                        entry.Folder.SpecialUse,
+                        entry.Folder.UidValidity,
+                        DateTimeOffset.UnixEpoch),
+                };
+            }
+
+            if (_messages.Remove((mailboxId.Value, old), out List<ImapMessageSummary>? carried))
+            {
+                _messages[(mailboxId.Value, renamed)] = carried;
+            }
+        }
+
+        return Task.FromResult(ImapFolderMutation.Done);
+    }
+
+    public Task<ImapFolderMutation> SetSubscriptionAsync(
+        MailboxId mailboxId,
+        string path,
+        bool subscribed,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        string canonical = ImapMailboxPath.Canonical(path);
+
+        if (subscribed && !_folders.ContainsKey((mailboxId.Value, canonical)))
+        {
+            return Task.FromResult(ImapFolderMutation.NotFound);
+        }
+
+        if (!_subscriptions.TryGetValue(mailboxId.Value, out HashSet<string>? names))
+        {
+            names = new HashSet<string>(StringComparer.Ordinal);
+            _subscriptions[mailboxId.Value] = names;
+        }
+
+        if (subscribed)
+        {
+            names.Add(canonical);
+        }
+        else
+        {
+            names.Remove(canonical);
+        }
+
+        return Task.FromResult(ImapFolderMutation.Done);
     }
 
     /// <summary>Every folder this fake was asked to expunge.</summary>
@@ -556,16 +742,42 @@ public sealed class ImapCommandProcessorTests
     {
         // The pairing that keeps the refusals honest: a complying client never sends a command
         // this processor would refuse, because the capability listing never offered it.
-        ImapCommandProcessor processor = Processor(authenticator: new ScriptedImapAuthenticator());
+        //
+        // Asserted against the behaviour rather than against a list of atom names. A hardcoded
+        // list goes stale the moment a command is implemented - it did, when NAMESPACE and
+        // UNSELECT landed - and a stale list of things that must NOT be advertised fails for the
+        // one reason that is not a defect.
+        ScriptedImapAuthenticator authenticator = new();
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: new ScriptedImapMailboxReader().Add(authenticator.KnownMailboxId, "INBOX"));
 
         await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a0b SELECT INBOX");
 
-        IReadOnlyList<string> capabilities = processor.Capabilities();
+        // One probe per capability atom that names a command a client could then send. Atoms
+        // that describe a response shape rather than a command (CHILDREN, LITERAL-) have none.
+        Dictionary<string, string> probes = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["IDLE"] = "p1 IDLE",
+            ["NAMESPACE"] = "p1 NAMESPACE",
+            ["UNSELECT"] = "p1 UNSELECT",
+            ["MOVE"] = "p1 MOVE 1 Archive",
+        };
 
-        capabilities.ShouldNotContain("IDLE");
-        capabilities.ShouldNotContain("NAMESPACE");
-        capabilities.ShouldNotContain("UNSELECT");
-        capabilities.ShouldNotContain("MOVE");
+        foreach (string capability in processor.Capabilities())
+        {
+            if (!probes.TryGetValue(capability, out string? line))
+            {
+                continue;
+            }
+
+            string wire = Wire(await ExecuteAsync(processor, line));
+
+            wire.Contains("not implemented yet", StringComparison.Ordinal).ShouldBeFalse(
+                $"{capability} is advertised but {line.Split(' ')[1]} is refused as unimplemented");
+        }
     }
 
     // ---------------------------------------------------------------------------------------
@@ -2406,5 +2618,475 @@ public sealed class ImapCommandProcessorTests
         (ImapCommandProcessor processor, _, _) = await ExpungeableAsync();
 
         Wire(await ExecuteAsync(processor, "a2 CLOSE now")).ShouldContain("a2 BAD ");
+    }
+    // ---------------------------------------------------------------------------------------
+    // CHECK, UNSELECT and NAMESPACE.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// RFC 3501 §6.4.1: "If a server implementation has no such housekeeping considerations,
+    /// CHECK is equivalent to NOOP." This server keeps no in-memory mailbox state — every command
+    /// reads and writes through the database — so there is nothing to checkpoint.
+    /// </summary>
+    [Fact]
+    public async Task Check_is_an_ok_and_nothing_else()
+    {
+        (ImapCommandProcessor processor, _, _) = await ExpungeableAsync();
+
+        Wire(await ExecuteAsync(processor, "a2 CHECK")).ShouldBe("a2 OK CHECK completed\r\n");
+    }
+
+    /// <summary>
+    /// §6.4.1: "There is no guarantee that an EXISTS untagged response will happen as a result of
+    /// CHECK. NOOP, not CHECK, SHOULD be used for new message polling."
+    /// </summary>
+    [Fact]
+    public async Task Check_sends_nothing_untagged()
+    {
+        (ImapCommandProcessor processor, _, _) = await ExpungeableAsync();
+
+        Wire(await ExecuteAsync(processor, "a2 CHECK")).ShouldNotContain("*");
+    }
+
+    /// <summary>
+    /// RFC 3691 §2: UNSELECT "performs the same actions as CLOSE, except that no messages are
+    /// permanently removed from the currently selected mailbox."
+    /// </summary>
+    [Fact]
+    public async Task Unselect_leaves_the_selected_state_without_expunging()
+    {
+        (ImapCommandProcessor processor, ScriptedImapMailboxReader store, ImapSessionContext session) =
+            await ExpungeableAsync();
+
+        Wire(await ExecuteAsync(processor, "a2 UNSELECT"))
+            .ShouldBe("a2 OK UNSELECT completed\r\n");
+
+        session.State.ShouldBe(ImapSessionState.Authenticated);
+        session.SelectedFolderId.ShouldBeNull();
+
+        // The difference from CLOSE, which is the whole reason the command exists.
+        store.Expunged.ShouldBeEmpty();
+    }
+
+    /// <summary>
+    /// §2's result list: "BAD - no mailbox selected, or argument supplied but none permitted."
+    /// Out of sequence rather than refused.
+    /// </summary>
+    [Fact]
+    public async Task Unselect_without_a_selected_mailbox_is_bad()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: new ScriptedImapMailboxReader().Add(authenticator.KnownMailboxId, "INBOX"));
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        Wire(await ExecuteAsync(processor, "a1 UNSELECT")).ShouldContain(" BAD ");
+    }
+
+    [Theory]
+    [InlineData("a2 UNSELECT now")]
+    [InlineData("a2 CHECK now")]
+    [InlineData("a2 NAMESPACE now")]
+    public async Task These_commands_take_no_arguments(string line)
+    {
+        (ImapCommandProcessor processor, _, _) = await ExpungeableAsync();
+
+        Wire(await ExecuteAsync(processor, line)).ShouldContain("a2 BAD ");
+    }
+
+    /// <summary>
+    /// RFC 2342's Example 5.1, verbatim: a server with one personal namespace, no prefix and "/"
+    /// as the delimiter answers <c>* NAMESPACE (("" "/")) NIL NIL</c>.
+    /// </summary>
+    [Fact]
+    public async Task Namespace_reports_one_personal_namespace_and_nothing_else()
+    {
+        (ImapCommandProcessor processor, _, _) = await ExpungeableAsync();
+
+        Wire(await ExecuteAsync(processor, "a2 NAMESPACE")).ShouldBe(
+            "* NAMESPACE ((\"\" \"/\")) NIL NIL\r\n" +
+            "a2 OK NAMESPACE completed\r\n");
+    }
+
+    /// <summary>
+    /// RFC 2342 §4: "The NAMESPACE command is valid in the Authenticated and Selected state." So
+    /// it works before a mailbox is opened, which is when a client actually asks.
+    /// </summary>
+    [Fact]
+    public async Task Namespace_works_before_a_mailbox_is_selected()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: new ScriptedImapMailboxReader().Add(authenticator.KnownMailboxId, "INBOX"));
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        Wire(await ExecuteAsync(processor, "a1 NAMESPACE")).ShouldContain("* NAMESPACE ((\"\" \"/\")) NIL NIL");
+    }
+
+    /// <summary>
+    /// RFC 2342 §4 makes the atom a MUST for a server implementing the command; RFC 3691 §1 makes
+    /// it the only way a client can discover UNSELECT.
+    /// </summary>
+    [Fact]
+    public async Task Both_extensions_are_advertised()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: new ScriptedImapMailboxReader().Add(authenticator.KnownMailboxId, "INBOX"));
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        string wire = Wire(await ExecuteAsync(processor, "a1 CAPABILITY"));
+
+        wire.ShouldContain("NAMESPACE");
+        wire.ShouldContain("UNSELECT");
+    }
+    // ---------------------------------------------------------------------------------------
+    // CREATE, DELETE, RENAME, SUBSCRIBE, UNSUBSCRIBE. RFC 3501 §6.3.3 to §6.3.7.
+    // ---------------------------------------------------------------------------------------
+
+    private static async Task<(ImapCommandProcessor Processor, ScriptedImapMailboxReader Store)>
+        ManageableAsync()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox)
+            .Add(authenticator.KnownMailboxId, "Archive");
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        return (processor, mailboxes);
+    }
+
+    [Fact]
+    public async Task Create_makes_a_folder_that_list_then_reports()
+    {
+        (ImapCommandProcessor processor, _) = await ManageableAsync();
+
+        Wire(await ExecuteAsync(processor, "a1 CREATE Receipts"))
+            .ShouldBe("a1 OK CREATE completed\r\n");
+
+        Wire(await ExecuteAsync(processor, "a2 LIST \"\" \"*\"")).ShouldContain("\"/\" Receipts");
+    }
+
+    /// <summary>
+    /// RFC 3501 §6.3.3: "the server SHOULD create any superior hierarchical names that are needed
+    /// […] an attempt to create "foo/bar/zap" […] SHOULD create foo/ and foo/bar/ if they do not
+    /// already exist."
+    /// </summary>
+    [Fact]
+    public async Task Create_makes_the_superior_levels_it_needs()
+    {
+        (ImapCommandProcessor processor, _) = await ManageableAsync();
+
+        await ExecuteAsync(processor, "a1 CREATE foo/bar/zap");
+
+        string wire = Wire(await ExecuteAsync(processor, "a2 LIST \"\" \"*\""));
+
+        wire.ShouldContain("\"/\" foo\r\n");
+        wire.ShouldContain("\"/\" foo/bar\r\n");
+        wire.ShouldContain("\"/\" foo/bar/zap\r\n");
+    }
+
+    /// <summary>
+    /// §6.3.3: "If the mailbox name is suffixed with the server's hierarchy separator character
+    /// […] this is a declaration that the client intends to create mailbox names under this name
+    /// […] In any case, the name created is without the trailing hierarchy delimiter." The RFC's
+    /// own example is CREATE owatagusiam/ followed by CREATE owatagusiam/blurdybloop.
+    /// </summary>
+    [Fact]
+    public async Task Create_drops_a_trailing_delimiter_rather_than_storing_it()
+    {
+        (ImapCommandProcessor processor, _) = await ManageableAsync();
+
+        Wire(await ExecuteAsync(processor, "a1 CREATE owatagusiam/"))
+            .ShouldContain("a1 OK ");
+
+        Wire(await ExecuteAsync(processor, "a2 CREATE owatagusiam/blurdybloop"))
+            .ShouldContain("a2 OK ");
+
+        string wire = Wire(await ExecuteAsync(processor, "a3 LIST \"\" \"*\""));
+
+        wire.ShouldContain("\"/\" owatagusiam\r\n");
+        wire.ShouldNotContain("owatagusiam/\r\n");
+    }
+
+    /// <summary>
+    /// §6.3.3: "It is an error to attempt to create INBOX or a mailbox with a name that refers to
+    /// an extant mailbox." Both are tagged NO, because "Any error in creation will return a
+    /// tagged NO response."
+    /// </summary>
+    [Theory]
+    [InlineData("a1 CREATE INBOX")]
+    [InlineData("a1 CREATE inbox")]
+    [InlineData("a1 CREATE Archive")]
+    public async Task Create_refuses_a_reserved_or_extant_name(string line)
+    {
+        (ImapCommandProcessor processor, _) = await ManageableAsync();
+
+        Wire(await ExecuteAsync(processor, line)).ShouldContain("a1 NO ");
+    }
+
+    [Fact]
+    public async Task Delete_removes_the_folder()
+    {
+        (ImapCommandProcessor processor, _) = await ManageableAsync();
+
+        Wire(await ExecuteAsync(processor, "a1 DELETE Archive"))
+            .ShouldBe("a1 OK DELETE completed\r\n");
+
+        Wire(await ExecuteAsync(processor, "a2 LIST \"\" \"*\"")).ShouldNotContain("Archive");
+    }
+
+    /// <summary>
+    /// §6.3.4: "It is an error to attempt to delete INBOX or a mailbox name that does not exist."
+    /// </summary>
+    [Theory]
+    [InlineData("a1 DELETE INBOX")]
+    [InlineData("a1 DELETE Nowhere")]
+    public async Task Delete_refuses_the_inbox_and_the_absent(string line)
+    {
+        (ImapCommandProcessor processor, _) = await ManageableAsync();
+
+        Wire(await ExecuteAsync(processor, line)).ShouldContain("a1 NO ");
+    }
+
+    /// <summary>
+    /// §6.3.4's MUST: "The DELETE command MUST NOT remove inferior hierarchical names. For
+    /// example, if a mailbox "foo" has an inferior "foo.bar" […] removing "foo" MUST NOT remove
+    /// "foo.bar"." And what the name becomes: "the name will acquire the \Noselect mailbox name
+    /// attribute" — which needs no code, because a name with no row is exactly what this server
+    /// reports \Noselect for.
+    /// </summary>
+    [Fact]
+    public async Task Delete_leaves_inferior_names_alone_and_the_parent_becomes_unselectable()
+    {
+        (ImapCommandProcessor processor, _) = await ManageableAsync();
+
+        await ExecuteAsync(processor, "a1 CREATE foo/bar");
+        await ExecuteAsync(processor, "a2 DELETE foo");
+
+        string all = Wire(await ExecuteAsync(processor, "a3 LIST \"\" \"*\""));
+        all.ShouldContain("\"/\" foo/bar\r\n");
+
+        string levels = Wire(await ExecuteAsync(processor, "a4 LIST \"\" \"%\""));
+        levels.ShouldContain("* LIST (\\Noselect \\HasChildren) \"/\" foo\r\n");
+    }
+
+    [Fact]
+    public async Task Rename_moves_the_folder()
+    {
+        (ImapCommandProcessor processor, _) = await ManageableAsync();
+
+        Wire(await ExecuteAsync(processor, "a1 RENAME Archive Attic"))
+            .ShouldBe("a1 OK RENAME completed\r\n");
+
+        string wire = Wire(await ExecuteAsync(processor, "a2 LIST \"\" \"*\""));
+
+        wire.ShouldContain("\"/\" Attic\r\n");
+        wire.ShouldNotContain("Archive");
+    }
+
+    /// <summary>
+    /// §6.3.5's MUST: "If the name has inferior hierarchical names, then the inferior
+    /// hierarchical names MUST also be renamed. For example, a rename of "foo" to "zap" will
+    /// rename "foo/bar" […] to "zap/bar"."
+    /// </summary>
+    [Fact]
+    public async Task Rename_carries_the_whole_subtree()
+    {
+        (ImapCommandProcessor processor, _) = await ManageableAsync();
+
+        await ExecuteAsync(processor, "a1 CREATE foo/bar");
+        await ExecuteAsync(processor, "a2 CREATE foo/bar/baz");
+        await ExecuteAsync(processor, "a3 RENAME foo zap");
+
+        string wire = Wire(await ExecuteAsync(processor, "a4 LIST \"\" \"*\""));
+
+        wire.ShouldContain("\"/\" zap\r\n");
+        wire.ShouldContain("\"/\" zap/bar\r\n");
+        wire.ShouldContain("\"/\" zap/bar/baz\r\n");
+        wire.ShouldNotContain("foo");
+    }
+
+    /// <summary>
+    /// A sibling whose name merely starts the same way is not part of the subtree — the same
+    /// prefix-versus-child distinction ParentsAmong makes.
+    /// </summary>
+    [Fact]
+    public async Task Rename_does_not_carry_a_sibling_with_a_shared_prefix()
+    {
+        (ImapCommandProcessor processor, _) = await ManageableAsync();
+
+        await ExecuteAsync(processor, "a1 CREATE Work");
+        await ExecuteAsync(processor, "a2 CREATE Workshop");
+        await ExecuteAsync(processor, "a3 RENAME Work Labour");
+
+        string wire = Wire(await ExecuteAsync(processor, "a4 LIST \"\" \"*\""));
+
+        wire.ShouldContain("\"/\" Labour\r\n");
+        wire.ShouldContain("\"/\" Workshop\r\n");
+    }
+
+    /// <summary>
+    /// §6.3.5: "Renaming INBOX is permitted, and has special behavior. It moves all messages in
+    /// INBOX to a new mailbox with the given name, leaving INBOX empty." Three things at once:
+    /// the inbox survives, it is emptied, and the messages arrive somewhere new.
+    /// </summary>
+    [Fact]
+    public async Task Renaming_the_inbox_moves_its_messages_and_leaves_it_in_place()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 2, specialUse: FolderSpecialUse.Inbox)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+
+        Wire(await ExecuteAsync(processor, "a1 RENAME INBOX old-mail")).ShouldContain("a1 OK ");
+
+        string wire = Wire(await ExecuteAsync(processor, "a2 LIST \"\" \"*\""));
+
+        // The inbox is still there - the RFC's own Z434 example lists it after the rename.
+        wire.ShouldContain("\"/\" INBOX\r\n");
+        wire.ShouldContain("\"/\" old-mail\r\n");
+
+        // And it is empty, while the messages are in the new mailbox.
+        await ExecuteAsync(processor, "a3 SELECT INBOX");
+        Wire(await ExecuteAsync(processor, "a4 FETCH 1:* UID"))
+            .ShouldBe("a4 OK FETCH completed\r\n");
+
+        await ExecuteAsync(processor, "a5 SELECT old-mail");
+        Wire(await ExecuteAsync(processor, "a6 FETCH 1:* UID")).ShouldContain("* 1 FETCH (UID 1)");
+    }
+
+    /// <summary>
+    /// §6.3.5: "It is an error to attempt to rename from a mailbox name that does not exist or to
+    /// a mailbox name that already exists."
+    /// </summary>
+    [Theory]
+    [InlineData("a1 RENAME Nowhere Somewhere")]
+    [InlineData("a1 RENAME Archive INBOX")]
+    public async Task Rename_refuses_an_absent_source_or_an_extant_target(string line)
+    {
+        (ImapCommandProcessor processor, _) = await ManageableAsync();
+
+        Wire(await ExecuteAsync(processor, line)).ShouldContain("a1 NO ");
+    }
+
+    [Fact]
+    public async Task Subscribe_then_lsub_reports_the_name()
+    {
+        (ImapCommandProcessor processor, _) = await ManageableAsync();
+
+        await ExecuteAsync(processor, "a1 CREATE Receipts");
+
+        Wire(await ExecuteAsync(processor, "a2 SUBSCRIBE Receipts"))
+            .ShouldBe("a2 OK SUBSCRIBE completed\r\n");
+
+        Wire(await ExecuteAsync(processor, "a3 LSUB \"\" \"*\"")).ShouldContain("\"/\" Receipts");
+    }
+
+    [Fact]
+    public async Task Unsubscribe_removes_it_again()
+    {
+        (ImapCommandProcessor processor, _) = await ManageableAsync();
+
+        await ExecuteAsync(processor, "a1 UNSUBSCRIBE Archive");
+
+        Wire(await ExecuteAsync(processor, "a2 LSUB \"\" \"*\"")).ShouldNotContain("Archive");
+    }
+
+    /// <summary>
+    /// §6.3.6's MUST NOT: a server "MUST NOT unilaterally remove an existing mailbox name from
+    /// the subscription list even if a mailbox by that name no longer exists", because "a server
+    /// site can choose to routinely remove a mailbox with a well-known name […] with the
+    /// intention of recreating it when new contents are appropriate". This is why subscriptions
+    /// are a table of names rather than a flag on a folder row.
+    /// </summary>
+    [Fact]
+    public async Task A_subscription_survives_the_deletion_of_the_mailbox_it_names()
+    {
+        (ImapCommandProcessor processor, _) = await ManageableAsync();
+
+        await ExecuteAsync(processor, "a1 CREATE system-alerts");
+        await ExecuteAsync(processor, "a2 SUBSCRIBE system-alerts");
+        await ExecuteAsync(processor, "a3 DELETE system-alerts");
+
+        // Gone from LIST, which reports mailboxes...
+        Wire(await ExecuteAsync(processor, "a4 LIST \"\" \"*\"")).ShouldNotContain("system-alerts");
+
+        // ...and still in LSUB, which reports the subscription list. \Noselect because §7.2.2
+        // defines it as "not possible to use this name as a selectable mailbox", which is true.
+        Wire(await ExecuteAsync(processor, "a5 LSUB \"\" \"*\""))
+            .ShouldContain("* LSUB (\\Noselect) \"/\" system-alerts\r\n");
+    }
+
+    /// <summary>
+    /// §6.3.6: "A server MAY validate the mailbox argument to SUBSCRIBE to verify that it
+    /// exists." This server takes the option, because a typo that silently succeeds leaves a user
+    /// with a folder list that never populates.
+    /// </summary>
+    [Fact]
+    public async Task Subscribing_to_a_name_that_does_not_exist_is_refused()
+    {
+        (ImapCommandProcessor processor, _) = await ManageableAsync();
+
+        Wire(await ExecuteAsync(processor, "a1 SUBSCRIBE Nowhere")).ShouldContain("a1 NO ");
+    }
+
+    /// <summary>
+    /// Unsubscribing must NOT validate: the list has to be able to name something that is gone,
+    /// or a user could never stop following a deleted mailbox.
+    /// </summary>
+    [Fact]
+    public async Task Unsubscribing_from_a_name_that_does_not_exist_succeeds()
+    {
+        (ImapCommandProcessor processor, _) = await ManageableAsync();
+
+        Wire(await ExecuteAsync(processor, "a1 UNSUBSCRIBE Nowhere")).ShouldContain("a1 OK ");
+    }
+
+    [Theory]
+    [InlineData("a1 CREATE")]
+    [InlineData("a1 DELETE")]
+    [InlineData("a1 RENAME Archive")]
+    [InlineData("a1 SUBSCRIBE")]
+    [InlineData("a1 CREATE one two")]
+    [InlineData("a1 RENAME a b c")]
+    public async Task A_malformed_folder_command_earns_a_tagged_bad(string line)
+    {
+        (ImapCommandProcessor processor, _) = await ManageableAsync();
+
+        Wire(await ExecuteAsync(processor, line)).ShouldContain("a1 BAD ");
+    }
+
+    [Fact]
+    public async Task A_folder_name_that_is_not_modified_utf7_is_refused_without_being_echoed()
+    {
+        (ImapCommandProcessor processor, _) = await ManageableAsync();
+
+        string wire = Wire(await ExecuteAsync(processor, "a1 CREATE \"&Jj_-\""));
+
+        wire.ShouldContain("a1 NO ");
+        wire.ShouldNotContain("&Jj_-");
     }
 }
