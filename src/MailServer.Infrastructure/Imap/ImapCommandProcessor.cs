@@ -130,6 +130,9 @@ public sealed class ImapCommandProcessor
     /// </remarks>
     private readonly IClock _clock;
 
+    /// <summary>Where a message's octets live. Null until a listener supplies one.</summary>
+    private readonly IMessageStore? _messages;
+
     /// <summary>The mechanism mid-exchange, or null when no <c>AUTHENTICATE</c> is in flight.</summary>
     private ISaslMechanism? _mechanism;
 
@@ -149,7 +152,8 @@ public sealed class ImapCommandProcessor
         IMailboxAuthenticator? authenticator = null,
         IImapMailboxReader? mailboxes = null,
     IImapMailboxWriter? writer = null,
-    IClock? clock = null)
+    IClock? clock = null,
+    IMessageStore? messages = null)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(options);
@@ -169,6 +173,7 @@ public sealed class ImapCommandProcessor
         _mailboxes = mailboxes;
         _writer = writer;
         _clock = clock ?? new SystemClock();
+        _messages = messages;
     }
 
     /// <summary>The session this processor drives.</summary>
@@ -1130,22 +1135,47 @@ public sealed class ImapCommandProcessor
                 ImapResponses.Bad(command.Tag, "FETCH sequence set is not valid"));
         }
 
-        if (!ImapFetchItems.TryParseRequest(argument[split..], out IReadOnlyList<ImapFetchItem> items))
+        if (!ImapFetchItems.TryParseRequestItems(
+            argument[split..],
+            out IReadOnlyList<ImapFetchRequestItem> requested))
         {
             return ImapCommandResult.Single(ImapResponses.Bad(
                 command.Tag,
                 "FETCH expects a data item, a macro, or a parenthesised list of data items"));
         }
 
-        foreach (ImapFetchItem item in items)
+        foreach (ImapFetchRequestItem item in requested)
         {
-            if (!ImapFetchItems.Available.Contains(item))
+            if (item.Item == ImapFetchItem.BodySection)
+            {
+                if (_messages is null)
+                {
+                    return NotImplemented(command);
+                }
+
+                // A numbered part or a MIME header needs the message's MIME tree walked, which
+                // is not built yet. §6.4.5 separates that from a syntax error - "NO - fetch
+                // error: can't fetch that data" - so the item is named rather than the command
+                // called malformed.
+                if (item.Section!.NeedsMimeTree)
+                {
+                    return ImapCommandResult.Single(ImapResponses.No(
+                        command.Tag,
+                        $"FETCH of {item.Section.Format()} is not implemented yet"));
+                }
+
+                continue;
+            }
+
+            if (!ImapFetchItems.Available.Contains(item.Item))
             {
                 return ImapCommandResult.Single(ImapResponses.No(
                     command.Tag,
-                    $"FETCH of {ImapFetchItems.NameOf(item)} is not implemented yet"));
+                    $"FETCH of {ImapFetchItems.NameOf(item.Item)} is not implemented yet"));
             }
         }
+
+        IReadOnlyList<ImapFetchItem> items = [.. requested.Select(r => r.Item)];
 
         IReadOnlyList<ImapMessageSummary> summaries = await _mailboxes
             .ReadSummariesAsync(
@@ -1165,11 +1195,144 @@ public sealed class ImapCommandProcessor
             reported.Add(ImapFetchItem.Uid);
         }
 
+        bool wantsBody = requested.Any(r => r.Item == ImapFetchItem.BodySection);
+
+        if (!wantsBody)
+        {
+            List<ImapResponse> plain = [];
+
+            foreach (ImapMessageSummary summary in summaries)
+            {
+                plain.Add(ImapResponses.Fetch(summary.SequenceNumber, reported, summary));
+            }
+
+            plain.Add(ImapResponses.Ok(
+                command.Tag,
+                command.IsUid ? "UID FETCH completed" : "FETCH completed"));
+
+            return new ImapCommandResult(plain, ImapSessionAction.Continue);
+        }
+
+        return await FetchWithBodyAsync(command, requested, reported, summaries, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The <c>FETCH</c> path that reads message content.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A <c>BODY[…]</c> without <c>.PEEK</c> sets <c>\Seen</c>, and the response says so.</b>
+    /// RFC 3501 §6.4.5: "The \Seen flag is implicitly set; if this causes the flags to change,
+    /// they SHOULD be included as part of the FETCH responses." A client that opened a message
+    /// and was not told it became read would show it unread until its next synchronisation, and
+    /// would then show a change the user did not make.
+    /// </para>
+    /// <para>
+    /// <b>The flag is set before the content is read back</b>, so the flags reported are the
+    /// flags the message now has rather than the ones it had a moment ago.
+    /// </para>
+    /// <para>
+    /// A message whose octets are missing from the store answers <c>NIL</c> rather than failing
+    /// the command. §9's <c>nstring</c> has that form for exactly this, and a folder with one
+    /// unreadable message should still open.
+    /// </para>
+    /// </remarks>
+    private async ValueTask<ImapCommandResult> FetchWithBodyAsync(
+        ImapCommand command,
+        IReadOnlyList<ImapFetchRequestItem> requested,
+        IReadOnlyList<ImapFetchItem> reported,
+        IReadOnlyList<ImapMessageSummary> summaries,
+        CancellationToken cancellationToken)
+    {
+        MailboxId mailboxId = _session.AuthenticatedMailboxId!.Value;
+        MailboxFolderId folderId = _session.SelectedFolderId!.Value;
+
+        bool setsSeen =
+            !_session.IsSelectedReadOnly &&
+            requested.Any(r => r.Section is { Peek: false });
+
+        IReadOnlyList<ImapMessageSummary> current = summaries;
+
+        if (setsSeen && summaries.Count > 0 && _writer is not null)
+        {
+            long[] uids = [.. summaries.Select(m => m.Uid)];
+
+            if (ImapSequenceSet.TryParse(string.Join(',', uids), out ImapSequenceSet? touched))
+            {
+                IReadOnlyList<ImapMessageSummary> updated = await _writer
+                    .StoreFlagsAsync(
+                        mailboxId,
+                        folderId,
+                        touched,
+                        byUid: true,
+                        new ImapStoreRequest(
+                            ImapStoreMode.Add,
+                            Silent: true,
+                            MessageFlags.Seen,
+                            HadUnstorableFlags: false),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (updated.Count == summaries.Count)
+                {
+                    current = updated;
+                }
+            }
+        }
+
+        IReadOnlyDictionary<long, StoredMessageId> located = await _mailboxes!
+            .ReadMessageIdsAsync(
+                mailboxId,
+                folderId,
+                [.. current.Select(m => m.Uid)],
+                cancellationToken)
+            .ConfigureAwait(false);
+
         List<ImapResponse> responses = [];
 
-        foreach (ImapMessageSummary summary in summaries)
+        foreach (ImapMessageSummary summary in current)
         {
-            responses.Add(ImapResponses.Fetch(summary.SequenceNumber, reported, summary));
+            ReadOnlyMemory<byte> content = ReadOnlyMemory<byte>.Empty;
+            bool haveContent = false;
+
+            if (located.TryGetValue(summary.Uid, out StoredMessageId messageId))
+            {
+                content = await ReadMessageAsync(messageId, cancellationToken).ConfigureAwait(false);
+                haveContent = !content.IsEmpty;
+            }
+
+            List<ImapFetchPart> parts = [];
+
+            foreach (ImapFetchRequestItem item in requested)
+            {
+                if (item.Section is null)
+                {
+                    // A metadata item alongside a body one: rendered as text, then handed over
+                    // as octets so one response can carry both.
+                    if (summary.ValueOf(item.Item) is { } value)
+                    {
+                        parts.Add(ImapFetchPart.Metadata(
+                            $"{ImapFetchItems.NameOf(item.Item)} {value}"));
+                    }
+
+                    continue;
+                }
+
+                parts.Add(ImapFetchPart.Section(
+                    item.ResponseName,
+                    haveContent ? ImapBodySection.Extract(content, item.Section) : null));
+            }
+
+            // The implicit \Seen is only worth reporting when it changed something, and the
+            // reported flags come from the write above rather than from the request.
+            if (setsSeen && !reported.Contains(ImapFetchItem.Flags))
+            {
+                parts.Insert(0, ImapFetchPart.Metadata(
+                    $"FLAGS ({ImapFlagNames.Format(summary.Flags)})"));
+            }
+
+            responses.Add(ImapResponses.FetchWithLiterals(summary.SequenceNumber, parts));
         }
 
         responses.Add(ImapResponses.Ok(
@@ -1177,6 +1340,38 @@ public sealed class ImapCommandProcessor
             command.IsUid ? "UID FETCH completed" : "FETCH completed"));
 
         return new ImapCommandResult(responses, ImapSessionAction.Continue);
+    }
+
+    /// <summary>Reads a stored message whole, or nothing if it cannot be read.</summary>
+    /// <remarks>
+    /// Whole rather than streamed, which is a deliberate limit rather than an oversight: the
+    /// response shape needs the octet count before the first byte goes out, and §9's literal
+    /// cannot be written without it. docs/IMAP.md records what that costs on a large mailbox.
+    /// </remarks>
+    private async ValueTask<ReadOnlyMemory<byte>> ReadMessageAsync(
+        StoredMessageId messageId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using Stream stream = await _messages!
+                .OpenReadAsync(messageId, cancellationToken)
+                .ConfigureAwait(false);
+
+            using MemoryStream buffer = new();
+
+            await stream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
+
+            return buffer.ToArray();
+        }
+        catch (IOException ex)
+        {
+            // A row naming a file that is not there. Answered NIL rather than failing the
+            // command, so one damaged message does not make a folder unopenable.
+            _logger.LogWarning(ex, "A stored message could not be read for FETCH.");
+
+            return ReadOnlyMemory<byte>.Empty;
+        }
     }
 
     /// <summary>

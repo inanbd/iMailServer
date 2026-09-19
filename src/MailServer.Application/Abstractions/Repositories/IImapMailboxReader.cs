@@ -171,6 +171,29 @@ public interface IImapMailboxReader
         MailboxId mailboxId,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Which stored message each of these UIDs is a delivery of.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Separate from <see cref="ReadSummariesAsync"/> because most fetches never need it. A
+    /// client's synchronisation pass asks for flags and sizes across a whole folder; only a
+    /// fetch that actually wants content needs to know where the content is, and carrying the
+    /// identity on every summary would invite a caller to open a message it was not asked for.
+    /// </para>
+    /// <para>
+    /// The identity, not the content. Reading the octets is the message store's job, and keeping
+    /// that out of the repository is what stops a database round trip turning into file I/O
+    /// inside a transaction.
+    /// </para>
+    /// </remarks>
+    /// <param name="uids">The UIDs to resolve. Scoped to the folder and the mailbox.</param>
+    Task<IReadOnlyDictionary<long, StoredMessageId>> ReadMessageIdsAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        IReadOnlyList<long> uids,
+        CancellationToken cancellationToken);
+
     Task<IReadOnlyList<ImapMessageSummary>> ReadSummariesAsync(
         MailboxId mailboxId,
         MailboxFolderId folderId,

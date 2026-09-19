@@ -164,6 +164,49 @@ single span covering every range, with exact filtering in memory: a set may hold
 ranges, and turning those into a predicate would build a SQL string a client controls the length
 of.
 
+### Message content
+
+`BODY[]`, `BODY[HEADER]`, `BODY[TEXT]`, `BODY[HEADER.FIELDS (…)]`, `BODY[HEADER.FIELDS.NOT (…)]`,
+their `.PEEK` forms, `<origin.length>` partials, and the `RFC822`, `RFC822.HEADER` and
+`RFC822.TEXT` items §6.4.5 defines as equivalents. Numbered MIME parts and `BODY[n.MIME]` are
+refused by name pending the MIME tree; `ENVELOPE` and `BODYSTRUCTURE` likewise.
+
+**The octets go out as a literal and are never touched.** §9 types a body section's value an
+`nstring`, and a quoted string cannot hold CR, LF or an 8-bit octet — all of which a message is
+full of. The response is therefore a *sequence*: server text, the octets verbatim, more server
+text. Sanitising them would corrupt every attachment; re-encoding them as UTF-8 would corrupt
+every message that is not UTF-8.
+
+**An absent section is `NIL`, not `{0}`.** §9's `nstring` distinguishes them: `{0}` says the part
+exists and is empty, `NIL` says there is no such part. A message whose octets are missing from
+the store answers `NIL` rather than failing the command, so one damaged message does not make a
+folder unopenable.
+
+**A `BODY[…]` without `.PEEK` sets `\Seen`, and the response says so.** §6.4.5: "The \Seen flag
+is implicitly set; if this causes the flags to change, they SHOULD be included as part of the
+FETCH responses." The flag is set before the content is read back, so the flags reported are the
+ones the message now has. `BODY.PEEK[…]` is "An alternate form […] that does not implicitly set
+the \Seen flag", and an `EXAMINE`'d mailbox never acquires it either.
+
+Note which `RFC822` forms peek: §6.4.5 makes `RFC822.HEADER` equivalent to `BODY.PEEK[HEADER]`
+and `RFC822.TEXT` equivalent to `BODY[TEXT]`. Fetching a header alone does not mark a message
+read; fetching its text does. The contrast is the RFC's.
+
+**Header field subsets carry folded continuation lines.** RFC 2822 folds a long header onto
+following lines beginning with whitespace, and a subset that kept the first line of a folded
+`Subject` and dropped the rest would hand the client a truncated subject with no sign of it. The
+blank line is always appended, per §6.4.5: "the blank line is always included as part of header
+data, except in the case of a message which has no body and no blank line."
+
+**Both line endings are accepted when splitting header from body.** A stored message that arrived
+over SMTP is CRLF, but one written by another tool may be bare LF, and a scan recognising only
+CRLF would treat such a message as all header and no body.
+
+**Known limitation: a fetched message is read whole into memory.** The literal's octet count must
+be known before the first byte goes out, so the content cannot be streamed without buffering it
+anyway. That is per message rather than per folder, but a `FETCH 1:* BODY[]` over a large mailbox
+still holds one message at a time on top of the materialised response below.
+
 **Known limitation: the response is materialised, not streamed.** `FETCH 1:*` over a folder with
 a million messages builds a million response objects before any of them is written. That is
 within the current `ImapCommandResult` shape and is the next thing to change for large mailboxes.

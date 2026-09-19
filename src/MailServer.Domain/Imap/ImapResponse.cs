@@ -215,23 +215,145 @@ public sealed record ImapResponseCode(string Name, string? Argument)
 /// several responses, each written separately.
 /// </para>
 /// </remarks>
+/// <summary>
+/// One data item of a <c>FETCH</c> response that carries message content.
+/// </summary>
+/// <remarks>
+/// Three shapes, and conflating any two puts a malformed line on the wire. A metadata item is a
+/// complete <c>NAME value</c> pair already. A section with content is a name, then a literal. A
+/// section with none is a name, then <c>NIL</c> — which §9's <c>nstring</c> distinguishes from an
+/// empty literal: <c>{0}</c> says the part exists and is empty, <c>NIL</c> says there is no such
+/// part.
+/// </remarks>
+/// <param name="Text">
+/// The whole item for a metadata part, or just the data item name for a section.
+/// </param>
+/// <param name="Octets">The section's content, or null for <c>NIL</c>.</param>
+/// <param name="IsSection">
+/// Whether a value follows the name. False for a metadata item, whose value is already in
+/// <paramref name="Text"/>.
+/// </param>
+public sealed record ImapFetchPart(
+    string Text,
+    ReadOnlyMemory<byte>? Octets,
+    bool IsSection)
+{
+    /// <summary>A metadata item, already rendered as name and value.</summary>
+    public static ImapFetchPart Metadata(string text) => new(text, null, false);
+
+    /// <summary>A body section, with its octets or with none.</summary>
+    public static ImapFetchPart Section(string name, ReadOnlyMemory<byte>? octets) =>
+        new(name, octets, true);
+}
+
+/// <summary>
+/// One piece of a response: either text, or raw octets that must not be touched.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Message content cannot go through <see cref="ImapResponse.Format"/>, and this is why the
+/// type exists.</b> That method sanitises its text to printable ASCII, which is exactly right for
+/// everything a server composes and exactly wrong for a message body: RFC 3501 §6.3.11 permits
+/// "8-bit characters […] in the message", and §7.4.2's <c>BODY[]</c> is "a string expressing the
+/// body contents", meaning the octets as stored. Sanitising them would silently corrupt every
+/// attachment, and re-encoding them as UTF-8 would corrupt every message that is not UTF-8.
+/// </para>
+/// <para>
+/// So a response that carries a literal is a sequence: server text, the octets verbatim, more
+/// server text. The writer emits each in turn and encodes only the text.
+/// </para>
+/// </remarks>
+public readonly record struct ImapResponseSegment
+{
+    private ImapResponseSegment(string? text, ReadOnlyMemory<byte> octets)
+    {
+        Text = text;
+        Octets = octets;
+    }
+
+    /// <summary>The text, when this is a text segment. Null otherwise.</summary>
+    public string? Text { get; }
+
+    /// <summary>The octets, when this is a literal segment. Empty otherwise.</summary>
+    public ReadOnlyMemory<byte> Octets { get; }
+
+    /// <summary>Whether this segment is text to be encoded rather than octets to be copied.</summary>
+    public bool IsText => Text is not null;
+
+    /// <summary>A segment of server-composed text.</summary>
+    public static ImapResponseSegment FromText(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+
+        return new ImapResponseSegment(text, default);
+    }
+
+    /// <summary>A segment of octets, written exactly as they are.</summary>
+    public static ImapResponseSegment FromOctets(ReadOnlyMemory<byte> octets) =>
+        new(null, octets);
+}
+
 public sealed record ImapResponse
 {
     /// <summary>Stands in for text that sanitised away to nothing.</summary>
     public const string EmptyTextPlaceholder = "(text omitted)";
+
+    private readonly IReadOnlyList<ImapResponseSegment>? _segments;
 
     private ImapResponse(
         ImapResponseKind kind,
         string? tag,
         ImapResponseStatus? status,
         ImapResponseCode? code,
-        string text)
+        string text,
+        IReadOnlyList<ImapResponseSegment>? segments = null)
     {
         Kind = kind;
         Tag = tag;
         Status = status;
         Code = code;
         Text = text;
+        _segments = segments;
+    }
+
+    /// <summary>
+    /// This response as the octets to write, in order.
+    /// </summary>
+    /// <remarks>
+    /// One text segment for an ordinary response, which is every response but a <c>FETCH</c>
+    /// carrying message content. A writer that iterates this handles both without knowing which
+    /// it has.
+    /// </remarks>
+    public IReadOnlyList<ImapResponseSegment> Segments =>
+        _segments ?? [ImapResponseSegment.FromText(Format())];
+
+    /// <summary>Whether this response carries octets that must not be re-encoded.</summary>
+    public bool HasLiterals => _segments is not null;
+
+    /// <summary>
+    /// An untagged data response built from segments, for content that cannot be sanitised.
+    /// </summary>
+    /// <remarks>
+    /// The text segments are composed by this server - a keyword, a section specifier this server
+    /// re-rendered from its own parse, a literal header - so they are safe by construction rather
+    /// than by sanitisation. Nothing a client sent reaches them unexamined.
+    /// </remarks>
+    public static ImapResponse Segmented(IReadOnlyList<ImapResponseSegment> segments)
+    {
+        ArgumentNullException.ThrowIfNull(segments);
+
+        if (segments.Count == 0)
+        {
+            throw new ArgumentException("A response needs at least one segment.", nameof(segments));
+        }
+
+        return new ImapResponse(
+            ImapResponseKind.Untagged,
+            null,
+            null,
+            null,
+            "(literal)",
+            segments);
     }
 
     /// <summary>Which line shape this is.</summary>
@@ -860,6 +982,85 @@ public static class ImapResponses
     public static ImapResponse Namespace() =>
         ImapResponse.Data(
             $"NAMESPACE ((\"\" \"{Entities.MailboxFolder.PathSeparator}\")) NIL NIL");
+
+    /// <summary>
+    /// <c>* n FETCH (…)</c> where one or more items carry message octets.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The octets go out as a literal, which is the only form §9 offers for them.</b>
+    /// <c>msg-att-static</c> types a body section's value as an <c>nstring</c>, and a quoted
+    /// string cannot hold CR, LF or an 8-bit octet — all of which a message is full of. So the
+    /// value is <c>{n}CRLF</c> followed by exactly <c>n</c> octets, and the count is in octets
+    /// rather than characters because that is what the client will read.
+    /// </para>
+    /// <para>
+    /// <b>An absent section is <c>NIL</c>, not an empty literal.</b> §9's <c>nstring</c> is
+    /// "string / nil", and a client told <c>{0}</c> has been handed an empty part that exists,
+    /// where <c>NIL</c> says there is no such part. They are different answers and clients act
+    /// on the difference.
+    /// </para>
+    /// </remarks>
+    /// <param name="sequenceNumber">The message's position in the folder, from 1.</param>
+    /// <param name="parts">The items, in the order the client asked for them.</param>
+    public static ImapResponse FetchWithLiterals(
+        long sequenceNumber,
+        IReadOnlyList<ImapFetchPart> parts)
+    {
+        ArgumentNullException.ThrowIfNull(parts);
+        ArgumentOutOfRangeException.ThrowIfLessThan(sequenceNumber, 1);
+
+        if (parts.Count == 0)
+        {
+            throw new ArgumentException(
+                "A FETCH response must carry at least one data item; RFC 3501 §9's msg-att has " +
+                "no empty form.",
+                nameof(parts));
+        }
+
+        List<ImapResponseSegment> segments = [];
+        StringBuilder head = new();
+
+        head.Append(CultureInfo.InvariantCulture, $"* {sequenceNumber} FETCH (");
+
+        for (int i = 0; i < parts.Count; i++)
+        {
+            ImapFetchPart part = parts[i];
+
+            if (i > 0)
+            {
+                head.Append(' ');
+            }
+
+            // A metadata item is already a complete "NAME value" pair and carries no literal.
+            // Appending NIL after it would put a second value under one name.
+            if (!part.IsSection)
+            {
+                head.Append(part.Text);
+                continue;
+            }
+
+            head.Append(part.Text).Append(' ');
+
+            if (part.Octets is null)
+            {
+                head.Append("NIL");
+                continue;
+            }
+
+            head.Append(CultureInfo.InvariantCulture, $"{{{part.Octets.Value.Length}}}\r\n");
+
+            segments.Add(ImapResponseSegment.FromText(head.ToString()));
+            head.Clear();
+
+            segments.Add(ImapResponseSegment.FromOctets(part.Octets.Value));
+        }
+
+        head.Append(")\r\n");
+        segments.Add(ImapResponseSegment.FromText(head.ToString()));
+
+        return ImapResponse.Segmented(segments);
+    }
 
     /// <summary><c>* FLAGS (…)</c> — the flags defined in the selected mailbox. RFC 3501 §7.2.6.</summary>
     public static ImapResponse Flags(MessageFlags flags) =>

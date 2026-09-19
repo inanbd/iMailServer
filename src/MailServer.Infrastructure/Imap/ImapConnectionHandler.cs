@@ -71,6 +71,7 @@ public sealed class ImapConnectionHandler(
     IImapMailboxReader mailboxes,
     IImapMailboxWriter writer,
     IClock clock,
+    IMessageStore messageStore,
     ILogger<ImapConnectionHandler> logger)
 {
     /// <summary>Handles one connection to completion.</summary>
@@ -115,7 +116,7 @@ public sealed class ImapConnectionHandler(
             ImapSessionContext session = new(remoteAddress, startedAt, implicitTls);
 
             ImapCommandProcessor processor =
-                new(session, options.Processor, logger, authenticator, mailboxes, writer, clock);
+                new(session, options.Processor, logger, authenticator, mailboxes, writer, clock, messageStore);
 
             ImapLineReader reader = new(stream, options.MaxLineOctets);
 
@@ -444,16 +445,41 @@ public sealed class ImapConnectionHandler(
         IReadOnlyList<ImapResponse> responses,
         CancellationToken cancellationToken)
     {
+        // Segment by segment rather than one concatenated string, because a FETCH carrying
+        // message content must put those octets on the wire untouched - see ImapResponseSegment.
+        // Text is still batched between literals, so an ordinary exchange is one write.
         StringBuilder builder = new();
 
         foreach (ImapResponse response in responses)
         {
-            builder.Append(response.Format());
+            foreach (ImapResponseSegment segment in response.Segments)
+            {
+                if (segment.IsText)
+                {
+                    builder.Append(segment.Text);
+                    continue;
+                }
+
+                if (builder.Length > 0)
+                {
+                    await stream
+                        .WriteAsync(Encoding.UTF8.GetBytes(builder.ToString()), cancellationToken)
+                        .ConfigureAwait(false);
+
+                    builder.Clear();
+                }
+
+                await stream.WriteAsync(segment.Octets, cancellationToken).ConfigureAwait(false);
+            }
         }
 
-        byte[] octets = Encoding.UTF8.GetBytes(builder.ToString());
+        if (builder.Length > 0)
+        {
+            await stream
+                .WriteAsync(Encoding.UTF8.GetBytes(builder.ToString()), cancellationToken)
+                .ConfigureAwait(false);
+        }
 
-        await stream.WriteAsync(octets, cancellationToken).ConfigureAwait(false);
         await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 }

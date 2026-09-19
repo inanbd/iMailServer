@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using MailServer.Domain.Enums;
 
@@ -268,6 +269,33 @@ public static class ImapFetchItems
     /// </remarks>
     public static bool TryParseRequest(string text, out IReadOnlyList<ImapFetchItem> items)
     {
+        bool ok = TryParseRequestItems(text, out IReadOnlyList<ImapFetchRequestItem> parsed);
+
+        items = ok ? [.. parsed.Select(r => r.Item)] : [];
+
+        return ok;
+    }
+
+    /// <summary>
+    /// Parses the data-item argument, keeping each <c>BODY[…]</c>'s section specifier.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The form a handler needs, because <c>BODY[HEADER]</c> and <c>BODY[TEXT]</c> are the same
+    /// <see cref="ImapFetchItem"/> and different requests: the enum says which family the item
+    /// belongs to and the section says what was actually asked for.
+    /// </para>
+    /// <para>
+    /// <b>Duplicates are compared on the whole item, not just the family.</b>
+    /// <c>FETCH 1 (BODY[HEADER] BODY[TEXT])</c> asks for two different things and must be
+    /// answered twice; collapsing them the way a repeated <c>FLAGS</c> collapses would silently
+    /// drop half the request.
+    /// </para>
+    /// </remarks>
+    public static bool TryParseRequestItems(
+        string text,
+        out IReadOnlyList<ImapFetchRequestItem> items)
+    {
         ArgumentNullException.ThrowIfNull(text);
 
         items = [];
@@ -293,11 +321,11 @@ public static class ImapFetchItems
 
             if (TryParseMacro(trimmed, out IReadOnlyList<ImapFetchItem> expanded))
             {
-                items = expanded;
+                items = [.. expanded.Select(i => new ImapFetchRequestItem(i, null))];
                 return true;
             }
 
-            if (!TryParse(trimmed, out ImapFetchItem single))
+            if (!TryParseOne(trimmed, out ImapFetchRequestItem? single))
             {
                 return false;
             }
@@ -317,24 +345,81 @@ public static class ImapFetchItems
             return false;
         }
 
-        List<ImapFetchItem> parsed = [];
+        List<ImapFetchRequestItem> parsed = [];
+        HashSet<string> seen = new(StringComparer.Ordinal);
 
         foreach (string name in names)
         {
             // Inside the brackets a macro is not a data item, so it does not parse and is not
             // quietly expanded. Refusing is the grammar's answer, not an interpretation of it.
-            if (!TryParse(name, out ImapFetchItem item))
+            if (!TryParseOne(name, out ImapFetchRequestItem? item))
             {
                 return false;
             }
 
-            if (!parsed.Contains(item))
+            if (seen.Add(item.Key))
             {
                 parsed.Add(item);
             }
         }
 
         items = parsed;
+        return true;
+    }
+
+    /// <summary>The body section an <c>RFC822</c> item is equivalent to, if it is one.</summary>
+    private static ImapSection? Equivalent(ImapFetchItem item) => item switch
+    {
+        ImapFetchItem.Rfc822 => new ImapSection(
+            ImapSectionKind.Full, [], [], Peek: false, null, null),
+
+        ImapFetchItem.Rfc822Header => new ImapSection(
+            ImapSectionKind.Header, [], [], Peek: true, null, null),
+
+        ImapFetchItem.Rfc822Text => new ImapSection(
+            ImapSectionKind.Text, [], [], Peek: false, null, null),
+
+        _ => null,
+    };
+
+    /// <summary>Parses one <c>fetch-att</c> token, section and all.</summary>
+    private static bool TryParseOne(
+        string name,
+        [NotNullWhen(true)] out ImapFetchRequestItem? item)
+    {
+        item = null;
+
+        if (!TryParse(name, out ImapFetchItem kind))
+        {
+            return false;
+        }
+
+        // §6.4.5 defines the RFC822 family in terms of body sections: "RFC822 - Functionally
+        // equivalent to BODY[]", "RFC822.HEADER - Functionally equivalent to BODY.PEEK[HEADER]",
+        // "RFC822.TEXT - Functionally equivalent to BODY[TEXT]". Note which one peeks: fetching
+        // the header alone does not mark a message read, and fetching its text does.
+        if (Equivalent(kind) is { } equivalent)
+        {
+            item = new ImapFetchRequestItem(
+                ImapFetchItem.BodySection,
+                equivalent,
+                ImapFetchItems.NameOf(kind));
+
+            return true;
+        }
+
+        if (kind != ImapFetchItem.BodySection)
+        {
+            item = new ImapFetchRequestItem(kind, null);
+            return true;
+        }
+
+        if (!ImapSection.TryParse(name, out ImapSection? section))
+        {
+            return false;
+        }
+
+        item = new ImapFetchRequestItem(kind, section);
         return true;
     }
 
@@ -425,6 +510,42 @@ public static class ImapFetchItems
 
         return true;
     }
+}
+
+/// <summary>
+/// One data item a <c>FETCH</c> asked for, with its section when it has one.
+/// </summary>
+/// <param name="Item">Which family of data item.</param>
+/// <param name="Section">
+/// The parsed <c>BODY[…]</c> specifier, or null for every other item.
+/// </param>
+public sealed record ImapFetchRequestItem(
+    ImapFetchItem Item,
+    ImapSection? Section,
+    string? ResponseNameOverride = null)
+{
+    /// <summary>
+    /// What makes two requested items the same request.
+    /// </summary>
+    /// <remarks>
+    /// The rendered item name, so <c>BODY[HEADER]</c> and <c>BODY[TEXT]</c> are distinct while a
+    /// repeated <c>FLAGS</c> still collapses. <c>BODY[X]</c> and <c>BODY.PEEK[X]</c> share a key
+    /// deliberately: they ask for the same octets and differ only in a side effect, so answering
+    /// twice would put the same data item on one line twice.
+    /// </remarks>
+    public string Key => Section?.Format() ?? ImapFetchItems.NameOf(Item);
+
+    /// <summary>
+    /// The data item name to write in the response.
+    /// </summary>
+    /// <remarks>
+    /// The <c>RFC822</c> family is served through a body section but must not be answered as
+    /// one. RFC 3501 §6.4.5 defines each as "Functionally equivalent to" a <c>BODY</c> form,
+    /// "differing in the syntax of the resulting untagged FETCH data (RFC822 is returned)" — so
+    /// the octets are found the same way and the name on the wire is the one the client used.
+    /// </remarks>
+    public string ResponseName =>
+        ResponseNameOverride ?? Section?.Format() ?? ImapFetchItems.NameOf(Item);
 }
 
 /// <summary>

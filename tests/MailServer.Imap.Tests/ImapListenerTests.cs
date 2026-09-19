@@ -41,6 +41,8 @@ public sealed class ImapListenerTests : IAsyncDisposable
         services.AddSingleton<IImapMailboxReader>(p => p.GetRequiredService<ScriptedImapMailboxReader>());
         services.AddSingleton<IImapMailboxWriter>(p => p.GetRequiredService<ScriptedImapMailboxReader>());
         services.AddSingleton<IClock, SystemClock>();
+        services.AddSingleton<IMessageStore>(p =>
+            new ScriptedMessageStore(p.GetRequiredService<ScriptedImapMailboxReader>()));
         services.AddScoped<ImapConnectionHandler>();
 
         _services = services.BuildServiceProvider();

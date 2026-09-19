@@ -131,6 +131,7 @@ public sealed class ImapWireTests : IDisposable
             store,
             store,
             new SystemClock(),
+            new ScriptedMessageStore(store),
             NullLogger<ImapConnectionHandler>.Instance);
 
         Task served = Task.Run(
@@ -667,6 +668,7 @@ public sealed class ImapWireTests : IDisposable
             store,
             store,
             new SystemClock(),
+            new ScriptedMessageStore(store),
             NullLogger<ImapConnectionHandler>.Instance);
 
         await Should.ThrowAsync<ArgumentNullException>(async () => await handler.HandleAsync(

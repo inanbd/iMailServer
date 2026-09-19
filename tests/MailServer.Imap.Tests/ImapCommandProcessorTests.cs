@@ -567,6 +567,65 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
             new ImapCopyResult(ImapFolderMutation.Done, removed, selected.Count));
     }
 
+    /// <summary>The stored octets of each message this fake knows, keyed by its identity.</summary>
+    public Dictionary<Guid, byte[]> Content { get; } = [];
+
+    /// <summary>Gives a message some content, so a BODY[] fetch has something to return.</summary>
+    public ScriptedImapMailboxReader WithContent(
+        MailboxId mailboxId,
+        string path,
+        long uid,
+        string message)
+    {
+        if (!_messages.TryGetValue((mailboxId.Value, path), out List<ImapMessageSummary>? all))
+        {
+            return this;
+        }
+
+        int index = all.FindIndex(m => m.Uid == uid);
+
+        if (index < 0)
+        {
+            return this;
+        }
+
+        Guid id = Guid.NewGuid();
+
+        _contentIds[(mailboxId.Value, path, uid)] = id;
+        Content[id] = System.Text.Encoding.ASCII.GetBytes(message);
+
+        return this;
+    }
+
+    private readonly Dictionary<(Guid Mailbox, string Path, long Uid), Guid> _contentIds = [];
+
+    public Task<IReadOnlyDictionary<long, StoredMessageId>> ReadMessageIdsAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        IReadOnlyList<long> uids,
+        CancellationToken cancellationToken)
+    {
+        KeyValuePair<(Guid Mailbox, string Path), Entry> owner = _folders
+            .FirstOrDefault(pair =>
+                pair.Value.Folder.Id.Value == folderId.Value &&
+                pair.Key.Mailbox == mailboxId.Value);
+
+        Dictionary<long, StoredMessageId> found = [];
+
+        if (owner.Value is not null)
+        {
+            foreach (long uid in uids)
+            {
+                if (_contentIds.TryGetValue((mailboxId.Value, owner.Key.Path, uid), out Guid id))
+                {
+                    found[uid] = new StoredMessageId(id);
+                }
+            }
+        }
+
+        return Task.FromResult<IReadOnlyDictionary<long, StoredMessageId>>(found);
+    }
+
     /// <summary>Every folder this fake was asked to expunge.</summary>
     public List<(Guid Mailbox, Guid Folder)> Expunged { get; } = [];
 
@@ -619,6 +678,35 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
     }
 }
 
+/// <summary>A message store serving the octets a <see cref="ScriptedImapMailboxReader"/> holds.</summary>
+/// <remarks>
+/// Paired with the reader rather than independent, so a test that gives a message content sees
+/// that content come back through the real FETCH path.
+/// </remarks>
+internal sealed class ScriptedMessageStore(ScriptedImapMailboxReader source) : IMessageStore
+{
+    public ValueTask<IMessageWriter> BeginWriteAsync(
+        long maxSizeBytes,
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException("Writing is not part of what these tests exercise.");
+
+    public ValueTask<Stream> OpenReadAsync(StoredMessageId id, CancellationToken cancellationToken)
+    {
+        if (!source.Content.TryGetValue(id.Value, out byte[]? octets))
+        {
+            throw new IOException($"No stored message {id.Value}.");
+        }
+
+        return ValueTask.FromResult<Stream>(new MemoryStream(octets, writable: false));
+    }
+
+    public ValueTask<bool> ExistsAsync(StoredMessageId id, CancellationToken cancellationToken) =>
+        ValueTask.FromResult(source.Content.ContainsKey(id.Value));
+
+    public ValueTask<bool> DeleteAsync(StoredMessageId id, CancellationToken cancellationToken) =>
+        ValueTask.FromResult(source.Content.Remove(id.Value));
+}
+
 public sealed class ImapCommandProcessorTests
 {
     private static readonly DateTimeOffset Start = new(2026, 3, 1, 9, 0, 0, TimeSpan.Zero);
@@ -641,7 +729,9 @@ public sealed class ImapCommandProcessorTests
             mailboxes,
 
             // The same object reads and writes, so a STORE's effect is visible to a later FETCH.
-            mailboxes);
+            mailboxes,
+            null,
+            mailboxes is null ? null : new ScriptedMessageStore(mailboxes));
 
     private static ImapCommand Parse(string line)
     {
@@ -652,8 +742,30 @@ public sealed class ImapCommandProcessorTests
     private static async Task<ImapCommandResult> ExecuteAsync(ImapCommandProcessor processor, string line) =>
         await processor.ExecuteAsync(Parse(line), CancellationToken.None);
 
-    private static string Wire(ImapCommandResult result) =>
-        string.Concat(result.Responses.Select(r => r.Format()));
+    /// <summary>The octets this result would put on the wire, as text.</summary>
+    /// <remarks>
+    /// Segment by segment, the way <c>ImapConnectionHandler.WriteAsync</c> does it — a response
+    /// carrying message content has no single <c>Format()</c>, because its literal octets must
+    /// not go through the sanitiser. Latin-1 is used to turn the octets back into characters so
+    /// that every byte survives the round trip and a test can assert on the exact content; it is
+    /// a test convenience, not a claim about the message's charset.
+    /// </remarks>
+    private static string Wire(ImapCommandResult result)
+    {
+        System.Text.StringBuilder builder = new();
+
+        foreach (ImapResponse response in result.Responses)
+        {
+            foreach (ImapResponseSegment segment in response.Segments)
+            {
+                builder.Append(segment.IsText
+                    ? segment.Text
+                    : System.Text.Encoding.Latin1.GetString(segment.Octets.Span));
+            }
+        }
+
+        return builder.ToString();
+    }
 
     // ---------------------------------------------------------------------------------------
     // The greeting.
@@ -2107,7 +2219,6 @@ public sealed class ImapCommandProcessorTests
     [Theory]
     [InlineData("a2 FETCH 1 ENVELOPE", "ENVELOPE")]
     [InlineData("a2 FETCH 1 BODYSTRUCTURE", "BODYSTRUCTURE")]
-    [InlineData("a2 FETCH 1 RFC822", "RFC822")]
     [InlineData("a2 FETCH 1 (FLAGS ENVELOPE)", "ENVELOPE")]
     [InlineData("a2 FETCH 1 ALL", "ENVELOPE")]
     [InlineData("a2 FETCH 1 FULL", "ENVELOPE")]
@@ -2121,13 +2232,23 @@ public sealed class ImapCommandProcessorTests
         wire.ShouldNotContain(" FETCH (");
     }
 
-    [Fact]
-    public async Task A_body_section_is_refused_by_name()
+    /// <summary>
+    /// A numbered part or a MIME header needs the message's MIME tree walked, which is a later
+    /// increment. §6.4.5 separates that from a syntax error — "NO - fetch error: can't fetch
+    /// that data" — so the item is named rather than the command called malformed.
+    /// </summary>
+    [Theory]
+    [InlineData("a2 FETCH 1 BODY[1]")]
+    [InlineData("a2 FETCH 1 BODY[1.2]")]
+    [InlineData("a2 FETCH 1 BODY[1.MIME]")]
+    [InlineData("a2 FETCH 1 BODY[1.TEXT]")]
+    public async Task A_section_needing_the_mime_tree_is_refused_by_name(string line)
     {
-        string wire = Wire(await ExecuteAsync(await FetchableAsync(), "a2 FETCH 1 BODY[HEADER]"));
+        string wire = Wire(await ExecuteAsync(await FetchableAsync(), line));
 
         wire.ShouldContain("a2 NO ");
         wire.ShouldContain("not implemented yet");
+        wire.ShouldNotContain("BAD");
     }
 
     [Theory]
@@ -2460,14 +2581,15 @@ public sealed class ImapCommandProcessorTests
     [InlineData("a2 FETCH 1 BODY[HEADER.FIELDS.NOT (RECEIVED)]")]
     [InlineData("a2 UID FETCH 1:* (UID RFC822.SIZE FLAGS BODY.PEEK[HEADER.FIELDS (From To)])")]
     [InlineData("a2 FETCH 1 (FLAGS BODY[HEADER.FIELDS (DATE)])")]
-    public async Task A_section_specifier_containing_a_space_is_refused_by_name_not_as_a_syntax_error(
+    public async Task A_section_specifier_containing_a_space_is_a_request_and_not_a_syntax_error(
         string line)
     {
+        // The shape a real client sends on every folder open. It used to be torn apart by a
+        // split on spaces and refused as malformed; it is now parsed and served.
         string wire = Wire(await ExecuteAsync(await FetchableAsync(), line));
 
-        wire.ShouldContain("a2 NO ");
-        wire.ShouldContain("not implemented yet");
         wire.ShouldNotContain("BAD");
+        wire.ShouldContain("a2 OK ");
     }
 
     /// <summary>
@@ -3332,5 +3454,338 @@ public sealed class ImapCommandProcessorTests
         ImapCommandProcessor processor = await CopyableAsync();
 
         Wire(await ExecuteAsync(processor, "a2 CAPABILITY")).ShouldContain("MOVE");
+    }
+    // ---------------------------------------------------------------------------------------
+    // FETCH of message content. RFC 3501 §6.4.5.
+    // ---------------------------------------------------------------------------------------
+
+    private const string StoredMessage =
+        "Date: Mon, 7 Feb 2026 21:52:25 -0800\r\n" +
+        "From: Alice <alice@example.com>\r\n" +
+        "Subject: hello\r\n" +
+        "\r\n" +
+        "This is the body.\r\n";
+
+    private static async Task<(ImapCommandProcessor Processor, ScriptedImapMailboxReader Store)>
+        ReadableAsync()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 1, specialUse: FolderSpecialUse.Inbox)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 7);
+
+        mailboxes.WithContent(authenticator.KnownMailboxId, "INBOX", uid: 7, StoredMessage);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+
+        return (processor, mailboxes);
+    }
+
+    /// <summary>
+    /// The whole message, as a literal. §9 types a body section's value an nstring, and a quoted
+    /// string cannot hold CR, LF or an 8-bit octet — so the only available form is {n}CRLF
+    /// followed by exactly n octets.
+    /// </summary>
+    [Fact]
+    public async Task A_body_fetch_returns_the_message_as_a_literal()
+    {
+        (ImapCommandProcessor processor, _) = await ReadableAsync();
+
+        string wire = Wire(await ExecuteAsync(processor, "a2 FETCH 1 BODY.PEEK[]"));
+
+        wire.ShouldBe(
+            $"* 1 FETCH (BODY[] {{{StoredMessage.Length}}}\r\n{StoredMessage})\r\n" +
+            "a2 OK FETCH completed\r\n");
+    }
+
+    [Fact]
+    public async Task A_header_fetch_returns_the_header_and_its_blank_line()
+    {
+        (ImapCommandProcessor processor, _) = await ReadableAsync();
+
+        string wire = Wire(await ExecuteAsync(processor, "a2 FETCH 1 BODY.PEEK[HEADER]"));
+
+        wire.ShouldContain("BODY[HEADER] {");
+        wire.ShouldContain("Subject: hello\r\n\r\n");
+        wire.ShouldNotContain("This is the body");
+    }
+
+    [Fact]
+    public async Task A_text_fetch_returns_the_body_alone()
+    {
+        (ImapCommandProcessor processor, _) = await ReadableAsync();
+
+        string wire = Wire(await ExecuteAsync(processor, "a2 FETCH 1 BODY.PEEK[TEXT]"));
+
+        wire.ShouldBe(
+            "* 1 FETCH (BODY[TEXT] {19}\r\nThis is the body.\r\n)\r\n" +
+            "a2 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// The shape a real client opens a folder with. §6.4.5's field matching "is case-insensitive
+    /// but otherwise exact".
+    /// </summary>
+    [Fact]
+    public async Task A_header_field_subset_returns_only_those_fields()
+    {
+        (ImapCommandProcessor processor, _) = await ReadableAsync();
+
+        string wire = Wire(await ExecuteAsync(
+            processor,
+            "a2 FETCH 1 BODY.PEEK[HEADER.FIELDS (subject)]"));
+
+        wire.ShouldContain("BODY[HEADER.FIELDS (subject)] {18}\r\nSubject: hello\r\n\r\n");
+    }
+
+    /// <summary>
+    /// §9's msg-att-static has "BODY" section and no BODY.PEEK: the peek is a property of the
+    /// request, never of the answer.
+    /// </summary>
+    [Fact]
+    public async Task The_response_never_echoes_peek()
+    {
+        (ImapCommandProcessor processor, _) = await ReadableAsync();
+
+        Wire(await ExecuteAsync(processor, "a2 FETCH 1 BODY.PEEK[TEXT]"))
+            .ShouldNotContain("PEEK");
+    }
+
+    /// <summary>
+    /// §6.4.5: "The \Seen flag is implicitly set; if this causes the flags to change, they SHOULD
+    /// be included as part of the FETCH responses." A client that opened a message and was not
+    /// told it became read would show it unread until its next synchronisation.
+    /// </summary>
+    [Fact]
+    public async Task A_non_peek_body_fetch_sets_seen_and_reports_the_new_flags()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 1)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 7);
+
+        mailboxes.WithContent(authenticator.KnownMailboxId, "INBOX", uid: 7, StoredMessage);
+
+        // Deliver() marks messages \Seen, so clear it to observe the implicit set.
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+        await ExecuteAsync(processor, @"a2 STORE 1 -FLAGS.SILENT (\Seen)");
+
+        string wire = Wire(await ExecuteAsync(processor, "a3 FETCH 1 BODY[TEXT]"));
+
+        wire.ShouldContain("FLAGS (\\Seen)");
+
+        // And it stuck.
+        Wire(await ExecuteAsync(processor, "a4 FETCH 1 FLAGS")).ShouldContain("(FLAGS (\\Seen))");
+    }
+
+    /// <summary>
+    /// §6.4.5: BODY.PEEK is "An alternate form of BODY[&lt;section&gt;] that does not implicitly
+    /// set the \Seen flag."
+    /// </summary>
+    [Fact]
+    public async Task A_peek_fetch_does_not_set_seen()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 1)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 7);
+
+        mailboxes.WithContent(authenticator.KnownMailboxId, "INBOX", uid: 7, StoredMessage);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+        await ExecuteAsync(processor, @"a2 STORE 1 -FLAGS.SILENT (\Seen)");
+        await ExecuteAsync(processor, "a3 FETCH 1 BODY.PEEK[TEXT]");
+
+        Wire(await ExecuteAsync(processor, "a4 FETCH 1 FLAGS")).ShouldContain("(FLAGS ())");
+    }
+
+    /// <summary>
+    /// §6.3.2 permits no change to the permanent state of a read-only mailbox, so an EXAMINE'd
+    /// folder must not acquire \Seen from a fetch either.
+    /// </summary>
+    [Fact]
+    public async Task A_body_fetch_on_an_examined_mailbox_does_not_set_seen()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 1)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 7);
+
+        mailboxes.WithContent(authenticator.KnownMailboxId, "INBOX", uid: 7, StoredMessage);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+        await ExecuteAsync(processor, @"a2 STORE 1 -FLAGS.SILENT (\Seen)");
+        await ExecuteAsync(processor, "a3 EXAMINE INBOX");
+        await ExecuteAsync(processor, "a4 FETCH 1 BODY[TEXT]");
+
+        Wire(await ExecuteAsync(processor, "a5 FETCH 1 FLAGS")).ShouldContain("(FLAGS ())");
+    }
+
+    [Fact]
+    public async Task A_partial_fetch_returns_the_substring_and_echoes_the_origin()
+    {
+        (ImapCommandProcessor processor, _) = await ReadableAsync();
+
+        Wire(await ExecuteAsync(processor, "a2 FETCH 1 BODY.PEEK[TEXT]<0.4>")).ShouldBe(
+            "* 1 FETCH (BODY[TEXT]<0> {4}\r\nThis)\r\n" +
+            "a2 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// Metadata and content in one response, which is what a client asks for in practice.
+    /// </summary>
+    [Fact]
+    public async Task Metadata_and_content_come_back_on_one_line()
+    {
+        (ImapCommandProcessor processor, _) = await ReadableAsync();
+
+        string wire = Wire(await ExecuteAsync(
+            processor,
+            "a2 UID FETCH 7 (UID RFC822.SIZE BODY.PEEK[HEADER.FIELDS (SUBJECT)])"));
+
+        wire.ShouldStartWith("* 1 FETCH (UID 7 RFC822.SIZE 700 BODY[HEADER.FIELDS (SUBJECT)] {18}\r\n");
+        wire.ShouldEndWith("a2 OK UID FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// §9's nstring has a NIL form, and a message whose octets are missing from the store is
+    /// exactly that: a folder with one damaged message should still open.
+    /// </summary>
+    [Fact]
+    public async Task A_message_with_no_stored_content_answers_nil()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 1)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 7);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+
+        Wire(await ExecuteAsync(processor, "a2 FETCH 1 BODY.PEEK[]")).ShouldBe(
+            "* 1 FETCH (BODY[] NIL)\r\n" +
+            "a2 OK FETCH completed\r\n");
+    }
+
+    /// <summary>
+    /// Two different sections in one request are two different data items and must both be
+    /// answered — collapsing them the way a repeated FLAGS collapses would drop half the request.
+    /// </summary>
+    [Fact]
+    public async Task Two_different_sections_are_both_answered()
+    {
+        (ImapCommandProcessor processor, _) = await ReadableAsync();
+
+        string wire = Wire(await ExecuteAsync(
+            processor,
+            "a2 FETCH 1 (BODY.PEEK[HEADER] BODY.PEEK[TEXT])"));
+
+        wire.ShouldContain("BODY[HEADER] {");
+        wire.ShouldContain("BODY[TEXT] {");
+    }
+    /// <summary>
+    /// §6.4.5 defines the RFC822 family by equivalence — "RFC822 — Functionally equivalent to
+    /// BODY[], differing in the syntax of the resulting untagged FETCH data (RFC822 is
+    /// returned)" — so the octets are found the same way and the name on the wire is the one the
+    /// client used.
+    /// </summary>
+    [Theory]
+    [InlineData("RFC822", "This is the body.")]
+    [InlineData("RFC822.HEADER", "Subject: hello")]
+    [InlineData("RFC822.TEXT", "This is the body.")]
+    public async Task The_rfc822_family_returns_content_under_its_own_name(
+        string item,
+        string expected)
+    {
+        (ImapCommandProcessor processor, _) = await ReadableAsync();
+
+        string wire = Wire(await ExecuteAsync(processor, $"a2 FETCH 1 {item}"));
+
+        wire.ShouldContain($"{item} {{");
+        wire.ShouldContain(expected);
+        wire.ShouldNotContain("BODY[");
+    }
+
+    /// <summary>
+    /// §6.4.5: "RFC822.HEADER — Functionally equivalent to BODY.PEEK[HEADER]". The peek is part
+    /// of the definition, so fetching a header alone must not mark the message read.
+    /// </summary>
+    [Fact]
+    public async Task Rfc822_header_does_not_set_seen()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 1)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 7);
+
+        mailboxes.WithContent(authenticator.KnownMailboxId, "INBOX", uid: 7, StoredMessage);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+        await ExecuteAsync(processor, @"a2 STORE 1 -FLAGS.SILENT (\Seen)");
+        await ExecuteAsync(processor, "a3 FETCH 1 RFC822.HEADER");
+
+        Wire(await ExecuteAsync(processor, "a4 FETCH 1 FLAGS")).ShouldContain("(FLAGS ())");
+    }
+
+    /// <summary>
+    /// §6.4.5: "RFC822.TEXT — Functionally equivalent to BODY[TEXT]" — no peek, so it does mark
+    /// the message read. The contrast with RFC822.HEADER is the RFC's, not an inconsistency.
+    /// </summary>
+    [Fact]
+    public async Task Rfc822_text_does_set_seen()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", existsCount: 1)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 7);
+
+        mailboxes.WithContent(authenticator.KnownMailboxId, "INBOX", uid: 7, StoredMessage);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
+        await ExecuteAsync(processor, "a1 SELECT INBOX");
+        await ExecuteAsync(processor, @"a2 STORE 1 -FLAGS.SILENT (\Seen)");
+        await ExecuteAsync(processor, "a3 FETCH 1 RFC822.TEXT");
+
+        Wire(await ExecuteAsync(processor, "a4 FETCH 1 FLAGS")).ShouldContain("(FLAGS (\\Seen))");
     }
 }

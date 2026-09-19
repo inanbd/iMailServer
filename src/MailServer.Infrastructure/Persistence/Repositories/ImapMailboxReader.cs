@@ -371,6 +371,72 @@ internal sealed class ImapMailboxReader(
         ORDER BY Ordered.Seq
         """;
 
+    private const string SelectMessageIds = """
+        SELECT  Uid, MessageId
+        FROM    Deliveries
+        WHERE   FolderId = @FolderId
+          AND   MailboxId = @MailboxId
+          AND   Uid IN @Uids
+        """;
+
+    /// <summary>One delivery's UID and the stored message behind it.</summary>
+    private sealed class MessageIdRow
+    {
+        public long Uid { get; set; }
+
+        public Guid MessageId { get; set; }
+    }
+
+    public Task<IReadOnlyDictionary<long, StoredMessageId>> ReadMessageIdsAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        IReadOnlyList<long> uids,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(uids);
+
+        if (uids.Count == 0)
+        {
+            return Task.FromResult<IReadOnlyDictionary<long, StoredMessageId>>(
+                new Dictionary<long, StoredMessageId>());
+        }
+
+        return ExecuteAsync(async (session, ct) =>
+        {
+            Dictionary<long, StoredMessageId> found = [];
+
+            // Batched for the same reason every UID list here is: each one is a bound parameter
+            // and both providers cap how many a statement may carry.
+            for (int offset = 0; offset < uids.Count; offset += UidBatchSize)
+            {
+                long[] batch = [.. uids.Skip(offset).Take(UidBatchSize)];
+
+                IEnumerable<MessageIdRow> rows = await session.Connection
+                    .QueryAsync<MessageIdRow>(Command(
+                        session,
+                        SelectMessageIds,
+                        new
+                        {
+                            FolderId = folderId.Value,
+                            MailboxId = mailboxId.Value,
+                            Uids = batch,
+                        },
+                        ct))
+                    .ConfigureAwait(false);
+
+                foreach (MessageIdRow row in rows)
+                {
+                    found[row.Uid] = new StoredMessageId(row.MessageId);
+                }
+            }
+
+            return (IReadOnlyDictionary<long, StoredMessageId>)found;
+        }, cancellationToken);
+    }
+
+    /// <summary>How many UIDs go into one statement. See ImapMailboxWriter for the same limit.</summary>
+    private const int UidBatchSize = 500;
+
     public Task<IReadOnlyList<ImapMessageSummary>> ReadSummariesAsync(
         MailboxId mailboxId,
         MailboxFolderId folderId,
