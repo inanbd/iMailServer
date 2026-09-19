@@ -74,6 +74,52 @@ unknown sender. Everything else — volume patterns, complaint rates, engagement
 accumulate. Getting authentication right is the part that is entirely within your control and
 entirely verifiable before you send anything.
 
+### The eight authentication checks
+
+Implemented in `AuthenticationChecks` (Domain, pure). Sixteen points, normalised to the
+category's thirty.
+
+| Id | W | Judged on |
+|---|---|---|
+| `auth.spf-published` | 3 | Exactly one parseable `v=spf1` record |
+| `auth.spf-policy` | 2 | The qualifier on the closing `all`, or a `redirect` |
+| `auth.spf-lookup-budget` | 1 | Terms that cost a DNS lookup, against RFC 7208 §4.6.4's ten |
+| `auth.dkim-published` | 3 | A usable key at some configured selector |
+| `auth.dkim-key-strength` | 1 | RFC 8301 §3.2 — 1024 a MUST, 2048 a SHOULD |
+| `auth.dmarc-published` | 3 | Exactly one parseable `v=DMARC1` record at `_dmarc` |
+| `auth.dmarc-policy` | 2 | `p=`, and whether `pct=` applies it to everything |
+| `auth.dmarc-reporting` | 1 | A `rua=` tag |
+
+Four judgements in there are worth stating, because each is a place where the obvious reading is
+wrong:
+
+**Two SPF records is a failure, not a duplicate.** RFC 7208 §4.5: "If the resultant record set
+includes more than one record, check_host() produces the 'permerror' result." The usual way to
+arrive here is adding a second record for a new sending service — an operator who has just made
+their mail *less* deliverable by configuring something, and who will not guess why.
+
+**`+all` fails where `~all` warns.** `all` always matches (§5.1), so a leading `+` authorises the
+entire internet to send as the domain. It is not a weaker policy than `~all`; it is the absence of
+one, published in a form that looks like a policy.
+
+**The first `all` decides, and it silences any `redirect`.** §5.1: "Mechanisms after 'all' will
+never be tested. Mechanisms listed after 'all' MUST be ignored. Any 'redirect' modifier […] MUST
+be ignored when there is an 'all' mechanism in the record, regardless of the relative ordering of
+the terms." So `v=spf1 -all ~all` is `-all`, and a `redirect` beside an `all` costs no lookup
+either — charging for it would send an operator to shorten a record already inside the limit.
+
+**The lookup count is a floor, and the detail says so.** Each `include` spends the budget again
+inside the record it fetches, so a domain at eight terms of its own may already exceed ten at a
+receiver. The check therefore warns from eight rather than only at eleven, and the text names what
+it counted: *"This counts only the terms in your own record."* A bare "9 of 10" reads as headroom
+that is not there.
+
+A revoked DKIM key — RFC 6376 §3.6.1's empty `p=` — is treated as no key at all, and named as
+revoked in the evidence. A server signing with a revoked selector produces signatures every
+receiver rejects, while DMARC alignment quietly falls back to SPF and keeps passing; nothing
+visibly breaks until an SPF change, at which point the cause is weeks old. The weakest live key
+decides the strength check, since a forger picks which selector to claim.
+
 ## Delivery test
 
 Sends a real message to an address you nominate and records the whole conversation:
