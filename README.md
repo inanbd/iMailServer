@@ -258,6 +258,7 @@ assemblies looks finished and provides no compile-time value.
 | [DKIM.md](docs/DKIM.md) · [SPF.md](docs/SPF.md) · [DMARC.md](docs/DMARC.md) | Mail authentication |
 | [TLS.md](docs/TLS.md) · [Certificates.md](docs/Certificates.md) · [LetsEncrypt.md](docs/LetsEncrypt.md) | Transport security |
 | [Deliverability.md](docs/Deliverability.md) | The scoring model and what it does not promise |
+| [Verification.md](docs/Verification.md) | The two runs this server has not had, as a checklist |
 | [BackupRestore.md](docs/BackupRestore.md) | Backups, and the DPAPI machine-scope trap |
 | [WindowsServer.md](docs/WindowsServer.md) | Service account, firewall, hardening |
 
