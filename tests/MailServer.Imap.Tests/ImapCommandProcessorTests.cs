@@ -207,6 +207,12 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
         string path,
         params long[] uids)
     {
+        // A UID already in the folder keeps the flags it had. Tests call this repeatedly to
+        // stage an arrival or an expunge, and a delivery that quietly reset every other
+        // message's flags would look to an IDLE watch exactly like somebody else having
+        // changed them - which is the thing several of those tests are asserting about.
+        _messages.TryGetValue((mailboxId.Value, path), out List<ImapMessageSummary>? existing);
+
         List<ImapMessageSummary> summaries = [];
 
         long sequenceNumber = 1;
@@ -216,7 +222,7 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
             summaries.Add(new ImapMessageSummary(
                 sequenceNumber++,
                 uid,
-                MessageFlags.Seen,
+                existing?.FirstOrDefault(m => m.Uid == uid)?.Flags ?? MessageFlags.Seen,
                 new DateTimeOffset(2026, 3, 1, 9, 30, 15, TimeSpan.Zero),
                 SizeBytes: 100 * uid));
         }
@@ -337,6 +343,13 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
             ImapMessageSummary updated = summary with { Flags = request.Apply(summary.Flags) };
 
             all[all.FindIndex(m => m.Uid == summary.Uid)] = updated;
+
+            if (updated.Flags != summary.Flags)
+            {
+                // Only when a value really moved, as ImapMailboxWriter.BumpFlagsModSeq is: a
+                // fake that bumped on every STORE would hide a watch that woke for nothing.
+                _flagsModSeq[owner.Key] = _flagsModSeq.GetValueOrDefault(owner.Key) + 1;
+            }
 
             after.Add(updated);
         }
@@ -696,7 +709,57 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
             new ImapAppendResult(ImapFolderMutation.Done, folder.Folder.Id, all.Count));
     }
 
-    public Task<long> CountMessagesAsync(
+    /// <summary>Each folder's flag-change counter, as MailboxFolders.FlagsModSeq holds it.</summary>
+    private readonly Dictionary<(Guid Mailbox, string Path), long> _flagsModSeq = [];
+
+    /// <summary>
+    /// Changes a message's flags the way another session would: in the store, with the counter
+    /// bumped, and without telling anybody.
+    /// </summary>
+    /// <remarks>
+    /// The point of the whole exercise is RFC 3501 §6.4.6's "from an external source", and there
+    /// is no way to stage one through the command surface — a STORE on this connection is the
+    /// internal case by definition.
+    /// </remarks>
+    public ScriptedImapMailboxReader ChangeFlagsElsewhere(
+        MailboxId mailboxId,
+        string path,
+        long uid,
+        MessageFlags flags)
+    {
+        List<ImapMessageSummary> all = _messages[(mailboxId.Value, path)];
+        int index = all.FindIndex(m => m.Uid == uid);
+
+        all[index] = all[index] with { Flags = flags };
+        _flagsModSeq[(mailboxId.Value, path)] =
+            _flagsModSeq.GetValueOrDefault((mailboxId.Value, path)) + 1;
+
+        return this;
+    }
+
+    /// <summary>
+    /// Removes a message the way another session's <c>EXPUNGE</c> would, renumbering what is
+    /// left and moving no flag counter.
+    /// </summary>
+    public ScriptedImapMailboxReader ExpungeElsewhere(MailboxId mailboxId, string path, long uid)
+    {
+        List<ImapMessageSummary> all = _messages[(mailboxId.Value, path)];
+
+        all.RemoveAll(m => m.Uid == uid);
+
+        long sequenceNumber = 1;
+
+        for (int index = 0; index < all.Count; index++)
+        {
+            all[index] = all[index] with { SequenceNumber = sequenceNumber++ };
+        }
+
+        SyncCount(mailboxId.Value, path);
+
+        return this;
+    }
+
+    public Task<ImapFolderPoll> PollFolderAsync(
         MailboxId mailboxId,
         MailboxFolderId folderId,
         CancellationToken cancellationToken)
@@ -706,13 +769,42 @@ internal sealed class ScriptedImapMailboxReader : IImapMailboxReader, IImapMailb
                 pair.Value.Folder.Id.Value == folderId.Value &&
                 pair.Key.Mailbox == mailboxId.Value);
 
+        if (owner.Value is null)
+        {
+            return Task.FromResult(new ImapFolderPoll(0, 0));
+        }
+
+        long count = _messages.TryGetValue(owner.Key, out List<ImapMessageSummary>? all)
+            ? all.Count
+            : 0;
+
+        return Task.FromResult(
+            new ImapFolderPoll(count, _flagsModSeq.GetValueOrDefault(owner.Key)));
+    }
+
+    /// <summary>Every poll that asked for a folder's flags, so a test can count the reads.</summary>
+    public List<Guid> FlagReads { get; } = [];
+
+    public Task<IReadOnlyList<ImapFlagState>> ReadFlagsAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        CancellationToken cancellationToken)
+    {
+        FlagReads.Add(folderId.Value);
+
+        KeyValuePair<(Guid Mailbox, string Path), Entry> owner = _folders
+            .FirstOrDefault(pair =>
+                pair.Value.Folder.Id.Value == folderId.Value &&
+                pair.Key.Mailbox == mailboxId.Value);
+
         if (owner.Value is null ||
             !_messages.TryGetValue(owner.Key, out List<ImapMessageSummary>? all))
         {
-            return Task.FromResult(0L);
+            return Task.FromResult<IReadOnlyList<ImapFlagState>>([]);
         }
 
-        return Task.FromResult((long)all.Count);
+        return Task.FromResult<IReadOnlyList<ImapFlagState>>(
+            [.. all.OrderBy(m => m.Uid).Select(m => new ImapFlagState(m.Uid, m.Flags))]);
     }
 
     /// <summary>Every folder this fake was asked to expunge.</summary>
@@ -944,11 +1036,11 @@ public sealed class ImapCommandProcessorTests
         await ExecuteAsync(processor, "a0 LOGIN alice@example.com hunter2");
         await ExecuteAsync(processor, "a1 SELECT INBOX");
 
-        (await processor.CountSelectedAsync(CancellationToken.None)).ShouldBe(1);
+        (await processor.PollSelectedAsync(CancellationToken.None))!.Value.ExistsCount.ShouldBe(1);
 
         mailboxes.Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2);
 
-        (await processor.CountSelectedAsync(CancellationToken.None)).ShouldBe(2);
+        (await processor.PollSelectedAsync(CancellationToken.None))!.Value.ExistsCount.ShouldBe(2);
     }
 
     /// <summary>

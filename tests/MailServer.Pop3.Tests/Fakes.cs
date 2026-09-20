@@ -199,11 +199,17 @@ internal sealed class ScriptedPop3Mailboxes : IImapMailboxReader, IImapMailboxWr
         CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<string>>([]);
 
-    public Task<long> CountMessagesAsync(
+    public Task<ImapFolderPoll> PollFolderAsync(
         MailboxId mailboxId,
         MailboxFolderId folderId,
         CancellationToken cancellationToken) =>
-        Task.FromResult((long)_messages.Count);
+        Task.FromResult(new ImapFolderPoll(_messages.Count, 0));
+
+    public Task<IReadOnlyList<ImapFlagState>> ReadFlagsAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<ImapFlagState>>([]);
 
     public Task<IReadOnlyList<ImapMessageSummary>> StoreFlagsAsync(
         MailboxId mailboxId,

@@ -35,6 +35,22 @@ internal sealed class FolderStatusRow
     public long UnseenCount { get; set; }
 }
 
+/// <summary>Flat shape of the two numbers an idling connection polls for.</summary>
+internal sealed class FolderPollRow
+{
+    public long ExistsCount { get; set; }
+
+    public long FlagsModSeq { get; set; }
+}
+
+/// <summary>Flat shape of one message's UID and flags, as a flag poll reads them.</summary>
+internal sealed class FlagStateRow
+{
+    public long Uid { get; set; }
+
+    public int Flags { get; set; }
+}
+
 /// <summary>Flat shape of one message's stored facts, as <c>FETCH</c> reports them.</summary>
 internal sealed class MessageSummaryRow
 {
@@ -371,21 +387,94 @@ internal sealed class ImapMailboxReader(
         ORDER BY Ordered.Seq
         """;
 
-    public Task<long> CountMessagesAsync(
+    /// <summary>
+    /// The folder's size and its flag-change counter, in one statement.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Two scalar subqueries rather than a join, because they come from different tables and
+    /// neither constrains the other: a join would need an outer one to keep answering for a
+    /// folder with no messages in it, which is the ordinary state of most folders.
+    /// </para>
+    /// <para>
+    /// <b>The <c>COALESCE</c> is the deleted-folder case.</b> Another session may
+    /// <c>DELETE</c> a mailbox this one has selected, and then there is no row to read the
+    /// counter from. Zero rather than null keeps the caller's arithmetic honest — see
+    /// <see cref="ImapFolderPoll"/>. Dapper happens to map a null onto a non-nullable
+    /// <c>long</c> as zero anyway, so this is not load-bearing today; it is here because the
+    /// answer to "what does a poll of a folder that is gone say" should be in the statement
+    /// rather than in whatever the data mapper does with a null this year.
+    /// </para>
+    /// <para>
+    /// <c>MailboxId</c> sits beside <c>FolderId</c> in both, as in every other read here: a poll
+    /// is not a weaker authorisation boundary for being cheap.
+    /// </para>
+    /// </remarks>
+    private const string SelectFolderPoll = """
+        SELECT  (SELECT COUNT(*)
+                 FROM   Deliveries
+                 WHERE  FolderId = @FolderId
+                   AND  MailboxId = @MailboxId)                AS ExistsCount,
+                COALESCE((SELECT FlagsModSeq
+                          FROM   MailboxFolders
+                          WHERE  Id = @FolderId
+                            AND  MailboxId = @MailboxId), 0)   AS FlagsModSeq
+        """;
+
+    public Task<ImapFolderPoll> PollFolderAsync(
         MailboxId mailboxId,
         MailboxFolderId folderId,
         CancellationToken cancellationToken)
     {
-        return ExecuteAsync(async (session, ct) => await session.Connection
-            .ExecuteScalarAsync<long>(Command(
-                session,
-                """
-                SELECT COUNT(*) FROM Deliveries
-                WHERE  FolderId = @FolderId AND MailboxId = @MailboxId
-                """,
-                new { FolderId = folderId.Value, MailboxId = mailboxId.Value },
-                ct))
-            .ConfigureAwait(false), cancellationToken);
+        return ExecuteAsync(async (session, ct) =>
+        {
+            FolderPollRow row = await session.Connection
+                .QuerySingleAsync<FolderPollRow>(Command(
+                    session,
+                    SelectFolderPoll,
+                    new { FolderId = folderId.Value, MailboxId = mailboxId.Value },
+                    ct))
+                .ConfigureAwait(false);
+
+            return new ImapFolderPoll(row.ExistsCount, row.FlagsModSeq);
+        }, cancellationToken);
+    }
+
+    /// <summary>
+    /// Every UID in a folder with its flags, ascending.
+    /// </summary>
+    /// <remarks>
+    /// No <c>ROW_NUMBER()</c>, unlike <see cref="ReadSummariesAsync"/>: the caller wants
+    /// positions in the client's numbering rather than in the folder's, and those are two
+    /// different things the moment another session expunges anything. Computing the folder's
+    /// positions here would offer the caller a number it must not use.
+    /// </remarks>
+    private const string SelectFolderFlags = """
+        SELECT   Uid, Flags
+        FROM     Deliveries
+        WHERE    FolderId = @FolderId
+          AND    MailboxId = @MailboxId
+        ORDER BY Uid
+        """;
+
+    public Task<IReadOnlyList<ImapFlagState>> ReadFlagsAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        CancellationToken cancellationToken)
+    {
+        return ExecuteAsync(async (session, ct) =>
+        {
+            IEnumerable<FlagStateRow> rows = await session.Connection
+                .QueryAsync<FlagStateRow>(Command(
+                    session,
+                    SelectFolderFlags,
+                    new { FolderId = folderId.Value, MailboxId = mailboxId.Value },
+                    ct))
+                .ConfigureAwait(false);
+
+            return (IReadOnlyList<ImapFlagState>)
+                [.. rows.Select(row => new ImapFlagState(row.Uid, (MessageFlags)row.Flags))];
+        }, cancellationToken);
     }
 
     private const string SelectMessageIds = """

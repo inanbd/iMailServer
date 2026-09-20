@@ -173,6 +173,7 @@ public sealed class ImapSessionContext
         SelectedFolderUidValidity = uidValidity;
         IsSelectedReadOnly = readOnly;
         ReportedExists = 0;
+        FlagWatch = null;
         State = ImapSessionState.Selected;
     }
 
@@ -212,6 +213,48 @@ public sealed class ImapSessionContext
         ReportedExists = count;
     }
 
+    /// <summary>
+    /// The flag watch running over the selected folder, or null when none is.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>On the session rather than inside the idle loop, so that it survives <c>DONE</c>.</b>
+    /// RFC 2177 §3 tells a client to re-issue <c>IDLE</c> periodically — "at least every 29
+    /// minutes to avoid being logged off" — and the ordinary way to do that is <c>DONE</c>
+    /// followed immediately by another <c>IDLE</c>. A watch that began again from the folder
+    /// each time would take whatever had changed in between as its starting point and never
+    /// report it, which is the race RFC 3501 §6.4.6 exists to close.
+    /// </para>
+    /// <para>
+    /// <b>Discarded by every other command, which is what keeps it honest.</b> A watch holds
+    /// the client's own list of messages, and this session's <c>EXPUNGE</c>, <c>STORE</c>,
+    /// <c>MOVE</c> or <c>CLOSE</c> all change that list — <c>EXPUNGE</c> renumbers it outright.
+    /// Enumerating which commands those are would be one forgotten verb away from reporting a
+    /// flag against the wrong message, so the rule is inverted: anything but <c>IDLE</c> ends
+    /// the watch and the next <c>IDLE</c> starts a fresh one.
+    /// </para>
+    /// </remarks>
+    public ImapFlagWatch? FlagWatch { get; private set; }
+
+    /// <summary>Begins watching the selected folder's flags.</summary>
+    /// <exception cref="InvalidOperationException">No mailbox is selected.</exception>
+    public void StartFlagWatch(ImapFlagWatch watch)
+    {
+        ArgumentNullException.ThrowIfNull(watch);
+
+        if (SelectedFolderId is null)
+        {
+            throw new InvalidOperationException(
+                "A flag watch is a watch over the selected folder; there is none.");
+        }
+
+        FlagWatch = watch;
+    }
+
+    /// <summary>Ends any flag watch, so that the next one starts from the folder as it stands.</summary>
+    /// <remarks>Idempotent: called on every command, and most of them never started one.</remarks>
+    public void EndFlagWatch() => FlagWatch = null;
+
     /// <summary>Closes the selected mailbox, returning to the authenticated state.</summary>
     /// <remarks>
     /// Callers implementing <c>CLOSE</c> (which also expunges) or an unselecting error path both
@@ -224,6 +267,7 @@ public sealed class ImapSessionContext
         SelectedFolderUidValidity = 0;
         IsSelectedReadOnly = false;
         ReportedExists = 0;
+        FlagWatch = null;
 
         if (State == ImapSessionState.Selected)
         {

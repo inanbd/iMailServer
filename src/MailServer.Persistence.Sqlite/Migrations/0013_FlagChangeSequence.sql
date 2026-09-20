@@ -1,0 +1,50 @@
+-- =============================================================================
+-- AetherMail Server - folder flag-change sequence (SQLite)
+-- Milestone 10
+--
+-- Purely additive: one new column carrying a constant default. SQLite applies
+-- that as a metadata change rather than a table rewrite, no column is dropped
+-- and no existing value is touched, so this carries no destructive directive.
+-- =============================================================================
+
+
+-- -----------------------------------------------------------------------------
+-- MailboxFolders.FlagsModSeq: a counter bumped whenever a message's flags change
+-- in this folder.
+--
+-- WHAT IT EXISTS FOR. RFC 3501 6.4.6: "Regardless of whether or not the .SILENT
+-- suffix was used, the server SHOULD send an untagged FETCH response if a change
+-- to a message's flags from an external source is observed. The intent is that
+-- the status of the flags is determinate without a race condition." An idling
+-- connection can only observe such a change by looking, and the question every
+-- poll asks is "has anything changed since I last looked" - which is this
+-- column, read in one row, rather than the folder's every row shipped to the
+-- application on a five-second timer.
+--
+-- That distinction is the whole reason for the column. IImapMailboxReader's
+-- CountMessagesAsync already exists because "reading the summaries and counting
+-- them would work and would read every row of the folder on every poll"; adding
+-- a flag diff on the same timer would reintroduce exactly the cost that comment
+-- refused. With this counter the folder's rows are read only when a flag really
+-- did change - work proportional to what happened rather than to how long a
+-- client has been connected.
+--
+-- A COUNTER, NOT A TIMESTAMP. Two flag changes inside one clock tick must be
+-- distinguishable, and a clock that steps backwards - NTP correction, a virtual
+-- machine resumed from a snapshot - would make a real change look older than one
+-- already observed and lose it silently. UPDATE ... SET FlagsModSeq =
+-- FlagsModSeq + 1 derives the new value inside the database from the old one, so
+-- it is monotonic per folder no matter which node or process wrote it.
+--
+-- IT IS NOT RFC 7162's MODSEQ. CONDSTORE requires a per-message modification
+-- sequence and a HIGHESTMODSEQ that is never reused, which would let a poll read
+-- only the rows that changed rather than the folder. This is the folder-level
+-- half of that idea and nothing more; the capability is deliberately not
+-- advertised, and claiming CONDSTORE off the back of this column would promise a
+-- client per-message guarantees the schema cannot keep.
+--
+-- Existing folders start at 0, which costs nothing: a watching session records
+-- whatever value it first reads and reacts to movement from there, never to the
+-- absolute number.
+-- -----------------------------------------------------------------------------
+ALTER TABLE MailboxFolders ADD COLUMN FlagsModSeq INTEGER NOT NULL DEFAULT 0;

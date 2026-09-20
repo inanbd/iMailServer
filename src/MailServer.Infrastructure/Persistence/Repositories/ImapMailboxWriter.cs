@@ -61,6 +61,36 @@ internal sealed class ImapMailboxWriter(
           AND   Uid IN @Uids
         """;
 
+    /// <summary>
+    /// Records that this folder's flags are not what they were.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is what lets an idling connection discharge RFC 3501 §6.4.6 — "the server SHOULD
+    /// send an untagged FETCH response if a change to a message's flags from an external source
+    /// is observed" — without reading the folder on a timer. See the 0013 migration for why the
+    /// column exists and why it is a counter rather than a timestamp.
+    /// </para>
+    /// <para>
+    /// <b>Incremented in SQL from its own old value, never written from one read in C#.</b> Two
+    /// sessions storing flags in the same folder at the same time would otherwise both read
+    /// <c>n</c> and both write <c>n + 1</c>, and a watcher that had already seen <c>n + 1</c>
+    /// would take the second change for no change at all and never report it.
+    /// </para>
+    /// <para>
+    /// <b>Run only when a row really changed.</b> <c>STORE</c> reports the new value of the
+    /// flags whether or not it differed (§6.4.6 again), so a client that marks an already-read
+    /// message <c>\Seen</c> gets an untagged <c>FETCH</c> and writes nothing. Bumping there
+    /// would wake every watcher of the folder to find that nothing had happened.
+    /// </para>
+    /// </remarks>
+    private const string BumpFlagsModSeq = """
+        UPDATE  MailboxFolders
+        SET     FlagsModSeq = FlagsModSeq + 1
+        WHERE   Id = @FolderId
+          AND   MailboxId = @MailboxId
+        """;
+
     public Task<IReadOnlyList<ImapMessageSummary>> StoreFlagsAsync(
         MailboxId mailboxId,
         MailboxFolderId folderId,
@@ -140,6 +170,24 @@ internal sealed class ImapMailboxWriter(
                                         inner))
                                     .ConfigureAwait(false);
                             }
+                        }
+
+                        if (byOutcome.Count > 0)
+                        {
+                            // Inside the same transaction as the updates above, so that no
+                            // watcher can read the folder between the flags changing and the
+                            // counter saying so and conclude there was nothing to report.
+                            await session.Connection
+                                .ExecuteAsync(Command(
+                                    session,
+                                    BumpFlagsModSeq,
+                                    new
+                                    {
+                                        FolderId = folderId.Value,
+                                        MailboxId = mailboxId.Value,
+                                    },
+                                    inner))
+                                .ConfigureAwait(false);
                         }
 
                         return true;

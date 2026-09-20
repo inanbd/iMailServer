@@ -580,12 +580,12 @@ rather than the value asked for — those differ whenever a flag was already set
 stored at all. A message already in the requested state is skipped for the write and still
 reported, because the response is the new value rather than a list of what changed.
 
-§6.4.6 has a separate note that this server does **not** yet satisfy: "Regardless of whether or
-not the `.SILENT` suffix was used, the server SHOULD send an untagged FETCH response if a change
-to a message's flags from an external source is observed. The intent is that the status of the
-flags is determinate without a race condition." Observing an external change needs a notification
-path that does not exist until `IDLE` lands, so the SHOULD is unmet and recorded here rather than
-claimed. The transaction above is a different guarantee and does not discharge it.
+§6.4.6 has a separate note, and it is a different guarantee that the transaction above does not
+discharge: "Regardless of whether or not the `.SILENT` suffix was used, the server SHOULD send an
+untagged FETCH response if a change to a message's flags from an external source is observed. The
+intent is that the status of the flags is determinate without a race condition." An idling
+connection observes those changes and pushes them — see **IDLE**, below, for how, and for whose
+sequence numbers the responses carry.
 
 **`\Recent` survives every mode, including `FLAGS`.** §6.4.6 puts the exception inside the
 sentence — "Replace the flags for the message (other than `\Recent`) with the argument" — and
@@ -659,7 +659,7 @@ destroy exactly what the schema keeps them for.
 **The updates are real, and they come from polling the folder.** RFC 2177 §3: "as long as an IDLE
 command is active, the server is now free to send untagged EXISTS, EXPUNGE, and other messages at
 any time." This server has no cross-session notification bus, so an idling connection watches its
-folder's message count on a five-second timer instead.
+folder's message count and its flag-change counter on a five-second timer instead.
 
 That distinction matters more than it sounds. §3 tells a client that without the capability it
 "must poll for mailbox updates" — so advertising `IDLE` and then never pushing would be *worse*
@@ -699,6 +699,52 @@ document previously described it as one, which was wrong.
 while the server is waiting for the DONE, since the server will not be able to distinguish a
 command from a continuation." A client that does anyway gets its connection back rather than
 having the command silently swallowed.
+
+**Idling with no mailbox open is legal.** §3 never says which state `IDLE` belongs to; §4 does, by
+putting `idle` in `command_auth` and annotating it ";; Valid only in Authenticated or Selected
+state". So a client that has logged in and not yet selected anything may idle, and there is simply
+nothing to tell it. This server used to answer that with a tagged `BAD` — the state machine and
+the command handler had read the same RFC differently, which is a rule enforced twice and obeyed
+once.
+
+### Flag changes from another session
+
+RFC 3501 §6.4.6: "Regardless of whether or not the `.SILENT` suffix was used, the server SHOULD
+send an untagged FETCH response if a change to a message's flags from an external source is
+observed. The intent is that the status of the flags is determinate without a race condition."
+
+Two clients on one mailbox is the ordinary case — a phone and a desktop — and without this, a
+message read on one shows as unread on the other until something else makes it look. So an idling
+connection pushes `* n FETCH (FLAGS (…) UID u)` when it sees one.
+
+**"External" needs no test.** §3 of RFC 2177 forbids the client from sending anything but `DONE`
+while idling, so every change the watch can possibly see was made by somebody else. Every other
+command discards the watch, and the next `IDLE` starts a fresh one — which also means a client's
+own bulk `STORE` is never replayed at it a poll later.
+
+**The positions are the client's, not the folder's.** A message sequence number is a position in
+what the client believes the folder holds (§2.3.1.2), and the two part company the moment another
+session expunges something: §7.4.1 forbids renumbering a client that has not been sent the
+`EXPUNGE` lines, and this server deliberately does not send those from a poll. So the watch holds
+the client's own list and reads positions out of it. A folder of ten whose second message is
+expunged elsewhere still reports its third message as `* 3`.
+
+Once that has happened the list stops growing — there is no way to know which message the client
+would put at a *new* position — but every message already in it keeps its position and keeps being
+watched. Nothing is ever reported at a position no `EXISTS` has covered, and an `EXISTS` in the
+same poll is always written first.
+
+**The UID is carried even though §6.4.6 does not ask for it.** The response is unsolicited, so
+unlike every other `FETCH` there is no command whose sequence set tells the client which message is
+meant — only the position, and a position is the one thing that goes stale. §9's `msg-att` is a run
+of items and `UID` is one of them, so this is ordinary grammar rather than an extension.
+
+**The rows are read only when something happened.** `MailboxFolders.FlagsModSeq` is a counter
+bumped by every write that changes a message's flags; a poll reads it and the folder's size in one
+statement and looks no further unless one of them moved. Without it, discharging this SHOULD would
+mean reading every row of every idling client's folder every five seconds — the cost that
+`CountMessagesAsync` was written to avoid in the first place. It is deliberately *not* RFC 7162's
+`MODSEQ`: that needs a per-message sequence, and `CONDSTORE` is not advertised.
 
 ## POP3
 

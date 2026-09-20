@@ -1939,4 +1939,199 @@ public sealed class ImapMailboxReaderTests
 
         result.Outcome.ShouldBe(ImapFolderMutation.NotFound);
     }
+
+    // ---------------------------------------------------------------------------------------
+    // The IDLE poll and the flag-change counter behind it.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// The two numbers an idling connection lives on, over a real folder. RFC 3501 §7.3.1's
+    /// <c>EXISTS</c> comes from the first; the second is what keeps the second read off the
+    /// poll timer.
+    /// </summary>
+    [Fact]
+    public async Task A_poll_reads_the_folders_size_and_its_flag_counter()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        ImapFolderPoll poll = await database.CreateScope().ImapMailboxes
+            .PollFolderAsync(mailbox, folder, CancellationToken.None);
+
+        poll.ExistsCount.ShouldBe(4);
+
+        // Nothing has stored a flag in this folder, so the migration's default stands.
+        poll.FlagsModSeq.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// A folder another mailbox owns is not this one's to poll — the same <c>WHERE</c> clause
+    /// every other read carries, and a poll is not a weaker boundary for being cheap.
+    /// </summary>
+    [Fact]
+    public async Task Another_mailboxs_folder_polls_as_empty()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId alice, _) = await SeedMessagesAsync(database, connection);
+
+        (MailboxId bob, MailboxFolderId bobsFolder) =
+            await SeedFolderAsync(connection, address: "bob@example.net");
+
+        await DeliverAsync(connection, bob, bobsFolder, uid: 1);
+
+        ImapFolderPoll poll = await database.CreateScope().ImapMailboxes
+            .PollFolderAsync(alice, bobsFolder, CancellationToken.None);
+
+        poll.ExistsCount.ShouldBe(0);
+        poll.FlagsModSeq.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// RFC 3501 §6.3.4 lets another session <c>DELETE</c> a mailbox this one has selected. What
+    /// the idling client then sees is a mailbox that has become empty — not an exception thrown
+    /// inside a poll loop, which is what a missing row mapped onto a non-nullable counter would
+    /// be.
+    /// </summary>
+    [Fact]
+    public async Task A_folder_that_no_longer_exists_polls_as_empty()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (MailboxId mailbox, _) = await SeedFolderAsync(connection);
+
+        ImapFolderPoll poll = await database.CreateScope().ImapMailboxes
+            .PollFolderAsync(mailbox, new MailboxFolderId(Guid.NewGuid()), CancellationToken.None);
+
+        poll.ExistsCount.ShouldBe(0);
+        poll.FlagsModSeq.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Every UID with its flags, ascending — which RFC 3501 §2.3.1.2 makes the same order as
+    /// ascending message sequence number, and the watch reads positions off that.
+    /// </summary>
+    [Fact]
+    public async Task A_flag_read_returns_every_uid_in_order()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        IReadOnlyList<ImapFlagState> flags = await database.CreateScope().ImapMailboxes
+            .ReadFlagsAsync(mailbox, folder, CancellationToken.None);
+
+        flags.Select(f => f.Uid).ShouldBe([3, 7, 11, 19]);
+        flags.Select(f => f.Flags).ShouldBe(
+        [
+            MessageFlags.Seen,
+            MessageFlags.None,
+            MessageFlags.Flagged,
+            MessageFlags.None,
+        ]);
+    }
+
+    /// <summary>
+    /// Storing a flag moves the counter, which is the whole mechanism: without this an idling
+    /// connection has no cheap way to learn that it should look, and RFC 3501 §6.4.6's untagged
+    /// <c>FETCH</c> never goes out.
+    /// </summary>
+    [Fact]
+    public async Task Storing_a_flag_moves_the_folders_counter()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        long before = (await scope.ImapMailboxes
+            .PollFolderAsync(mailbox, folder, CancellationToken.None)).FlagsModSeq;
+
+        await scope.ImapWrites.StoreFlagsAsync(
+            mailbox,
+            folder,
+            Set("2"),
+            byUid: false,
+            Store(ImapStoreMode.Add, MessageFlags.Deleted),
+            CancellationToken.None);
+
+        (await scope.ImapMailboxes.PollFolderAsync(mailbox, folder, CancellationToken.None))
+            .FlagsModSeq.ShouldBeGreaterThan(before);
+    }
+
+    /// <summary>
+    /// A <c>STORE</c> that changes nothing moves nothing. §6.4.6 has the server report the new
+    /// value whether or not it differed, so this is the ordinary case of a client marking an
+    /// already-read message <c>\Seen</c> — and waking every watcher of the folder to find that
+    /// nothing had happened is a cost with no report at the end of it.
+    /// </summary>
+    [Fact]
+    public async Task A_store_that_changes_no_flag_leaves_the_counter_alone()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId folder) =
+            await SeedMessagesAsync(database, connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        // Message 1 is the one seeded with \Seen already.
+        IReadOnlyList<ImapMessageSummary> reported = await scope.ImapWrites.StoreFlagsAsync(
+            mailbox,
+            folder,
+            Set("1"),
+            byUid: false,
+            Store(ImapStoreMode.Add, MessageFlags.Seen),
+            CancellationToken.None);
+
+        // Still reported, because the response is the new value rather than a list of changes.
+        reported.ShouldHaveSingleItem().Flags.ShouldBe(MessageFlags.Seen);
+
+        (await scope.ImapMailboxes.PollFolderAsync(mailbox, folder, CancellationToken.None))
+            .FlagsModSeq.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// The counter belongs to the folder that was written, not to the mailbox. A watcher of a
+    /// quiet folder must not be woken by traffic in a busy one beside it.
+    /// </summary>
+    [Fact]
+    public async Task Storing_a_flag_leaves_a_sibling_folders_counter_alone()
+    {
+        await using SqliteTestDatabase database = new();
+        await using DbConnection connection = await MigratedAsync(database);
+
+        (_, MailboxId mailbox, MailboxFolderId inbox) =
+            await SeedMessagesAsync(database, connection);
+
+        SqliteTestDatabase.TestScope scope = database.CreateScope();
+
+        await scope.ImapWrites.CreateFolderAsync(mailbox, "Archive", Moment, CancellationToken.None);
+
+        ImapFolderSnapshot archive = (await scope.ImapMailboxes
+            .OpenFolderAsync(mailbox, "Archive", CancellationToken.None))!;
+
+        await scope.ImapWrites.StoreFlagsAsync(
+            mailbox,
+            inbox,
+            Set("1:*"),
+            byUid: false,
+            Store(ImapStoreMode.Add, MessageFlags.Draft),
+            CancellationToken.None);
+
+        (await scope.ImapMailboxes
+            .PollFolderAsync(mailbox, archive.FolderId, CancellationToken.None))
+            .FlagsModSeq.ShouldBe(0);
+    }
 }

@@ -982,6 +982,41 @@ public static class ImapResponses
     }
 
     /// <summary>
+    /// <c>* n FETCH (FLAGS (…) UID u)</c> — a flag change nobody asked about. RFC 3501 §6.4.6.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Separate from <see cref="Fetch"/> rather than a call into it with a one-item list,
+    /// because <see cref="Fetch"/> takes an <see cref="ImapMessageSummary"/> and a summary
+    /// carries <c>INTERNALDATE</c> and <c>RFC822.SIZE</c> as well. A caller that had to
+    /// manufacture one to report a flag would be inventing two values in order to not use them,
+    /// and the first time somebody passed <c>default</c> for them the invention would reach the
+    /// wire.
+    /// </para>
+    /// <para>
+    /// <b>The UID is carried even though §6.4.6 does not ask for it.</b> The response is
+    /// unsolicited, so unlike every other <c>FETCH</c> there is no command whose sequence set
+    /// tells the client which message is meant — only the position, and a position is the one
+    /// thing that goes stale when another session expunges something. The UID names the message
+    /// outright. §9's <c>msg-att</c> is a run of items and <c>UID</c> is one of them, so this is
+    /// ordinary grammar rather than an extension, and §7 permits an untagged response "at any
+    /// time".
+    /// </para>
+    /// <para>
+    /// The number after the <c>*</c> is still a message sequence number, as §6.4.8 requires of
+    /// every untagged <c>FETCH</c> without exception.
+    /// </para>
+    /// </remarks>
+    /// <param name="sequenceNumber">The message's position in the client's numbering, from 1.</param>
+    /// <param name="uid">The message's unique identifier.</param>
+    /// <param name="flags">The flags the folder now holds — "the new value", not what changed.</param>
+    public static ImapResponse FetchFlags(long sequenceNumber, long uid, MessageFlags flags) =>
+        SequenceNumber(
+            sequenceNumber,
+            $"FETCH (FLAGS ({ImapFlagNames.Format(flags)}) UID " +
+            $"{uid.ToString(CultureInfo.InvariantCulture)})");
+
+    /// <summary>
     /// <c>* NAMESPACE …</c> — the server's namespace layout. RFC 2342 §5.
     /// </summary>
     /// <remarks>

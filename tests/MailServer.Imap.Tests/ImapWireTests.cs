@@ -161,6 +161,25 @@ public sealed class ImapWireTests : IDisposable
         return (client, served);
     }
 
+    /// <summary>
+    /// Waits until an idling connection has taken its opening look at the folder.
+    /// </summary>
+    /// <remarks>
+    /// The continuation is written before the watch reads the folder, so a test that staged an
+    /// external change the instant it saw <c>+</c> would be racing the seed — and losing that
+    /// race means the change becomes the baseline and is never reported, which looks exactly
+    /// like the bug these tests exist to catch.
+    /// </remarks>
+    private static async Task WatchStartedAsync(ScriptedImapMailboxReader mailboxes, int looks = 1)
+    {
+        for (int attempt = 0; attempt < 500 && mailboxes.FlagReads.Count < looks; attempt++)
+        {
+            await Task.Delay(10);
+        }
+
+        mailboxes.FlagReads.Count.ShouldBeGreaterThanOrEqualTo(looks);
+    }
+
     /// <summary>Reads one CRLF-terminated line.</summary>
     private static async Task<string> ReadLineAsync(Stream stream)
     {
@@ -1118,6 +1137,310 @@ public sealed class ImapWireTests : IDisposable
 
             await WriteLineAsync(tls, "a4 LOGOUT");
             await ReadUntilTaggedAsync(tls, "a4");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// RFC 3501 §6.4.6: "Regardless of whether or not the <c>.SILENT</c> suffix was used, the
+    /// server SHOULD send an untagged FETCH response if a change to a message's flags from an
+    /// external source is observed. The intent is that the status of the flags is determinate
+    /// without a race condition."
+    /// </summary>
+    /// <remarks>
+    /// Two clients on one mailbox is the ordinary case — a phone and a desktop — and without
+    /// this a message read on one shows as unread on the other until something else happens to
+    /// make the second look.
+    /// </remarks>
+    [Fact]
+    public async Task Idle_pushes_an_untagged_fetch_when_another_session_changes_flags()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2, 3);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(idlePollMilliseconds: 200),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(tls, "a2 SELECT INBOX");
+            await ReadUntilTaggedAsync(tls, "a2");
+
+            await WriteLineAsync(tls, "a3 IDLE");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+            await WatchStartedAsync(mailboxes);
+
+            // Another session flags the middle message. Nothing on this connection did it and
+            // nothing on this connection asked about it.
+            mailboxes.ChangeFlagsElsewhere(
+                authenticator.KnownMailboxId,
+                "INBOX",
+                uid: 2,
+                MessageFlags.Seen | MessageFlags.Flagged);
+
+            // The position is the client's; the UID says which message it is whatever the
+            // client's numbering has been through.
+            (await ReadLineAsync(tls)).ShouldBe(@"* 2 FETCH (FLAGS (\Seen \Flagged) UID 2)");
+
+            await WriteLineAsync(tls, "DONE");
+            (await ReadLineAsync(tls)).ShouldStartWith("a3 OK ");
+
+            await WriteLineAsync(tls, "a4 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a4");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// An arrival and a flag change in the same poll go out with the <c>EXISTS</c> first, so no
+    /// <c>FETCH</c> ever names a position the client has not yet been told exists.
+    /// </summary>
+    [Fact]
+    public async Task Idle_pushes_the_exists_before_the_flags()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(idlePollMilliseconds: 200),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(tls, "a2 SELECT INBOX");
+            await ReadUntilTaggedAsync(tls, "a2");
+
+            await WriteLineAsync(tls, "a3 IDLE");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+            await WatchStartedAsync(mailboxes);
+
+            // The delivery is staged first, so that a poll landing between the two statements
+            // still produces these two lines in this order rather than making the test flaky.
+            mailboxes
+                .Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2, 3)
+                .ChangeFlagsElsewhere(
+                    authenticator.KnownMailboxId,
+                    "INBOX",
+                    uid: 1,
+                    MessageFlags.Seen | MessageFlags.Answered);
+
+            (await ReadLineAsync(tls)).ShouldBe("* 3 EXISTS");
+            (await ReadLineAsync(tls)).ShouldBe(@"* 1 FETCH (FLAGS (\Seen \Answered) UID 1)");
+
+            await WriteLineAsync(tls, "DONE");
+            (await ReadLineAsync(tls)).ShouldStartWith("a3 OK ");
+
+            await WriteLineAsync(tls, "a4 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a4");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// RFC 2177 §3 tells a client to re-issue <c>IDLE</c> "at least every 29 minutes to avoid
+    /// being logged off", which it does with <c>DONE</c> followed by another <c>IDLE</c>. A
+    /// watch that began again from the folder each time would take whatever changed in between
+    /// as its starting point and never report it — which is precisely the race §6.4.6 is about.
+    /// </summary>
+    [Fact]
+    public async Task A_change_between_two_idles_is_still_reported()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(idlePollMilliseconds: 200),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(tls, "a2 SELECT INBOX");
+            await ReadUntilTaggedAsync(tls, "a2");
+
+            await WriteLineAsync(tls, "a3 IDLE");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+
+            await WriteLineAsync(tls, "DONE");
+            (await ReadLineAsync(tls)).ShouldStartWith("a3 OK ");
+
+            // In the gap, with no command in flight to tell the client anything.
+            mailboxes.ChangeFlagsElsewhere(
+                authenticator.KnownMailboxId,
+                "INBOX",
+                uid: 1,
+                MessageFlags.Seen | MessageFlags.Deleted);
+
+            await WriteLineAsync(tls, "a4 IDLE");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+
+            (await ReadLineAsync(tls)).ShouldBe(@"* 1 FETCH (FLAGS (\Seen \Deleted) UID 1)");
+
+            await WriteLineAsync(tls, "DONE");
+            (await ReadLineAsync(tls)).ShouldStartWith("a4 OK ");
+
+            await WriteLineAsync(tls, "a5 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a5");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// A flag this connection set itself is not pushed back at it on the next idle. §6.4.6's
+    /// SHOULD is about "an external source"; the client already has the untagged <c>FETCH</c>
+    /// its own <c>STORE</c> earned, and a bulk <c>STORE</c> echoed back a poll later would be
+    /// thousands of responses about nothing.
+    /// </summary>
+    [Fact]
+    public async Task A_flag_this_session_set_is_not_pushed_back_on_the_next_idle()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(idlePollMilliseconds: 200),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(tls, "a2 SELECT INBOX");
+            await ReadUntilTaggedAsync(tls, "a2");
+
+            await WriteLineAsync(tls, "a3 IDLE");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+
+            await WriteLineAsync(tls, "DONE");
+            (await ReadLineAsync(tls)).ShouldStartWith("a3 OK ");
+
+            await WriteLineAsync(tls, @"a4 STORE 1 +FLAGS (\Flagged)");
+            await ReadUntilTaggedAsync(tls, "a4");
+
+            await WriteLineAsync(tls, "a5 IDLE");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+
+            // Several polls' worth of silence, then something that genuinely is news. If the
+            // STORE were being replayed it would arrive before this does.
+            await Task.Delay(TimeSpan.FromMilliseconds(600));
+            mailboxes.Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2, 3);
+
+            (await ReadLineAsync(tls)).ShouldBe("* 3 EXISTS");
+
+            await WriteLineAsync(tls, "DONE");
+            (await ReadLineAsync(tls)).ShouldStartWith("a5 OK ");
+
+            await WriteLineAsync(tls, "a6 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a6");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// A folder nothing has happened to is not read row by row on the poll timer. That is the
+    /// whole reason <c>MailboxFolders.FlagsModSeq</c> exists, and a regression here would be
+    /// invisible in behaviour and ruinous on a large mailbox.
+    /// </summary>
+    [Fact]
+    public async Task An_idle_over_a_quiet_folder_reads_its_rows_once()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 1, 2, 3);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(idlePollMilliseconds: 100),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(tls, "a2 SELECT INBOX");
+            await ReadUntilTaggedAsync(tls, "a2");
+
+            await WriteLineAsync(tls, "a3 IDLE");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+            await WatchStartedAsync(mailboxes);
+
+            await Task.Delay(TimeSpan.FromMilliseconds(700));
+
+            await WriteLineAsync(tls, "DONE");
+            (await ReadLineAsync(tls)).ShouldStartWith("a3 OK ");
+
+            // Once, to start the watch. Not once per poll.
+            mailboxes.FlagReads.Count.ShouldBe(1);
+
+            await WriteLineAsync(tls, "a4 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a4");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// RFC 2177 §4 annotates its <c>command_auth</c> production ";; Valid only in Authenticated
+    /// or Selected state", so idling with no mailbox open is legal. There is nothing to report
+    /// to such a client, which is not the same as there being a reason to hang up on it.
+    /// </summary>
+    [Fact]
+    public async Task Idle_with_no_mailbox_selected_is_held_open()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(idlePollMilliseconds: 100),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(tls, "a2 IDLE");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+
+            // Several polls, every one of them with nothing to look at.
+            await Task.Delay(TimeSpan.FromMilliseconds(500));
+
+            await WriteLineAsync(tls, "DONE");
+            (await ReadLineAsync(tls)).ShouldStartWith("a2 OK ");
+
+            await WriteLineAsync(tls, "a3 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a3");
         }
 
         await served;

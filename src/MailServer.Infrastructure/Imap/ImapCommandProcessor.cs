@@ -249,6 +249,16 @@ public sealed class ImapCommandProcessor
                 $"{Describe(command.Verb)} is not valid in this state"));
         }
 
+        if (command.Verb != ImapVerb.Idle)
+        {
+            // Every command but IDLE ends any flag watch, which is deliberately the inverse of
+            // listing the commands that invalidate one - see ImapSessionContext.FlagWatch. IDLE
+            // is exempt so that a client following RFC 2177 §3's advice to re-issue it "at least
+            // every 29 minutes" keeps the watch across the DONE rather than restarting it from
+            // whatever the folder looks like by then.
+            _session.EndFlagWatch();
+        }
+
         return command.Verb switch
         {
             ImapVerb.Capability => Capability(command.Tag),
@@ -2283,9 +2293,18 @@ public sealed class ImapCommandProcessor
     /// ("+") response."
     /// </para>
     /// <para>
-    /// Refused outside the selected state. §3 leaves this to the base specification, and there
-    /// is nothing to report updates about without a mailbox open — a client idling in the
-    /// authenticated state would wait for news that could not arrive.
+    /// <b>Not refused for want of a selected mailbox.</b> §3 says nothing about which state the
+    /// command belongs to; §4 does, by putting <c>idle</c> in <c>command_auth</c> and annotating
+    /// it ";; Valid only in Authenticated or Selected state". So a client that has logged in and
+    /// not yet selected anything may idle, and there is simply nothing to tell it — which is a
+    /// quiet connection, not a protocol error. <see cref="ImapStateMachine"/> has always read it
+    /// that way; a second test of the same rule here that disagreed with it was a rule enforced
+    /// twice and obeyed once.
+    /// </para>
+    /// <para>
+    /// The authenticated state is checked for all the same, because everything past it depends
+    /// on an identity — but <see cref="ImapStateMachine"/> has already refused an unauthenticated
+    /// <c>IDLE</c>, so this is the second line of defence rather than the rule.
     /// </para>
     /// </remarks>
     private ImapCommandResult Idle(ImapCommand command)
@@ -2295,10 +2314,10 @@ public sealed class ImapCommandProcessor
             return NotImplemented(command);
         }
 
-        if (_session.AuthenticatedMailboxId is null || _session.SelectedFolderId is null)
+        if (_session.AuthenticatedMailboxId is null)
         {
             return ImapCommandResult.Single(
-                ImapResponses.Bad(command.Tag, "No mailbox is selected"));
+                ImapResponses.Bad(command.Tag, "IDLE requires an authenticated session"));
         }
 
         if (command.Argument.Trim().Length != 0)
@@ -2313,13 +2332,14 @@ public sealed class ImapCommandProcessor
     }
 
     /// <summary>
-    /// Reads the selected folder's message count, for an idling connection to watch.
+    /// Reads the two numbers an idling connection watches: the folder's size and its
+    /// flag-change counter.
     /// </summary>
     /// <remarks>
     /// Exposed for the loop, which cannot reach the repository itself. Returns null when there
     /// is nothing to watch, which ends the idle rather than looping on an error.
     /// </remarks>
-    public async ValueTask<long?> CountSelectedAsync(CancellationToken cancellationToken)
+    public async ValueTask<ImapFolderPoll?> PollSelectedAsync(CancellationToken cancellationToken)
     {
         if (_mailboxes is null ||
             _session.AuthenticatedMailboxId is null ||
@@ -2329,7 +2349,33 @@ public sealed class ImapCommandProcessor
         }
 
         return await _mailboxes
-            .CountMessagesAsync(
+            .PollFolderAsync(
+                _session.AuthenticatedMailboxId.Value,
+                _session.SelectedFolderId.Value,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reads every UID in the selected folder with its flags, for a watch to compare against.
+    /// </summary>
+    /// <remarks>
+    /// Only ever called when <see cref="PollSelectedAsync"/> has already said something changed,
+    /// or to seed a new watch. Calling it on the poll timer instead would be the cost the
+    /// counter exists to avoid — see <c>IImapMailboxReader.PollFolderAsync</c>.
+    /// </remarks>
+    public async ValueTask<IReadOnlyList<ImapFlagState>?> ReadSelectedFlagsAsync(
+        CancellationToken cancellationToken)
+    {
+        if (_mailboxes is null ||
+            _session.AuthenticatedMailboxId is null ||
+            _session.SelectedFolderId is null)
+        {
+            return null;
+        }
+
+        return await _mailboxes
+            .ReadFlagsAsync(
                 _session.AuthenticatedMailboxId.Value,
                 _session.SelectedFolderId.Value,
                 cancellationToken)

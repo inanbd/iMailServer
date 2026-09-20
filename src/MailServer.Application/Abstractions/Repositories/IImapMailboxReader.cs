@@ -172,6 +172,57 @@ public interface IImapMailboxReader
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// How many messages a folder holds and whether any of their flags have changed, and nothing
+    /// else.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// For <c>IDLE</c>, which asks this repeatedly while a client waits. Reading the summaries
+    /// and counting them would work and would read every row of the folder on every poll; these
+    /// are two aggregates over indexes the folder is already keyed by.
+    /// </para>
+    /// <para>
+    /// <b>The counter is what keeps <see cref="ReadFlagsAsync"/> off the poll timer.</b> RFC 3501
+    /// §6.4.6 asks a server to report a flag change "from an external source", which cannot be
+    /// noticed without comparing the folder against what the client was last told — an O(folder)
+    /// read. Asking this first turns that into work proportional to what actually happened: on a
+    /// folder nothing has touched, an idling connection costs one row per poll however much mail
+    /// it holds.
+    /// </para>
+    /// </remarks>
+    Task<ImapFolderPoll> PollFolderAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Every message in a folder as a UID and its flags, ascending by UID.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The whole folder rather than a sequence set, because the caller is looking for what it
+    /// does not already know about — including messages that have arrived and, by their absence,
+    /// messages that have gone. A range cannot express either.
+    /// </para>
+    /// <para>
+    /// <b>Two columns, and no join.</b> <see cref="ReadSummariesAsync"/> reaches into
+    /// <c>Messages</c> for the size and would be the obvious thing to reuse; it is not reused
+    /// because this read exists to be cheap enough to run whenever a folder changes, and
+    /// <c>INTERNALDATE</c> and <c>RFC822.SIZE</c> are values no flag comparison looks at.
+    /// </para>
+    /// <para>
+    /// Ascending by UID, which RFC 3501 §2.3.1.2 makes the same order as ascending by message
+    /// sequence number: "Messages in a mailbox are also assigned a unique identifier … and
+    /// ascending order of unique identifier corresponds to ascending order of message sequence
+    /// number." The caller depends on that to read positions off the list.
+    /// </para>
+    /// </remarks>
+    Task<IReadOnlyList<ImapFlagState>> ReadFlagsAsync(
+        MailboxId mailboxId,
+        MailboxFolderId folderId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Which stored message each of these UIDs is a delivery of.
     /// </summary>
     /// <remarks>
@@ -188,19 +239,6 @@ public interface IImapMailboxReader
     /// </para>
     /// </remarks>
     /// <param name="uids">The UIDs to resolve. Scoped to the folder and the mailbox.</param>
-    /// <summary>
-    /// How many messages a folder holds, and nothing else.
-    /// </summary>
-    /// <remarks>
-    /// For <c>IDLE</c>, which asks this repeatedly while a client waits. Reading the summaries
-    /// and counting them would work and would read every row of the folder on every poll; this
-    /// is one aggregate over the index the folder is already keyed by.
-    /// </remarks>
-    Task<long> CountMessagesAsync(
-        MailboxId mailboxId,
-        MailboxFolderId folderId,
-        CancellationToken cancellationToken);
-
     Task<IReadOnlyDictionary<long, StoredMessageId>> ReadMessageIdsAsync(
         MailboxId mailboxId,
         MailboxFolderId folderId,

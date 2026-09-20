@@ -590,11 +590,27 @@ public sealed class ImapConnectionHandler(
     /// <b>The updates are real, and they come from polling the folder.</b> RFC 2177 §3: "as long
     /// as an IDLE command is active, the server is now free to send untagged EXISTS, EXPUNGE, and
     /// other messages at any time." This server has no cross-session notification bus, so it
-    /// watches the folder's message count on a short timer instead. That matters more than it
-    /// sounds: advertising <c>IDLE</c> and then never pushing would be actively worse than not
-    /// advertising it, because §3 tells a client that without the capability it "must poll for
-    /// mailbox updates" — so a client given a silent IDLE stops polling and sees new mail later
-    /// than it otherwise would.
+    /// watches the folder's message count and its flag-change counter on a short timer instead.
+    /// That matters more than it sounds: advertising <c>IDLE</c> and then never pushing would be
+    /// actively worse than not advertising it, because §3 tells a client that without the
+    /// capability it "must poll for mailbox updates" — so a client given a silent IDLE stops
+    /// polling and sees new mail later than it otherwise would.
+    /// </para>
+    /// <para>
+    /// <b>Flag changes are pushed as well as arrivals, which is what discharges RFC 3501
+    /// §6.4.6.</b> "Regardless of whether or not the <c>.SILENT</c> suffix was used, the server
+    /// SHOULD send an untagged FETCH response if a change to a message's flags from an external
+    /// source is observed. The intent is that the status of the flags is determinate without a
+    /// race condition." Two clients on one mailbox is the ordinary case, not the exotic one —
+    /// a phone and a desktop — and without this a message read on one shows as unread on the
+    /// other until something else makes it look. <see cref="ImapFlagWatch"/> holds the
+    /// comparison and the reasoning about whose numbering the positions belong to.
+    /// </para>
+    /// <para>
+    /// <b>Nothing selected is a legal idle, not a reason to hang up.</b> RFC 2177 §4 annotates
+    /// its <c>command_auth</c> production ";; Valid only in Authenticated or Selected state", so
+    /// a client may idle with no mailbox open — there is simply nothing to report to it, and it
+    /// waits for its <c>DONE</c> and its inactivity timeout like any other.
     /// </para>
     /// <para>
     /// <b>Only growth is pushed, and the baseline is what the client was told rather than what
@@ -638,6 +654,11 @@ public sealed class ImapConnectionHandler(
     {
         DateTimeOffset deadline = clock.UtcNow + CurrentTimeout(processor.Session, options);
 
+        // Before the first read, not after it: a watch seeded on the first poll would take
+        // whatever had changed during that poll's interval as its starting point and report
+        // none of it.
+        await SeedFlagWatchAsync(processor, cancellationToken).ConfigureAwait(false);
+
         while (true)
         {
             if (clock.UtcNow >= deadline)
@@ -664,24 +685,8 @@ public sealed class ImapConnectionHandler(
             if (line.Status == ImapLineStatus.Timeout)
             {
                 // Nothing from the client: look at the folder instead.
-                long? current = await processor
-                    .CountSelectedAsync(cancellationToken)
+                await PushFolderChangesAsync(stream, processor, cancellationToken)
                     .ConfigureAwait(false);
-
-                if (current is null)
-                {
-                    return false;
-                }
-
-                if (current > processor.Session.ReportedExists)
-                {
-                    await WriteAsync(
-                        stream,
-                        [ImapResponses.Exists(current.Value)],
-                        cancellationToken).ConfigureAwait(false);
-
-                    processor.Session.ReportExists(current.Value);
-                }
 
                 continue;
             }
@@ -709,6 +714,135 @@ public sealed class ImapConnectionHandler(
                 cancellationToken).ConfigureAwait(false);
 
             return true;
+        }
+    }
+
+    /// <summary>
+    /// Starts a flag watch over the selected folder, unless one is already running.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// One already running is the <c>DONE</c>-then-<c>IDLE</c> case, and reusing it is the point
+    /// — see <see cref="ImapSessionContext.FlagWatch"/>. Re-seeding there would quietly adopt
+    /// whatever changed between the two commands.
+    /// </para>
+    /// <para>
+    /// A session with no mailbox open gets no watch and no error. The next poll finds none and
+    /// has nothing to compare, which is the correct amount of work to do for a client that has
+    /// not told the server which folder it cares about.
+    /// </para>
+    /// <para>
+    /// <b>The counter is read before the rows, and that order is the safe one.</b> A flag change
+    /// landing between the two reads is caught by the rows and not by the counter, so the next
+    /// poll sees a counter it has not seen, looks again, and finds nothing new — one wasted
+    /// read. Reading the rows first would record a counter that already covered a change the
+    /// baseline had silently absorbed, and that change would never be reported at all.
+    /// </para>
+    /// </remarks>
+    private static async Task SeedFlagWatchAsync(
+        ImapCommandProcessor processor,
+        CancellationToken cancellationToken)
+    {
+        if (processor.Session.FlagWatch is not null)
+        {
+            return;
+        }
+
+        ImapFolderPoll? poll = await processor
+            .PollSelectedAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (poll is null)
+        {
+            return;
+        }
+
+        IReadOnlyList<ImapFlagState>? folder = await processor
+            .ReadSelectedFlagsAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (folder is null)
+        {
+            return;
+        }
+
+        processor.Session.StartFlagWatch(ImapFlagWatch.Start(folder, poll.Value.FlagsModSeq));
+    }
+
+    /// <summary>
+    /// Looks at the selected folder once and writes whatever the client has not been told.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The <c>EXISTS</c> is written before the flag reports, and that ordering is load-bearing
+    /// rather than tidy.</b> A <c>FETCH</c> naming a position the client does not yet believe
+    /// exists is a response about a message it cannot identify, so the watch is told how many
+    /// messages the client has been told about <i>after</i> any <c>EXISTS</c> in the same look
+    /// has moved that number.
+    /// </para>
+    /// <para>
+    /// <b>The folder's rows are read only when the cheap numbers say something happened.</b>
+    /// That is the whole reason <c>FlagsModSeq</c> exists; see the 0013 migration. A folder
+    /// nothing has touched costs one row per poll however much mail it holds.
+    /// </para>
+    /// <para>
+    /// Everything goes out in one write, so a client cannot observe an arrival and its flags as
+    /// two separate events.
+    /// </para>
+    /// <para>
+    /// The counter that is recorded is the one read before the rows, for the reason
+    /// <see cref="SeedFlagWatchAsync"/> gives: it errs towards looking again rather than towards
+    /// missing a change.
+    /// </para>
+    /// </remarks>
+    private static async Task PushFolderChangesAsync(
+        Stream stream,
+        ImapCommandProcessor processor,
+        CancellationToken cancellationToken)
+    {
+        ImapFolderPoll? polled = await processor
+            .PollSelectedAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (polled is null)
+        {
+            return;
+        }
+
+        ImapFolderPoll poll = polled.Value;
+        List<ImapResponse> responses = [];
+
+        if (poll.ExistsCount > processor.Session.ReportedExists)
+        {
+            responses.Add(ImapResponses.Exists(poll.ExistsCount));
+            processor.Session.ReportExists(poll.ExistsCount);
+        }
+
+        if (processor.Session.FlagWatch is { } watch &&
+            watch.NeedsLook(poll.ExistsCount, poll.FlagsModSeq))
+        {
+            IReadOnlyList<ImapFlagState>? folder = await processor
+                .ReadSelectedFlagsAsync(cancellationToken)
+                .ConfigureAwait(false);
+
+            if (folder is not null)
+            {
+                foreach (ImapFlagChange change in watch.Observe(
+                    folder,
+                    poll.FlagsModSeq,
+                    processor.Session.ReportedExists))
+                {
+                    responses.Add(ImapResponses.FetchFlags(
+                        change.SequenceNumber,
+                        change.Uid,
+                        change.Flags));
+                }
+            }
+        }
+
+        if (responses.Count > 0)
+        {
+            await WriteAsync(stream, responses, cancellationToken).ConfigureAwait(false);
         }
     }
 
