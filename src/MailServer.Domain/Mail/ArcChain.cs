@@ -57,6 +57,16 @@ public sealed record ArcSealTags(
             return false;
         }
 
+        // RFC 8617 §4.1.3, on the tags an ARC-Seal may carry: "Note especially that the DKIM 'h'
+        // tag is NOT allowed and, if found, MUST result in a cv status of 'fail'". A seal
+        // carrying one is therefore not a seal whose chain can be valid, and reporting it as
+        // well-formed would hand a consumer a chain the RFC requires them to reject.
+        if (tags.ContainsKey("h"))
+        {
+            error = "an ARC-Seal carries an h= tag, which RFC 8617 §4.1.3 does not allow.";
+            return false;
+        }
+
         error = null;
         result = new ArcSealTags(instance, algorithm, cv, signingDomain, selector, signatureValue);
         return true;
@@ -226,8 +236,14 @@ public sealed record ArcSet(
 /// <param name="IsWellFormed">
 /// True when the chain has no structural defect this groundwork checks for: every ARC-* header
 /// parsed, instances run 1..N with no gaps and no instance repeated, every instance is complete,
-/// and only instance 1's <c>ARC-Seal</c> declares <c>cv=none</c>.
+/// and every <c>ARC-Seal</c>'s <c>cv=</c> is what RFC 8617 §5.2 step 3C requires of it —
+/// <c>none</c> at instance 1, <c>pass</c> above it, and <c>fail</c> nowhere.
 /// </param>
+/// <remarks>
+/// <b>Still not a validation.</b> Every one of those checks reads a tag; none verifies a
+/// signature, which is what RFC 8617 §5.2's other six steps are for. A well-formed chain is one
+/// whose structure does not already rule it out, not one that has been shown to be genuine.
+/// </remarks>
 /// <param name="Diagnostic">What was wrong, when <paramref name="IsWellFormed"/> is false.</param>
 public sealed record ArcChainParseResult(IReadOnlyList<ArcSet> Sets, bool IsWellFormed, string? Diagnostic);
 
@@ -301,6 +317,21 @@ public static class ArcChain
             if (instance > 1 && seal.ChainValidation == ArcChainValidation.None)
             {
                 errors.Add($"instance {instance}'s ARC-Seal declares cv=none, but only instance 1 may.");
+            }
+
+            // RFC 8617 §5.2 step 3C: "The 'cv' value for all ARC-Seal header fields MUST NOT be
+            // 'fail'. For ARC Sets with instance values > 1, the values MUST be 'pass'. For the
+            // ARC Set with instance value = 1, the value MUST be 'none'." §5.1.3 is what makes
+            // this terminal rather than advisory - "Once broken, the chain cannot be continued" -
+            // so a set declaring cv=fail is a chain that is already over, and no amount of
+            // structure below it changes that.
+            // The other half of step 3C - "For ARC Sets with instance values > 1, the values MUST
+            // be 'pass'" - needs no branch of its own: cv is one of three values, and the check
+            // above has already rejected cv=none above instance 1, so anything reaching here
+            // that is not "pass" is "fail".
+            if (seal.ChainValidation == ArcChainValidation.Fail)
+            {
+                errors.Add($"instance {instance}'s ARC-Seal declares cv=fail, which RFC 8617 §5.2 forbids on any seal.");
             }
         }
 
