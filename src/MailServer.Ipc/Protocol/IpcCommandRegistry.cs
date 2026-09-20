@@ -254,5 +254,6 @@ public sealed class IpcCommandRegistry
         new("Deliverability.Report", typeof(GetDeliverabilityReportQuery), typeof(DeliverabilityReportDto)),
         new("Deliverability.AnalyseHeaders", typeof(AnalyseHeadersQuery), typeof(HeaderAnalysisDto)),
         new("Deliverability.DnsPlan", typeof(GetDnsPlanQuery), typeof(DnsPlanDto)),
+        new("Deliverability.DeliveryTest", typeof(RunDeliveryTestCommand), typeof(DeliveryTestDto)),
     ];
 }

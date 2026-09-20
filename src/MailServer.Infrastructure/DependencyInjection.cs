@@ -273,6 +273,9 @@ public static class DependencyInjection
         // that id changes - so the served bytes and the advertised id must be one fact.
         services.TryAddSingleton<IMtaStsPolicySource, MtaStsPolicySource>();
 
+        // The delivery test. Scoped, because it reads the domain and DKIM repositories.
+        services.TryAddScoped<IDeliveryTestService, DeliveryTestService>();
+
         // The blocklists are whatever the operator named, and nothing by default: see
         // DeliverabilityOptions.BlockLists for why shipping a default set would be wrong.
         services.TryAddSingleton<IReputationProvider>(provider => new DnsBlockListProvider(

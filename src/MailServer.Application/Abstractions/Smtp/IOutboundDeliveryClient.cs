@@ -20,7 +20,19 @@ public sealed record OutboundDeliveryRequest(
     EmailAddress? ReversePath,
     EmailAddress RecipientAddress,
     StoredMessageId MessageId,
-    bool RequireTls);
+    bool RequireTls)
+{
+    /// <summary>
+    /// Whether to keep a command-and-reply record of the conversation.
+    /// </summary>
+    /// <remarks>
+    /// Off for ordinary queue delivery, which runs thousands of these and already has
+    /// <see cref="Domain.Entities.DeliveryAttempt"/> rows for its evidence. The delivery test
+    /// turns it on because being able to read what the remote said at each step is the whole
+    /// point of it. Never records message content — see <c>SmtpTranscript</c>.
+    /// </remarks>
+    public bool RecordTranscript { get; init; }
+}
 
 /// <summary>
 /// Everything worth recording about one attempt, whether it succeeded or not.
@@ -41,7 +53,20 @@ public sealed record OutboundDeliveryResult(
     int? ReplyCode,
     string? EnhancedStatus,
     string? ReplyText,
-    string? ErrorDetail);
+    string? ErrorDetail)
+{
+    /// <summary>
+    /// The conversation, when <see cref="OutboundDeliveryRequest.RecordTranscript"/> asked for
+    /// one. Empty otherwise.
+    /// </summary>
+    /// <remarks>
+    /// An init-only property rather than another positional parameter, so that adding it did not
+    /// touch the several places a <see cref="OutboundDeliveryResult"/> is constructed — and so
+    /// that <see cref="Domain.Entities.DeliveryAttempt"/>, which this record is shaped to map
+    /// onto, keeps the same shape it had.
+    /// </remarks>
+    public IReadOnlyList<string> Transcript { get; init; } = [];
+}
 
 /// <summary>
 /// Speaks the client side of one SMTP conversation to a remote mail exchanger.

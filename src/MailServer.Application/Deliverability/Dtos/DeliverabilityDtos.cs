@@ -253,3 +253,66 @@ public sealed record DnsPlanDto
     /// </remarks>
     public required string ZoneText { get; init; }
 }
+
+/// <summary>What one delivery test observed.</summary>
+/// <remarks>
+/// <b>The transcript carries no message content and no credential.</b> It is the command and
+/// reply lines only — see <c>SmtpTranscript</c> — so an operator can paste it into a support
+/// ticket without pasting somebody's mail along with it.
+/// </remarks>
+public sealed record DeliveryTestDto
+{
+    /// <summary>Whether the remote accepted the message.</summary>
+    public required bool Succeeded { get; init; }
+
+    /// <summary>The address the probe was sent to.</summary>
+    public required string Recipient { get; init; }
+
+    /// <summary>The <c>Message-ID</c> on the probe, so it can be found at the far end.</summary>
+    public required string MessageId { get; init; }
+
+    /// <summary>The exchanger chosen, or null when none could be resolved.</summary>
+    public string? MxHost { get; init; }
+
+    /// <summary>That exchanger's preference, for comparing against the DNS plan.</summary>
+    public int? MxPreference { get; init; }
+
+    /// <summary>The address actually connected to.</summary>
+    public string? RemoteAddress { get; init; }
+
+    /// <summary>The negotiated protocol, or null when the session stayed in plaintext.</summary>
+    public string? TlsProtocol { get; init; }
+
+    /// <summary>The negotiated cipher suite.</summary>
+    public string? TlsCipher { get; init; }
+
+    /// <summary>The remote's certificate subject, as presented.</summary>
+    public string? PeerCertificateSubject { get; init; }
+
+    /// <summary>The remote's certificate issuer.</summary>
+    public string? PeerCertificateIssuer { get; init; }
+
+    /// <summary>
+    /// The selector the probe was signed with, or null when it was not signed — which is itself
+    /// the finding, since a receiver will report an unsigned message as <c>dkim=none</c>.
+    /// </summary>
+    public string? DkimSelector { get; init; }
+
+    /// <summary>The remote's final reply code.</summary>
+    public int? ReplyCode { get; init; }
+
+    /// <summary>Its enhanced status code, when it sent one.</summary>
+    public string? EnhancedStatus { get; init; }
+
+    /// <summary>Its final reply text.</summary>
+    public string? ReplyText { get; init; }
+
+    /// <summary>What went wrong, when the test could not complete.</summary>
+    public string? ErrorDetail { get; init; }
+
+    /// <summary>How long the whole attempt took.</summary>
+    public required long ElapsedMilliseconds { get; init; }
+
+    /// <summary>The conversation, command and reply.</summary>
+    public required IReadOnlyList<string> Transcript { get; init; }
+}

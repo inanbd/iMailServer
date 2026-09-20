@@ -80,6 +80,24 @@ internal sealed class OutboundSmtpClient(
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        // Only the delivery test asks for one. Ordinary queue delivery runs thousands of these
+        // and has DeliveryAttempt rows for its evidence; holding a transcript for each would be
+        // memory spent on something nothing reads.
+        SmtpTranscript? transcript = request.RecordTranscript ? new SmtpTranscript() : null;
+
+        OutboundDeliveryResult result = await DeliverCoreAsync(request, transcript, cancellationToken)
+            .ConfigureAwait(false);
+
+        // Attached at the one exit rather than at each of the dozen returns inside, so a path
+        // added later cannot forget it.
+        return transcript is null ? result : result with { Transcript = transcript.Lines };
+    }
+
+    private async Task<OutboundDeliveryResult> DeliverCoreAsync(
+        OutboundDeliveryRequest request,
+        SmtpTranscript? transcript,
+        CancellationToken cancellationToken)
+    {
         using TcpClient tcp = new();
         IpAddressValue? remoteAddress = null;
 
@@ -110,8 +128,13 @@ internal sealed class OutboundSmtpClient(
             SmtpLineReader reader = new(stream, MaxReplyLineOctets);
             TimeSpan commandTimeout = TimeSpan.FromSeconds(Options.CommandTimeoutSeconds);
 
+            transcript?.Note(
+                $"Connected to {request.TargetHost}:{request.Port} at {remoteAddress?.Value ?? "an unknown address"}.");
+
             SmtpReply banner = await SmtpReplyParser.ReadAsync(reader, commandTimeout, cancellationToken)
                 .ConfigureAwait(false);
+
+            transcript?.Received(banner);
 
             if (!banner.IsSuccess)
             {
@@ -119,7 +142,7 @@ internal sealed class OutboundSmtpClient(
             }
 
             (SmtpReply ehlo, IReadOnlyList<string> capabilities) = await EhloAsync(
-                stream, reader, commandTimeout, cancellationToken).ConfigureAwait(false);
+                stream, reader, commandTimeout, transcript, cancellationToken).ConfigureAwait(false);
 
             if (!ehlo.IsSuccess)
             {
@@ -162,13 +185,20 @@ internal sealed class OutboundSmtpClient(
                 // RFC 3207 §4.2: capabilities learned before the handshake must be discarded
                 // and re-learned over the encrypted channel, or a network attacker who stripped
                 // an advertised capability before the upgrade would still have succeeded.
-                (SmtpReply postTlsEhlo, _) = await EhloAsync(stream, reader, commandTimeout, cancellationToken)
+                (SmtpReply postTlsEhlo, _) = await EhloAsync(
+                    stream, reader, commandTimeout, transcript, cancellationToken)
                     .ConfigureAwait(false);
 
                 if (!postTlsEhlo.IsSuccess)
                 {
                     return Classify(remoteAddress, tlsOutcome, postTlsEhlo, "EHLO after STARTTLS");
                 }
+
+                transcript?.Note(
+                    $"TLS negotiated: {tlsOutcome.Protocol} with {tlsOutcome.Cipher}, " +
+                    $"peer certificate {(tlsOutcome.Trusted ? "trusted" : "not trusted")}. " +
+                    $"Peer certificate subject {tlsOutcome.PeerSubject ?? "(none)"}, " +
+                    $"issuer {tlsOutcome.PeerIssuer ?? "(none)"}.");
 
                 activeTls = tlsOutcome;
             }
@@ -178,7 +208,7 @@ internal sealed class OutboundSmtpClient(
                 : $"MAIL FROM:<{request.ReversePath.Value}>";
 
             SmtpReply mailFromReply = await SendCommandAsync(
-                stream, reader, mailFromArgument, commandTimeout, cancellationToken).ConfigureAwait(false);
+                stream, reader, mailFromArgument, commandTimeout, cancellationToken, transcript).ConfigureAwait(false);
 
             if (!mailFromReply.IsSuccess)
             {
@@ -186,7 +216,7 @@ internal sealed class OutboundSmtpClient(
             }
 
             SmtpReply rcptReply = await SendCommandAsync(
-                stream, reader, $"RCPT TO:<{request.RecipientAddress.Value}>", commandTimeout, cancellationToken)
+                stream, reader, $"RCPT TO:<{request.RecipientAddress.Value}>", commandTimeout, cancellationToken, transcript)
                 .ConfigureAwait(false);
 
             if (!rcptReply.IsSuccess)
@@ -195,7 +225,7 @@ internal sealed class OutboundSmtpClient(
             }
 
             SmtpReply dataReply = await SendCommandAsync(
-                stream, reader, "DATA", commandTimeout, cancellationToken).ConfigureAwait(false);
+                stream, reader, "DATA", commandTimeout, cancellationToken, transcript).ConfigureAwait(false);
 
             if (!dataReply.IsIntermediate)
             {
@@ -212,11 +242,13 @@ internal sealed class OutboundSmtpClient(
             SmtpReply finalReply = await SmtpReplyParser.ReadAsync(reader, dataTimeout, cancellationToken)
                 .ConfigureAwait(false);
 
+            transcript?.Received(finalReply);
+
             // QUIT is best-effort: the delivery outcome is already decided by the reply above,
             // and a peer that hangs up first has already told us everything it is going to.
             try
             {
-                await SendCommandAsync(stream, reader, "QUIT", commandTimeout, cancellationToken)
+                await SendCommandAsync(stream, reader, "QUIT", commandTimeout, cancellationToken, transcript)
                     .ConfigureAwait(false);
             }
             catch (IOException)
@@ -243,21 +275,24 @@ internal sealed class OutboundSmtpClient(
         Stream stream,
         SmtpLineReader reader,
         TimeSpan timeout,
+        SmtpTranscript? transcript,
         CancellationToken cancellationToken)
     {
         SmtpReply ehlo = await SendCommandAsync(
-            stream, reader, $"EHLO {serverIdentity.Hostname}", timeout, cancellationToken)
+            stream, reader, $"EHLO {serverIdentity.Hostname}", timeout, cancellationToken, transcript)
             .ConfigureAwait(false);
 
         if (ehlo.IsSuccess)
         {
+            // The capabilities are the reply's own continuation lines, which the transcript
+            // already holds as part of the reply. Noting them again would duplicate them.
             return (ehlo, ehlo.ContinuationLines);
         }
 
         // A peer that does not understand EHLO at all - vanishingly rare, but RFC 5321 requires
         // the fallback - simply cannot use any ESMTP extension, STARTTLS included.
         SmtpReply helo = await SendCommandAsync(
-            stream, reader, $"HELO {serverIdentity.Hostname}", timeout, cancellationToken)
+            stream, reader, $"HELO {serverIdentity.Hostname}", timeout, cancellationToken, transcript)
             .ConfigureAwait(false);
 
         return (helo, []);
@@ -268,13 +303,22 @@ internal sealed class OutboundSmtpClient(
         SmtpLineReader reader,
         string command,
         TimeSpan timeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        SmtpTranscript? transcript = null)
     {
         byte[] bytes = Encoding.UTF8.GetBytes(command + "\r\n");
         await stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
         await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
 
-        return await SmtpReplyParser.ReadAsync(reader, timeout, cancellationToken).ConfigureAwait(false);
+        transcript?.Sent(command);
+
+        SmtpReply reply = await SmtpReplyParser
+            .ReadAsync(reader, timeout, cancellationToken)
+            .ConfigureAwait(false);
+
+        transcript?.Received(reply);
+
+        return reply;
     }
 
     private async Task StreamMessageBodyAsync(

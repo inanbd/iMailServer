@@ -5,6 +5,8 @@ using MailServer.Application.Acme.Queries;
 using MailServer.Application.Certificates.Commands;
 
 using MailServer.Application.Certificates.Dtos;
+using MailServer.Application.Deliverability.Dtos;
+using MailServer.Application.Deliverability.Queries;
 using MailServer.Application.Certificates.Queries;
 using MailServer.Application.Domains.Commands;
 using MailServer.Application.Mailboxes.Commands;
@@ -267,6 +269,39 @@ public interface IAdminGateway
     Task UpdateAliasAsync(UpdateAliasCommand command, CancellationToken cancellationToken = default);
 
     Task DeleteAliasAsync(Guid aliasId, CancellationToken cancellationToken = default);
+
+    // ---- Deliverability ---------------------------------------------------------------------
+
+    /// <summary>Runs every readiness check and returns the scored report with its evidence.</summary>
+    Task<DeliverabilityReportDto> GetDeliverabilityReportAsync(
+        string domain,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Writes the DNS records a domain needs, and the caveats no record discharges.</summary>
+    Task<DnsPlanDto> GetDnsPlanAsync(
+        string domain,
+        string? dmarcReportAddress = null,
+        string? tlsReportAddress = null,
+        string? mtaStsId = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Re-evaluates a pasted header block, doing its own lookups.</summary>
+    Task<HeaderAnalysisDto> AnalyseHeadersAsync(
+        string headers,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Sends one real message to a nominated address and reports the conversation.
+    /// </summary>
+    /// <remarks>
+    /// Unlike every other call here this one <i>emits traffic</i> from this server's IP, which
+    /// is why the service puts it behind the write-level mail-flow permission rather than the
+    /// read-only one the other deliverability calls use.
+    /// </remarks>
+    Task<DeliveryTestDto> RunDeliveryTestAsync(
+        string from,
+        string to,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>Implements <see cref="IAdminGateway"/> over <see cref="IpcClient"/>.</summary>
@@ -982,4 +1017,61 @@ public sealed class AdminGateway(IpcClient client) : IAdminGateway
                 new DeleteAliasCommand { AliasId = aliasId },
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false);
+
+    // ---- Deliverability ---------------------------------------------------------------------
+
+    public async Task<DeliverabilityReportDto> GetDeliverabilityReportAsync(
+        string domain,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetDeliverabilityReportQuery, DeliverabilityReportDto>(
+                "Deliverability.Report",
+                new GetDeliverabilityReportQuery { Domain = domain },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException(
+            "The service returned an empty deliverability report.");
+
+    public async Task<DnsPlanDto> GetDnsPlanAsync(
+        string domain,
+        string? dmarcReportAddress = null,
+        string? tlsReportAddress = null,
+        string? mtaStsId = null,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetDnsPlanQuery, DnsPlanDto>(
+                "Deliverability.DnsPlan",
+                new GetDnsPlanQuery
+                {
+                    Domain = domain,
+                    DmarcReportAddress = dmarcReportAddress,
+                    TlsReportAddress = tlsReportAddress,
+                    MtaStsId = mtaStsId,
+                },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException("The service returned an empty DNS plan.");
+
+    public async Task<HeaderAnalysisDto> AnalyseHeadersAsync(
+        string headers,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<AnalyseHeadersQuery, HeaderAnalysisDto>(
+                "Deliverability.AnalyseHeaders",
+                new AnalyseHeadersQuery { Headers = headers },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException("The service returned an empty header analysis.");
+
+    public async Task<DeliveryTestDto> RunDeliveryTestAsync(
+        string from,
+        string to,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<RunDeliveryTestCommand, DeliveryTestDto>(
+                "Deliverability.DeliveryTest",
+                new RunDeliveryTestCommand { From = from, To = to },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException("The service returned an empty delivery test result.");
 }
