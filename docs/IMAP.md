@@ -4,9 +4,11 @@
 >
 > Every command below is implemented and covered by tests, but that criterion is
 > "Thunderbird/Outlook/Apple Mail interoperate without mail loss" and no real client has
-> yet connected to this server. Everything here rests on the RFC text and on this product's
-> own tests. Read the next section for why that distinction matters more here than anywhere
-> else in this codebase.
+> yet connected to this server. One known conformance gap stands in the way of even trying:
+> **literals are read only for `APPEND`** — see
+> [What is actually built, and the gap](#what-is-actually-built-and-the-gap). Everything here
+> rests on the RFC text and on this product's own tests. Read the next section for why that
+> distinction matters more here than anywhere else in this codebase.
 
 ## Why this is the riskiest subsystem
 
@@ -44,7 +46,8 @@ incorrectly.
 **before the server can refuse**, which without a cap is a trivial memory exhaustion. Above a
 threshold, literals stream to disk rather than to memory.
 
-**The capability advertised for this is `LITERAL-`, not `LITERAL+`.** RFC 7888 defines both:
+**The capability this design calls for is `LITERAL-`, not `LITERAL+`** — though note the next
+section: nothing is advertised yet. RFC 7888 defines both:
 they permit the same `{n+}` syntax, but `LITERAL-` caps a non-synchronising literal at 4096
 octets while `LITERAL+` places no bound on one at all, and §5 forbids advertising both at once.
 Requiring a hard cap, as the paragraph above does, is the same thing as deciding this is not a
@@ -55,6 +58,35 @@ connection, which §4 notes "some naive clients are known to blindly reconnect" 
 "introducing an infinite loop". That is a reconnect loop built into a denial-of-service defence.
 `LITERAL-` states the cap up front instead, and a complying client sends a synchronising literal
 above it — which the server can refuse before a single octet of it arrives.
+
+### What is actually built, and the gap
+
+**Only `APPEND` reads a literal.** `ImapConnectionHandler` intercepts `APPEND` before the
+ordinary dispatch precisely because its last argument is not on the command line, sends the
+continuation for a synchronising `{n}`, skips it for a non-synchronising `{n+}`, and streams the
+octets straight to the message store. That path is complete and tested.
+
+**Every other command is parsed from a single line, and that is the conformance gap.** RFC 3501
+§4.3 admits a literal wherever the grammar has an `astring` — a mailbox name, a userid, a
+`SEARCH` term. `ImapAstringReader` recognises the specifier and reports
+`ImapAstringKind.Literal` rather than resolving it, deliberately, because it is handed one line
+and the octets are not on it. But no handler outside `APPEND` then goes and fetches them, so
+`TryReadText` fails and the command draws a tagged `BAD`. The client, having been given no
+continuation, either waits for a `+` that never comes (synchronising) or sends octets that this
+server parses as a fresh command line (non-synchronising). Both are worse than a clean refusal.
+
+This is not a corner case. Clients send literals for mailbox names outside ASCII and for
+`SEARCH` strings with 8-bit characters, which is exactly the traffic
+"Thunderbird/Outlook/Apple Mail interoperate without mail loss" is meant to prove. **Closing it
+is a prerequisite for the milestone's exit criterion, not a follow-up to it.**
+
+Closing it means: detecting a trailing specifier on any command line, reading the octets with the
+continuation handshake the synchronising form requires, reassembling the command with each
+literal's value substituted (a command may carry several), and bounding the total — the memory
+exhaustion the top of this section warns about applies to a `SEARCH` argument just as it does to
+a message. **`LITERAL-` can be advertised once that exists and the 4096-octet cap is enforced on
+the non-synchronising form specifically**; today `MaxAppendOctets`, sized for a message, is the
+only bound, so the atom would promise a cap this server does not apply.
 
 ## Special-use folders
 
