@@ -7,6 +7,7 @@ using MailServer.Application.Acme.Commands;
 using MailServer.Application.Acme.Dtos;
 using MailServer.Application.Acme.Queries;
 using MailServer.Application.Deliverability.Dtos;
+using MailServer.Application.Deliverability.Commands;
 using MailServer.Application.Deliverability.Queries;
 using MailServer.Application.Certificates.Commands;
 using MailServer.Application.Certificates.Dtos;
@@ -246,15 +247,22 @@ public sealed class IpcCommandRegistry
 
         // ---- Deliverability -------------------------------------------------------------------
         //
-        // Both read-only, and both ViewServerState rather than ReadMessageContent: the report
-        // reads this server's own configuration and public DNS, and the analyser reads headers
-        // the operator pasted into the request. Neither opens a stored message, which is the
-        // boundary ReadMessageContent exists to guard - and the moment either did, it would need
+        // The first three are read-only and ask for ViewServerState rather than
+        // ReadMessageContent: the report reads this server's own configuration and public DNS,
+        // the analyser reads headers the operator pasted into the request, and the DNS plan reads
+        // configuration and a DKIM key's public half. None opens a stored message, which is the
+        // boundary ReadMessageContent exists to guard - and the moment one did, it would need
         // that permission instead.
         new("Deliverability.Report", typeof(GetDeliverabilityReportQuery), typeof(DeliverabilityReportDto)),
         new("Deliverability.AnalyseHeaders", typeof(AnalyseHeadersQuery), typeof(HeaderAnalysisDto)),
         new("Deliverability.DnsPlan", typeof(GetDnsPlanQuery), typeof(DnsPlanDto)),
+
+        // DeliveryTest is the exception and asks for ManageQueue, because it is the one command
+        // here that sends mail to a third party. That is the power ManageQueue already governs -
+        // retrying a queued item causes a send in the same way - so asking for ViewServerState
+        // would let anyone who can read a graph send mail from the operator's domain.
         new("Deliverability.DeliveryTest", typeof(RunDeliveryTestCommand), typeof(DeliveryTestDto)),
+
         new("Deliverability.AnalyseTlsReport", typeof(AnalyseTlsReportQuery), typeof(TlsReportDto)),
         new("Deliverability.TlsReports", typeof(GetCollectedTlsReportsQuery), typeof(IReadOnlyList<CollectedTlsReportDto>)),
     ];

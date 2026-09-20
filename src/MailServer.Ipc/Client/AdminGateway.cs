@@ -5,6 +5,7 @@ using MailServer.Application.Acme.Queries;
 using MailServer.Application.Certificates.Commands;
 
 using MailServer.Application.Certificates.Dtos;
+using MailServer.Application.Deliverability.Commands;
 using MailServer.Application.Deliverability.Dtos;
 using MailServer.Application.Deliverability.Queries;
 using MailServer.Application.Certificates.Queries;
@@ -299,8 +300,9 @@ public interface IAdminGateway
     /// read-only one the other deliverability calls use.
     /// </remarks>
     Task<DeliveryTestDto> RunDeliveryTestAsync(
-        string from,
-        string to,
+        string sender,
+        string recipient,
+        bool requireTls = false,
         CancellationToken cancellationToken = default);
 
     /// <summary>Reads an RFC 8460 TLS report and says what it means.</summary>
@@ -1069,13 +1071,19 @@ public sealed class AdminGateway(IpcClient client) : IAdminGateway
         ?? throw new InvalidOperationException("The service returned an empty header analysis.");
 
     public async Task<DeliveryTestDto> RunDeliveryTestAsync(
-        string from,
-        string to,
+        string sender,
+        string recipient,
+        bool requireTls = false,
         CancellationToken cancellationToken = default) =>
         await client
             .SendAsync<RunDeliveryTestCommand, DeliveryTestDto>(
                 "Deliverability.DeliveryTest",
-                new RunDeliveryTestCommand { From = from, To = to },
+                new RunDeliveryTestCommand
+                {
+                    Sender = sender,
+                    Recipient = recipient,
+                    RequireTls = requireTls,
+                },
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false)
         ?? throw new InvalidOperationException("The service returned an empty delivery test result.");

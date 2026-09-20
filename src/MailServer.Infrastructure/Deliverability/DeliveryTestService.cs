@@ -1,247 +1,203 @@
-using System.Diagnostics;
-using System.Text;
 using MailServer.Application.Abstractions.Deliverability;
 using MailServer.Application.Abstractions.Dns;
 using MailServer.Application.Abstractions.Platform;
-using MailServer.Application.Abstractions.Repositories;
 using MailServer.Application.Abstractions.Smtp;
 using MailServer.Application.Abstractions.Time;
-using MailServer.Domain.Entities;
+using MailServer.Domain.Deliverability;
 using MailServer.Domain.Enums;
 using MailServer.Domain.Policies;
 using MailServer.Domain.ValueObjects;
+using MailServer.Infrastructure.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace MailServer.Infrastructure.Deliverability;
 
 /// <summary>
-/// Sends one probe message down the production delivery path and records the conversation.
+/// Sends one real message and hands back the conversation.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Everything here is the real path.</b> The same <see cref="IDnsResolver"/>, the same
-/// <see cref="MxSelectionPolicy"/>, the same <see cref="IOutboundDeliveryClient"/> with the same
-/// DKIM signing that ordinary mail goes through. A delivery test built on a parallel
-/// implementation would prove that the parallel implementation works, which is not the question
-/// anybody is asking. What this adds is a stopwatch and a transcript.
+/// <b>Every step is the one the queue takes.</b> The same <see cref="IDnsResolver"/> for MX,
+/// the same <see cref="MxSelection.OrderForAttempt"/> ordering, the same
+/// <see cref="IOutboundDeliveryClient"/>, the same port from the same options. What differs is
+/// that this one carries a <see cref="DeliveryTranscript"/> and is not driven by a queue item —
+/// and nothing else, because a test that took a different path would answer a question nobody
+/// asked.
 /// </para>
 /// <para>
-/// <b>The probe is deliberately dull.</b> A plain-text message with a subject that says what it
-/// is, no attachments, nothing that a spam filter has to think hard about — because the result
-/// should say something about this server's configuration rather than about the content. It is
-/// still real mail: it lands in a real mailbox, from this server's real IP, and the operator
-/// should be sending it to an address they own.
+/// <b>The stored message is deleted afterwards, and the delete is the last thing to happen.</b>
+/// A test message is not mail anybody is keeping, and leaving one behind per run would grow the
+/// store for nothing. Deleting it before the send would be worse than not storing it at all —
+/// the client streams the body from the store during <c>DATA</c>, so the octets have to still be
+/// there.
 /// </para>
 /// <para>
-/// <b>It sends straight rather than through the queue.</b> The queue's retries and backoff are
-/// exactly wrong for a diagnostic: an operator running a test wants to know what happened now,
-/// not to have a failure retried quietly for the next six hours. So a transient failure is
-/// reported as a failure, with the reply that caused it, and nothing is scheduled.
+/// <b>Nothing here retries.</b> The queue's job is to keep trying; this one's is to say what
+/// happened once, so a temporary refusal is reported as a temporary refusal rather than
+/// hidden behind a backoff the operator is not watching.
 /// </para>
 /// </remarks>
 public sealed class DeliveryTestService(
-    IDnsResolver resolver,
-    IOutboundDeliveryClient outbound,
+    IDnsResolver dns,
     IMessageStore messageStore,
-    IDomainRepository domains,
-    IDkimKeyRepository dkimKeys,
+    IOutboundDeliveryClient client,
     IServerIdentityProvider serverIdentity,
     IClock clock,
+    IOptions<MailServerOptions> options,
     ILogger<DeliveryTestService> logger) : IDeliveryTestService
 {
     /// <summary>
-    /// The largest probe this will write.
+    /// The same ordering the queue applies: ascending preference band, shuffled within a band.
     /// </summary>
     /// <remarks>
-    /// The probe is a few hundred bytes of plain text; this exists so the writer has a bound at
-    /// all rather than because anything is expected to approach it.
+    /// Shared with <c>OutboundDeliveryHostedService</c> rather than reimplemented, because RFC
+    /// 5321 §5.1's within-band shuffle is the reason a test run twice can pick a different host
+    /// of equal preference — and an operator comparing two runs should be seeing the same rule
+    /// the queue uses, not a tidier version of it.
     /// </remarks>
-    private const long MaxProbeBytes = 64 * 1024;
+    private static readonly MxSelectionPolicy MxSelection = new();
 
-    public async Task<DeliveryTestResult> RunAsync(
-        EmailAddress from,
-        EmailAddress to,
+    public async Task<DeliveryTestOutcome> RunAsync(
+        DeliveryTestRequest request,
         CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(from);
-        ArgumentNullException.ThrowIfNull(to);
+        ArgumentNullException.ThrowIfNull(request);
 
-        long startedAt = Stopwatch.GetTimestamp();
         string messageId = $"<{Guid.NewGuid():N}@{serverIdentity.Hostname}>";
 
-        MxLookupResult mx = await resolver
-            .ResolveMxAsync(to.Domain, cancellationToken)
+        MxLookupResult mx = await dns
+            .ResolveMxAsync(request.Recipient.Domain, cancellationToken)
             .ConfigureAwait(false);
 
-        if (mx.Status != DnsLookupStatus.Success || mx.Hosts.Count == 0)
+        IReadOnlyList<MxHost> candidates = mx.Status == DnsLookupStatus.Success
+            ? MxSelection.OrderForAttempt(mx.Hosts)
+            : [];
+
+        if (candidates.Count == 0)
         {
-            // No exchanger means there is nothing to test against, and it is the most common
-            // real answer for a mistyped domain. Reported as the DNS failure it is rather than
-            // as a delivery failure, because the two have completely different remedies.
-            return Failed(
-                to,
+            // The same classification the queue applies: a SERVFAIL is worth retrying and an
+            // NXDOMAIN or a null MX never is, and conflating them is how a domain that does not
+            // exist earns an infinite retry loop. See docs/DNS.md's failure-semantics table.
+            return new DeliveryTestOutcome(
+                mx.Status == DnsLookupStatus.Temporary ? DeliveryOutcome.Deferred : DeliveryOutcome.Bounced,
+                request.Sender,
+                request.Recipient,
                 messageId,
-                startedAt,
-                $"No mail exchanger could be resolved for {to.Domain.Value}: " +
-                $"{mx.Diagnostic ?? mx.Status.ToString()}.");
+                [],
+                [],
+                mx.Diagnostic ?? $"No mail exchanger could be resolved for {request.Recipient.Domain.Value}.");
         }
 
-        MxHost chosen = new MxSelectionPolicy().OrderForAttempt(mx.Hosts)[0];
-
-        string? selector = await ActiveSelectorAsync(from.Domain, cancellationToken).ConfigureAwait(false);
-
-        StoredMessageId stored;
+        StoredMessageId stored = await StoreAsync(request, messageId, cancellationToken)
+            .ConfigureAwait(false);
 
         try
         {
-            stored = await WriteProbeAsync(from, to, messageId, cancellationToken).ConfigureAwait(false);
+            return await AttemptAsync(request, messageId, candidates, stored, cancellationToken)
+                .ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is IOException or MessageTooLargeException)
+        finally
         {
-            return Failed(to, messageId, startedAt, $"The probe message could not be stored: {ex.Message}.");
+            await DiscardAsync(stored, cancellationToken).ConfigureAwait(false);
         }
-
-        OutboundDeliveryResult delivery = await outbound
-            .DeliverAsync(
-                new OutboundDeliveryRequest(
-                    chosen.Hostname,
-                    25,
-                    from,
-                    to,
-                    stored,
-                    RequireTls: false)
-                {
-                    RecordTranscript = true,
-                },
-                cancellationToken)
-            .ConfigureAwait(false);
-
-        TimeSpan elapsed = Stopwatch.GetElapsedTime(startedAt);
-
-        logger.LogInformation(
-            "Delivery test to {Recipient} via {MxHost} finished as {Outcome} in {Elapsed}.",
-            to.Value,
-            chosen.Hostname,
-            delivery.Outcome,
-            elapsed);
-
-        return new DeliveryTestResult(
-            delivery.Outcome == DeliveryOutcome.Delivered,
-            to,
-            messageId,
-            chosen.Hostname,
-            chosen.Preference,
-            delivery.RemoteAddress,
-            delivery.TlsProtocol,
-            delivery.TlsCipher,
-            delivery.PeerCertificateSubject,
-            delivery.PeerCertificateIssuer,
-            selector,
-            delivery.ReplyCode,
-            delivery.EnhancedStatus,
-            delivery.ReplyText,
-            delivery.ErrorDetail,
-            elapsed,
-            delivery.Transcript);
     }
 
-    /// <summary>
-    /// Writes the probe into the message store, so the outbound client can stream it as it does
-    /// any other message.
-    /// </summary>
-    /// <remarks>
-    /// <b>The body names the header without spelling it.</b> <c>NoUntrustedAuthenticationHeaderTrustTests</c>
-    /// scans production source for the hyphenated header name outside a comment, because
-    /// computing this server's own verdicts from one read off the wire is a complete
-    /// authentication bypass — see <c>docs/DMARC.md</c>. This use is innocent prose in an
-    /// outgoing body, but a string literal is not a comment and the guard cannot tell the
-    /// difference; adding this file to the allowlist would disarm it here permanently, for a
-    /// wording preference. The prose says the same thing and the guard stays armed.
-    ///
-    /// <b>No <c>Received:</c> header.</b> RFC 5321 §4.4 has each hop add one on receipt, and this
-    /// message was never received — it originates here. Adding one would claim a hop that never
-    /// happened, in a message whose whole purpose is to be read by a receiver checking whether
-    /// this server tells the truth about itself.
-    /// </remarks>
-    private async Task<StoredMessageId> WriteProbeAsync(
-        EmailAddress from,
-        EmailAddress to,
+    private async Task<StoredMessageId> StoreAsync(
+        DeliveryTestRequest request,
         string messageId,
         CancellationToken cancellationToken)
     {
-        string body =
-            $"Date: {clock.UtcNow:r}\r\n" +
-            $"From: <{from.Value}>\r\n" +
-            $"To: <{to.Value}>\r\n" +
-            $"Message-ID: {messageId}\r\n" +
-            "Subject: Delivery test\r\n" +
-            "MIME-Version: 1.0\r\n" +
-            "Content-Type: text/plain; charset=utf-8\r\n" +
-            "Auto-Submitted: auto-generated\r\n" +
-            "\r\n" +
-            "This is an automated delivery test sent by AetherMail Server.\r\n" +
-            "\r\n" +
-            "If you received it, delivery from this server to this address works. Look at the\r\n" +
-            "authentication results your provider recorded in this message's headers for its\r\n" +
-            "own verdict on SPF, DKIM and DMARC - that verdict is the receiver's, and it is\r\n" +
-            "worth more than any check this server can run on itself.\r\n";
+        string text = DeliveryTestMessage.Compose(
+            request.Sender,
+            request.Recipient,
+            messageId,
+            clock.UtcNow);
+
+        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(text);
 
         await using IMessageWriter writer = await messageStore
-            .BeginWriteAsync(MaxProbeBytes, cancellationToken)
+            .BeginWriteAsync(bytes.Length, cancellationToken)
             .ConfigureAwait(false);
 
-        await writer.WriteAsync(Encoding.UTF8.GetBytes(body), cancellationToken).ConfigureAwait(false);
+        await writer.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
 
-        StoredMessage committed = await writer.CommitAsync(cancellationToken).ConfigureAwait(false);
+        StoredMessage message = await writer.CommitAsync(cancellationToken).ConfigureAwait(false);
 
-        return committed.Id;
+        return message.Id;
+    }
+
+    private async Task<DeliveryTestOutcome> AttemptAsync(
+        DeliveryTestRequest request,
+        string messageId,
+        IReadOnlyList<MxHost> candidates,
+        StoredMessageId stored,
+        CancellationToken cancellationToken)
+    {
+        List<DeliveryTestAttempt> attempts = [];
+
+        foreach (MxHost host in candidates)
+        {
+            DeliveryTranscript transcript = new();
+
+            OutboundDeliveryResult result = await client
+                .DeliverAsync(
+                    new OutboundDeliveryRequest(
+                        host.Hostname,
+                        options.Value.Outbound.DeliveryPort,
+                        request.Sender,
+                        request.Recipient,
+                        stored,
+                        request.RequireTls,
+                        transcript),
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            attempts.Add(new DeliveryTestAttempt(
+                host,
+                result.Outcome,
+                transcript,
+                result.ErrorDetail ?? (result.ReplyText is null ? null : $"{result.ReplyCode} {result.ReplyText}")));
+
+            if (result.Outcome == DeliveryOutcome.Delivered)
+            {
+                break;
+            }
+        }
+
+        DeliveryTestAttempt decisive = attempts[^1];
+
+        return new DeliveryTestOutcome(
+            decisive.Outcome,
+            request.Sender,
+            request.Recipient,
+            messageId,
+            candidates,
+            attempts,
+            decisive.Outcome == DeliveryOutcome.Delivered ? null : decisive.Diagnostic);
     }
 
     /// <summary>
-    /// The selector the probe will be signed with, for the report.
+    /// Removes the stored test message, and never lets that failure become the test's answer.
     /// </summary>
     /// <remarks>
-    /// Read rather than assumed, and null when the domain is not hosted here or has no active
-    /// key — which is itself the finding, since an unsigned probe is exactly what a receiver
-    /// will report as <c>dkim=none</c>.
+    /// The message has already been delivered or refused by the time this runs, so a store that
+    /// cannot delete it is an operational problem about disk rather than a fact about the
+    /// operator's deliverability. Throwing here would replace a good answer with an unrelated
+    /// error.
     /// </remarks>
-    private async Task<string?> ActiveSelectorAsync(DomainName domain, CancellationToken cancellationToken)
+    private async Task DiscardAsync(StoredMessageId stored, CancellationToken cancellationToken)
     {
-        MailDomain? hosted = await domains.GetByNameAsync(domain, cancellationToken).ConfigureAwait(false);
-
-        if (hosted is null)
+        try
         {
-            return null;
+            await messageStore.DeleteAsync(stored, cancellationToken).ConfigureAwait(false);
         }
-
-        DkimKey? key = await dkimKeys
-            .GetActiveForDomainAsync(hosted.Id, cancellationToken)
-            .ConfigureAwait(false);
-
-        return key?.Selector.Value;
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(
+                ex,
+                "The delivery-test message {MessageId} could not be removed from the store.",
+                stored.Value);
+        }
     }
-
-    private static DeliveryTestResult Failed(
-        EmailAddress to,
-        string messageId,
-        long startedAt,
-        string error) =>
-        new(
-            Succeeded: false,
-            to,
-            messageId,
-            MxHost: null,
-            MxPreference: null,
-            RemoteAddress: null,
-            TlsProtocol: null,
-            TlsCipher: null,
-            PeerCertificateSubject: null,
-            PeerCertificateIssuer: null,
-            DkimSelector: null,
-            ReplyCode: null,
-            EnhancedStatus: null,
-            ReplyText: null,
-            error,
-            Stopwatch.GetElapsedTime(startedAt),
-            []);
 }

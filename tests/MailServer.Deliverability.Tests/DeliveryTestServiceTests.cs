@@ -1,332 +1,496 @@
+using System.Security.Cryptography;
 using System.Text;
 using MailServer.Application.Abstractions.Deliverability;
 using MailServer.Application.Abstractions.Dns;
 using MailServer.Application.Abstractions.Platform;
 using MailServer.Application.Abstractions.Smtp;
-using MailServer.Application.Abstractions.Time;
+using MailServer.Domain.Deliverability;
 using MailServer.Domain.Enums;
 using MailServer.Domain.ValueObjects;
+using MailServer.Infrastructure.Configuration;
 using MailServer.Infrastructure.Deliverability;
-using MailServer.Infrastructure.Smtp.Outbound;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 namespace MailServer.Deliverability.Tests;
 
-/// <summary>
-/// The one check whose answer comes from somebody else.
-/// </summary>
+/// <summary>An MX answer, scripted.</summary>
+internal sealed class ScriptedMxResolver(MxLookupResult result) : IDnsResolver
+{
+    public List<string> Asked { get; } = [];
+
+    public Task<MxLookupResult> ResolveMxAsync(DomainName domain, CancellationToken cancellationToken)
+    {
+        Asked.Add(domain.Value);
+
+        return Task.FromResult(result);
+    }
+
+    public Task<AddressLookupResult> ResolveAddressesAsync(
+        string hostname,
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
+}
+
+/// <summary>An in-memory message store that remembers what was written and what was removed.</summary>
+internal sealed class RecordingMessageStore : IMessageStore
+{
+    private readonly Dictionary<Guid, byte[]> _content = [];
+
+    public List<Guid> Deleted { get; } = [];
+
+    /// <summary>
+    /// Everything ever committed, which outlives the delete. The service removes its test
+    /// message on the way out, so a test that wanted to read what was composed would otherwise
+    /// have to race it.
+    /// </summary>
+    public List<string> Written { get; } = [];
+
+    public int Count => _content.Count;
+
+    public ValueTask<IMessageWriter> BeginWriteAsync(long maxSizeBytes, CancellationToken cancellationToken) =>
+        ValueTask.FromResult<IMessageWriter>(new Writer(this));
+
+    public ValueTask<Stream> OpenReadAsync(StoredMessageId id, CancellationToken cancellationToken) =>
+        ValueTask.FromResult<Stream>(new MemoryStream(_content[id.Value]));
+
+    public ValueTask<bool> ExistsAsync(StoredMessageId id, CancellationToken cancellationToken) =>
+        ValueTask.FromResult(_content.ContainsKey(id.Value));
+
+    public ValueTask<bool> DeleteAsync(StoredMessageId id, CancellationToken cancellationToken)
+    {
+        Deleted.Add(id.Value);
+
+        return ValueTask.FromResult(_content.Remove(id.Value));
+    }
+
+    private sealed class Writer(RecordingMessageStore store) : IMessageWriter
+    {
+        private readonly MemoryStream _buffer = new();
+
+        public StoredMessageId Id { get; } = StoredMessageId.New();
+
+        public long BytesWritten => _buffer.Length;
+
+        public ValueTask WriteAsync(ReadOnlyMemory<byte> chunk, CancellationToken cancellationToken)
+        {
+            _buffer.Write(chunk.Span);
+
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask<StoredMessage> CommitAsync(CancellationToken cancellationToken)
+        {
+            byte[] bytes = _buffer.ToArray();
+            store._content[Id.Value] = bytes;
+            store.Written.Add(Encoding.UTF8.GetString(bytes));
+
+            return ValueTask.FromResult(new StoredMessage(
+                Id,
+                bytes.LongLength,
+                Sha256Hash.FromBytes(SHA256.HashData(bytes)),
+                DateTimeOffset.UnixEpoch));
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+}
+
+/// <summary>A delivery client that answers per host and records what it was asked.</summary>
 /// <remarks>
-/// The interesting assertions are about what the test reports rather than about SMTP, which the
-/// outbound client's own tests cover: a probe that never left because DNS had no answer must say
-/// so as a DNS problem, and the transcript must never carry the message.
+/// <b>It really opens the stored message</b>, as the real client does during <c>DATA</c>. That
+/// is not decoration: it is what makes a service that deleted the message before sending it
+/// fail here rather than pass.
 /// </remarks>
+internal sealed class ScriptedDeliveryClient(
+    IMessageStore store,
+    Func<string, OutboundDeliveryResult> answer,
+    Action<DeliveryTranscript>? write = null) : IOutboundDeliveryClient
+{
+    public List<OutboundDeliveryRequest> Requests { get; } = [];
+
+    /// <summary>What was on the wire for each attempt.</summary>
+    public List<string> Bodies { get; } = [];
+
+    public async Task<OutboundDeliveryResult> DeliverAsync(
+        OutboundDeliveryRequest request,
+        CancellationToken cancellationToken)
+    {
+        Requests.Add(request);
+
+        await using Stream content = await store
+            .OpenReadAsync(request.MessageId, cancellationToken)
+            .ConfigureAwait(false);
+
+        using StreamReader reader = new(content);
+
+        Bodies.Add(await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false));
+
+        if (request.Transcript is { } transcript)
+        {
+            (write ?? Default)(transcript);
+        }
+
+        return answer(request.TargetHost);
+    }
+
+    private static void Default(DeliveryTranscript transcript)
+    {
+        transcript.Record(DeliveryStage.Connect, DateTimeOffset.UnixEpoch);
+        transcript.Record(
+            DeliveryStage.EndOfData,
+            DateTimeOffset.UnixEpoch.AddMilliseconds(500),
+            reply: new Domain.Smtp.SmtpReply(250, "2.0.0", "Queued"));
+    }
+}
+
+internal sealed class StubServerIdentity : IServerIdentityProvider
+{
+    public string Hostname => "mail.example.com";
+
+    public string ProductName => "AetherMail";
+
+    public string? PublicIpAddress => "203.0.113.10";
+}
+
+/// <summary>
+/// The delivery test's orchestration: what it resolves, what it sends, what it tries next, and
+/// what it leaves behind.
+/// </summary>
 public sealed class DeliveryTestServiceTests
 {
-    private static readonly EmailAddress From = EmailAddress.Parse("postmaster@example.com");
-    private static readonly EmailAddress To = EmailAddress.Parse("someone@example.net");
+    private static readonly EmailAddress Sender = EmailAddress.Parse("postmaster@example.com");
+    private static readonly EmailAddress Recipient = EmailAddress.Parse("someone@example.net");
+    private static readonly DateTimeOffset Now = new(2026, 9, 20, 11, 30, 0, TimeSpan.Zero);
 
-    private static DeliveryTestService Service(
-        MxLookupResult? mx = null,
-        OutboundDeliveryResult? delivery = null,
-        RecordingOutbound? recorder = null)
+    private static MxLookupResult Mx(params MxHost[] hosts) =>
+        new(DnsLookupStatus.Success, hosts, null);
+
+    private static OutboundDeliveryResult Delivered() => new(
+        DeliveryOutcome.Delivered, FailureClassification.None, null, true, "Tls13", null,
+        null, null, 250, "2.0.0", "Queued", null);
+
+    private static OutboundDeliveryResult Refused(int code, string text) => new(
+        DeliveryOutcome.Bounced, FailureClassification.Permanent, null, false, null, null,
+        null, null, code, null, text, null);
+
+    private static OutboundDeliveryResult Deferred(string detail) => new(
+        DeliveryOutcome.Deferred, FailureClassification.Temporary, null, false, null, null,
+        null, null, null, null, null, detail);
+
+    private static ScriptedMxResolver LastResolver { get; set; } = new(new MxLookupResult(
+        DnsLookupStatus.Permanent, [], null));
+
+    private static (DeliveryTestService Service, RecordingMessageStore Store, ScriptedDeliveryClient Client)
+        Build(MxLookupResult mx, Func<string, OutboundDeliveryResult> answer, int port = 25)
     {
-        RecordingOutbound outbound = recorder ?? new RecordingOutbound(delivery);
-        InMemoryMessageStore store = new();
+        RecordingMessageStore store = new();
+        ScriptedDeliveryClient client = new(store, answer);
+        LastResolver = new ScriptedMxResolver(mx);
 
-        // So the recorder can read the probe back out the way the real client streams it.
-        outbound.Store = store;
+        MailServerOptions settings = new();
+        settings.Outbound.DeliveryPort = port;
 
-        return new DeliveryTestService(
-            new StubResolver(mx ?? MxLookupResult.Success([new MxHost("mx.example.net", 10)])),
-            outbound,
+        DeliveryTestService service = new(
+            LastResolver,
             store,
-            new FakeDomains(),
-            new FakeDkimKeys(),
-            new StubIdentity(),
-            new StubClock(),
+            client,
+            new StubServerIdentity(),
+            new ProbeClock(Now),
+            Options.Create(settings),
             NullLogger<DeliveryTestService>.Instance);
+
+        return (service, store, client);
     }
 
-    private static OutboundDeliveryResult Accepted() => new(
-        DeliveryOutcome.Delivered,
-        FailureClassification.None,
-        IpAddressValue.Parse("198.51.100.25"),
-        TlsActive: true,
-        "Tls13",
-        "TLS_AES_256_GCM_SHA384",
-        "CN=mx.example.net",
-        "CN=Example CA",
-        250,
-        "2.0.0",
-        "OK",
-        null);
+    private static Task<DeliveryTestOutcome> RunAsync(DeliveryTestService service, bool requireTls = false) =>
+        service.RunAsync(new DeliveryTestRequest(Sender, Recipient, requireTls), CancellationToken.None);
 
-    /// <summary>
-    /// No exchanger means there is nothing to test against, and it is the commonest real answer
-    /// for a mistyped domain. It must read as the DNS problem it is: the remedy is completely
-    /// different from a delivery failure's.
-    /// </summary>
+    // ---------------------------------------------------------------------------------------
+    // The ordinary case.
+    // ---------------------------------------------------------------------------------------
+
     [Fact]
-    public async Task A_domain_with_no_exchanger_fails_as_a_dns_problem_without_sending()
+    public async Task A_delivered_message_reports_the_host_it_reached_and_the_conversation()
     {
-        RecordingOutbound outbound = new(Accepted());
+        (DeliveryTestService service, _, ScriptedDeliveryClient client) =
+            Build(Mx(new MxHost("mx.example.net", 10)), _ => Delivered());
 
-        DeliveryTestResult result = await Service(
-                MxLookupResult.Permanent("NXDOMAIN"),
-                recorder: outbound)
-            .RunAsync(From, To, CancellationToken.None);
+        DeliveryTestOutcome outcome = await RunAsync(service);
 
-        result.Succeeded.ShouldBeFalse();
-        result.ErrorDetail.ShouldNotBeNull().ShouldContain("No mail exchanger");
-        result.ErrorDetail.ShouldNotBeNull().ShouldContain("NXDOMAIN");
-        result.MxHost.ShouldBeNull();
+        outcome.Outcome.ShouldBe(DeliveryOutcome.Delivered);
+        outcome.Diagnostic.ShouldBeNull();
+        outcome.Candidates.ShouldBe([new MxHost("mx.example.net", 10)]);
 
-        // Nothing was sent, which is the part that matters: a test that emitted traffic on the
-        // way to reporting a DNS failure would be spending reputation to learn nothing.
-        outbound.Requests.ShouldBeEmpty();
+        // The RECIPIENT's exchangers, which is where mail for them is delivered. Resolving the
+        // sender's domain would send the test to this server's own inbox and report success.
+        LastResolver.Asked.ShouldBe(["example.net"]);
+        outcome.Decisive.ShouldNotBeNull().Host.Hostname.ShouldBe("mx.example.net");
+        outcome.Latency.ShouldBe(TimeSpan.FromMilliseconds(500));
+
+        client.Requests.ShouldHaveSingleItem().Transcript.ShouldNotBeNull();
     }
 
-    [Fact]
-    public async Task A_successful_delivery_reports_the_evidence_the_operator_needs()
+    /// <summary>The port and the TLS policy are the caller's, not this service's invention.</summary>
+    [Theory]
+    [InlineData(25, false)]
+    [InlineData(2525, true)]
+    public async Task The_request_carries_the_configured_port_and_the_chosen_tls_policy(int port, bool requireTls)
     {
-        DeliveryTestResult result = await Service(delivery: Accepted())
-            .RunAsync(From, To, CancellationToken.None);
+        (DeliveryTestService service, _, ScriptedDeliveryClient client) =
+            Build(Mx(new MxHost("mx.example.net", 10)), _ => Delivered(), port);
 
-        result.Succeeded.ShouldBeTrue();
-        result.MxHost.ShouldBe("mx.example.net");
-        result.MxPreference.ShouldBe(10);
-        result.RemoteAddress!.Value.ShouldBe("198.51.100.25");
-        result.TlsProtocol.ShouldBe("Tls13");
-        result.PeerCertificateSubject.ShouldBe("CN=mx.example.net");
-        result.ReplyCode.ShouldBe(250);
-        result.EnhancedStatus.ShouldBe("2.0.0");
-        result.Recipient.ShouldBe(To);
+        await RunAsync(service, requireTls);
+
+        OutboundDeliveryRequest request = client.Requests.ShouldHaveSingleItem();
+
+        request.Port.ShouldBe(port);
+        request.RequireTls.ShouldBe(requireTls);
+        request.ReversePath.ShouldBe(Sender);
+        request.RecipientAddress.ShouldBe(Recipient);
     }
 
     /// <summary>
-    /// A refusal is a result, not an error: the remote's own reply is the most useful thing the
-    /// test can hand back, so it must survive rather than be flattened into "failed".
+    /// <b>The message id the operator is given is the one that went out.</b> It is the only
+    /// handle they have for finding the message in the receiver's logs, and a reported id that
+    /// differed from the sent one would send them looking for something that does not exist.
     /// </summary>
     [Fact]
-    public async Task A_refusal_reports_the_remote_reply_rather_than_a_generic_failure()
+    public async Task The_reported_message_id_is_the_one_in_the_message()
     {
-        OutboundDeliveryResult refused = Accepted() with
-        {
-            Outcome = DeliveryOutcome.Bounced,
-            ReplyCode = 550,
-            EnhancedStatus = "5.7.1",
-            ReplyText = "Message rejected due to SPF policy",
-        };
+        (DeliveryTestService service, RecordingMessageStore store, _) =
+            Build(Mx(new MxHost("mx.example.net", 10)), _ => Delivered());
 
-        DeliveryTestResult result = await Service(delivery: refused)
-            .RunAsync(From, To, CancellationToken.None);
+        DeliveryTestOutcome outcome = await RunAsync(service);
 
-        result.Succeeded.ShouldBeFalse();
-        result.ReplyCode.ShouldBe(550);
-        result.EnhancedStatus.ShouldBe("5.7.1");
-        result.ReplyText.ShouldNotBeNull().ShouldContain("SPF");
-    }
+        outcome.MessageId.ShouldEndWith("@mail.example.com>");
 
-    /// <summary>The probe must be findable at the far end, and identified as machine-generated.</summary>
-    [Fact]
-    public async Task The_probe_carries_a_message_id_and_says_it_is_automated()
-    {
-        RecordingOutbound outbound = new(Accepted());
-
-        DeliveryTestResult result = await Service(recorder: outbound)
-            .RunAsync(From, To, CancellationToken.None);
-
-        result.MessageId.ShouldStartWith("<");
-        result.MessageId.ShouldEndWith("@mail.example.com>");
-
-        string probe = outbound.LastBody.ShouldNotBeNull();
-
-        probe.ShouldContain($"Message-ID: {result.MessageId}");
-        probe.ShouldContain("Auto-Submitted: auto-generated");
-        probe.ShouldContain($"From: <{From.Value}>");
-        probe.ShouldContain($"To: <{To.Value}>");
-
-        // RFC 5321 §4.4 has each hop add a Received: on receipt. This message was never
-        // received - it originates here - so claiming a hop would be a lie in the one message
-        // whose purpose is to be checked by a receiver.
-        probe.ShouldNotContain("Received:");
-    }
-
-    /// <summary>The transcript is what an operator pastes into a support ticket.</summary>
-    [Fact]
-    public async Task The_transcript_is_requested_and_carried_back()
-    {
-        OutboundDeliveryResult withTranscript = Accepted() with
-        {
-            Transcript = ["* Connected.", "< 220 mx.example.net ESMTP", "> EHLO mail.example.com"],
-        };
-
-        RecordingOutbound outbound = new(withTranscript);
-
-        DeliveryTestResult result = await Service(recorder: outbound)
-            .RunAsync(From, To, CancellationToken.None);
-
-        outbound.Requests.ShouldHaveSingleItem().RecordTranscript.ShouldBeTrue();
-        result.Transcript.Count.ShouldBe(3);
-        result.Transcript[1].ShouldBe("< 220 mx.example.net ESMTP");
-    }
-
-    // ---- The transcript itself ------------------------------------------------------------
-
-    /// <summary>
-    /// The rule that makes a transcript safe to share: commands and replies, never content.
-    /// </summary>
-    [Fact]
-    public void A_transcript_records_commands_and_replies_and_nothing_else()
-    {
-        SmtpTranscript transcript = new();
-
-        transcript.Note("Connected to mx.example.net:25 at 198.51.100.25.");
-        transcript.Sent("EHLO mail.example.com");
-        transcript.Sent("MAIL FROM:<postmaster@example.com>");
-
-        transcript.Lines.ShouldBe([
-            "* Connected to mx.example.net:25 at 198.51.100.25.",
-            "> EHLO mail.example.com",
-            "> MAIL FROM:<postmaster@example.com>",
-        ]);
+        store.Written.ShouldHaveSingleItem()
+            .ShouldContain($"Message-ID: {outcome.MessageId}\r\n");
     }
 
     /// <summary>
-    /// A remote that answered every command with a long reply would otherwise decide how much
-    /// memory a delivery test holds.
+    /// What was composed is a real, well-formed message: the receiver applies its ordinary
+    /// rules to it, and anything malformed would be judged as malformed rather than as this
+    /// server's configuration.
     /// </summary>
     [Fact]
-    public void A_transcript_is_bounded_and_says_when_it_truncated()
+    public async Task The_composed_message_is_addressed_from_the_sender_the_operator_chose()
     {
-        SmtpTranscript transcript = new();
+        (DeliveryTestService service, RecordingMessageStore store, _) =
+            Build(Mx(new MxHost("mx.example.net", 10)), _ => Delivered());
 
-        for (int i = 0; i < SmtpTranscript.MaxLines * 2; i++)
-        {
-            transcript.Sent($"NOOP {i}");
-        }
+        await RunAsync(service);
 
-        transcript.Lines.Count.ShouldBe(SmtpTranscript.MaxLines);
-        transcript.Lines[^1].ShouldContain("truncated");
+        string text = store.Written.ShouldHaveSingleItem();
+
+        text.ShouldContain("From: <postmaster@example.com>\r\n");
+        text.ShouldContain("To: <someone@example.net>\r\n");
+        text.ShouldContain("Auto-Submitted: auto-generated\r\n");
+    }
+
+    /// <summary>
+    /// <b>The client reads the body from the store during <c>DATA</c>, so the message has to
+    /// still be there when it does.</b> Removing it any earlier than the end would be worse than
+    /// never storing it: the send would fail on a message this server composed itself.
+    /// </summary>
+    [Fact]
+    public async Task The_message_is_still_in_the_store_while_it_is_being_sent()
+    {
+        (DeliveryTestService service, RecordingMessageStore store, ScriptedDeliveryClient client) =
+            Build(Mx(new MxHost("mx.example.net", 10)), _ => Delivered());
+
+        await RunAsync(service);
+
+        client.Bodies.ShouldHaveSingleItem().ShouldBe(store.Written.ShouldHaveSingleItem());
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Trying the exchangers in turn, as the queue does.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Reporting only the primary would tell an operator whose primary is briefly down that
+    /// their mail cannot be delivered, when the queue would have used the secondary without
+    /// comment.
+    /// </summary>
+    [Fact]
+    public async Task A_primary_that_defers_is_followed_by_the_secondary()
+    {
+        (DeliveryTestService service, _, ScriptedDeliveryClient client) = Build(
+            Mx(new MxHost("primary.example.net", 10), new MxHost("backup.example.net", 20)),
+            host => host == "primary.example.net" ? Deferred("Try again later") : Delivered());
+
+        DeliveryTestOutcome outcome = await RunAsync(service);
+
+        outcome.Outcome.ShouldBe(DeliveryOutcome.Delivered);
+        outcome.Attempts.Select(a => a.Host.Hostname)
+            .ShouldBe(["primary.example.net", "backup.example.net"]);
+
+        outcome.Decisive.ShouldNotBeNull().Host.Hostname.ShouldBe("backup.example.net");
+        client.Requests.Count.ShouldBe(2);
+    }
+
+    /// <summary>
+    /// And one that accepts ends it. Sending the same message twice would deliver it twice.
+    /// </summary>
+    [Fact]
+    public async Task A_primary_that_accepts_is_the_only_one_tried()
+    {
+        (DeliveryTestService service, _, ScriptedDeliveryClient client) = Build(
+            Mx(new MxHost("primary.example.net", 10), new MxHost("backup.example.net", 20)),
+            _ => Delivered());
+
+        DeliveryTestOutcome outcome = await RunAsync(service);
+
+        outcome.Attempts.ShouldHaveSingleItem().Host.Hostname.ShouldBe("primary.example.net");
+        client.Requests.ShouldHaveSingleItem();
+    }
+
+    /// <summary>
+    /// Every attempt keeps its own transcript, because the conversation worth reading is usually
+    /// the one that failed.
+    /// </summary>
+    [Fact]
+    public async Task Every_attempt_keeps_its_own_transcript()
+    {
+        (DeliveryTestService service, _, _) = Build(
+            Mx(new MxHost("primary.example.net", 10), new MxHost("backup.example.net", 20)),
+            host => host == "primary.example.net" ? Refused(550, "No") : Delivered());
+
+        DeliveryTestOutcome outcome = await RunAsync(service);
+
+        outcome.Attempts.Count.ShouldBe(2);
+        outcome.Attempts.ShouldAllBe(a => a.Transcript.Steps.Count > 0);
+
+        // Two transcripts, not one shared between them.
+        outcome.Attempts[0].Transcript.ShouldNotBeSameAs(outcome.Attempts[1].Transcript);
+    }
+
+    /// <summary>
+    /// A last attempt that refused is the answer, and its reply is the diagnostic rather than a
+    /// summary of it.
+    /// </summary>
+    [Fact]
+    public async Task A_refusal_everywhere_is_reported_with_the_last_reply()
+    {
+        (DeliveryTestService service, _, _) = Build(
+            Mx(new MxHost("mx.example.net", 10)),
+            _ => Refused(550, "5.7.1 Message rejected"));
+
+        DeliveryTestOutcome outcome = await RunAsync(service);
+
+        outcome.Outcome.ShouldBe(DeliveryOutcome.Bounced);
+        outcome.Diagnostic.ShouldNotBeNull().ShouldContain("5.7.1 Message rejected");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Nothing to connect to.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// The same classification the queue applies. Conflating these is how a domain that does not
+    /// exist earns an infinite retry loop, or a resolver blip bounces good mail —
+    /// <c>docs/DNS.md</c>'s failure-semantics table.
+    /// </summary>
+    [Theory]
+    [InlineData(DnsLookupStatus.Temporary, DeliveryOutcome.Deferred)]
+    [InlineData(DnsLookupStatus.Permanent, DeliveryOutcome.Bounced)]
+    public async Task A_failed_lookup_is_classified_the_way_the_queue_classifies_it(
+        DnsLookupStatus status,
+        DeliveryOutcome expected)
+    {
+        (DeliveryTestService service, RecordingMessageStore store, ScriptedDeliveryClient client) =
+            Build(new MxLookupResult(status, [], "the resolver said so"), _ => Delivered());
+
+        DeliveryTestOutcome outcome = await RunAsync(service);
+
+        outcome.Outcome.ShouldBe(expected);
+        outcome.Diagnostic.ShouldBe("the resolver said so");
+        outcome.Attempts.ShouldBeEmpty();
+        outcome.Candidates.ShouldBeEmpty();
+
+        // Nothing was composed, stored or sent: there was nowhere to send it.
+        client.Requests.ShouldBeEmpty();
+        store.Count.ShouldBe(0);
+        store.Deleted.ShouldBeEmpty();
+    }
+
+    /// <summary>
+    /// A lookup that answered with no usable host is as good as a failure, and must not be
+    /// reported as a success with nothing behind it.
+    /// </summary>
+    [Fact]
+    public async Task A_lookup_that_answered_with_no_hosts_is_not_a_success()
+    {
+        (DeliveryTestService service, _, _) = Build(Mx(), _ => Delivered());
+
+        DeliveryTestOutcome outcome = await RunAsync(service);
+
+        outcome.Outcome.ShouldBe(DeliveryOutcome.Bounced);
+        outcome.Attempts.ShouldBeEmpty();
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // What it leaves behind.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// A test message is not mail anybody is keeping, and one left behind per run would grow the
+    /// store for nothing.
+    /// </summary>
+    [Fact]
+    public async Task The_stored_test_message_is_removed_afterwards()
+    {
+        (DeliveryTestService service, RecordingMessageStore store, _) =
+            Build(Mx(new MxHost("mx.example.net", 10)), _ => Delivered());
+
+        await RunAsync(service);
+
+        store.Deleted.ShouldHaveSingleItem();
+        store.Count.ShouldBe(0);
+    }
+
+    /// <summary>
+    /// Including when the send throws. The message is already written by then, so an exception
+    /// on the wire would otherwise leave it in the store for ever.
+    /// </summary>
+    [Fact]
+    public async Task The_stored_test_message_is_removed_even_when_the_send_throws()
+    {
+        RecordingMessageStore store = new();
+
+        MailServerOptions settings = new();
+
+        DeliveryTestService service = new(
+            new ScriptedMxResolver(Mx(new MxHost("mx.example.net", 10))),
+            store,
+            new ThrowingDeliveryClient(),
+            new StubServerIdentity(),
+            new ProbeClock(Now),
+            Options.Create(settings),
+            NullLogger<DeliveryTestService>.Instance);
+
+        await Should.ThrowAsync<IOException>(() => RunAsync(service));
+
+        store.Deleted.ShouldHaveSingleItem();
+        store.Count.ShouldBe(0);
     }
 
     [Fact]
-    public void A_single_long_line_is_truncated_rather_than_kept_whole()
+    public async Task The_service_refuses_a_null_request()
     {
-        SmtpTranscript transcript = new();
+        (DeliveryTestService service, _, _) = Build(Mx(), _ => Delivered());
 
-        transcript.Sent(new string('x', SmtpTranscript.MaxLineLength * 3));
-
-        transcript.Lines.ShouldHaveSingleItem()
-            .Length.ShouldBeLessThanOrEqualTo(SmtpTranscript.MaxLineLength + 4);
+        await Should.ThrowAsync<ArgumentNullException>(
+            () => service.RunAsync(null!, CancellationToken.None));
     }
 
-    // ---- Fakes ------------------------------------------------------------------------------
-
-    private sealed class StubResolver(MxLookupResult mx) : IDnsResolver
+    private sealed class ThrowingDeliveryClient : IOutboundDeliveryClient
     {
-        public Task<MxLookupResult> ResolveMxAsync(DomainName domain, CancellationToken cancellationToken) =>
-            Task.FromResult(mx);
-
-        public Task<AddressLookupResult> ResolveAddressesAsync(
-            string hostname,
-            CancellationToken cancellationToken) =>
-            throw new NotSupportedException();
-    }
-
-    private sealed class StubIdentity : IServerIdentityProvider
-    {
-        public string Hostname => "mail.example.com";
-
-        public string? PublicIpAddress => "203.0.113.25";
-
-        public string ProductName => "AetherMail";
-    }
-
-    private sealed class StubClock : IClock
-    {
-        public DateTimeOffset UtcNow => new(2026, 9, 20, 12, 0, 0, TimeSpan.Zero);
-
-        public long GetTimestamp() => System.Diagnostics.Stopwatch.GetTimestamp();
-
-        public TimeSpan GetElapsedTime(long startingTimestamp) =>
-            System.Diagnostics.Stopwatch.GetElapsedTime(startingTimestamp);
-    }
-
-    /// <summary>Captures what the delivery test asked the outbound client to do.</summary>
-    private sealed class RecordingOutbound(OutboundDeliveryResult? result) : IOutboundDeliveryClient
-    {
-        private readonly List<OutboundDeliveryRequest> _requests = [];
-
-        public IReadOnlyList<OutboundDeliveryRequest> Requests => _requests;
-
-        /// <summary>The probe's octets, read back out of the store the way the real client would.</summary>
-        public string? LastBody { get; private set; }
-
-        public InMemoryMessageStore? Store { get; set; }
-
-        public async Task<OutboundDeliveryResult> DeliverAsync(
+        public Task<OutboundDeliveryResult> DeliverAsync(
             OutboundDeliveryRequest request,
-            CancellationToken cancellationToken)
-        {
-            ArgumentNullException.ThrowIfNull(request);
-
-            _requests.Add(request);
-
-            if (Store is not null)
-            {
-                await using Stream content = await Store.OpenReadAsync(request.MessageId, cancellationToken);
-                using StreamReader reader = new(content);
-                LastBody = await reader.ReadToEndAsync(cancellationToken);
-            }
-
-            return result ?? throw new NotSupportedException("No delivery result was configured.");
-        }
-    }
-
-    private sealed class InMemoryMessageStore : IMessageStore
-    {
-        private readonly Dictionary<StoredMessageId, byte[]> _messages = [];
-
-        public ValueTask<IMessageWriter> BeginWriteAsync(
-            long maxSizeBytes,
             CancellationToken cancellationToken) =>
-            ValueTask.FromResult<IMessageWriter>(new Writer(this));
-
-        public ValueTask<Stream> OpenReadAsync(StoredMessageId id, CancellationToken cancellationToken) =>
-            ValueTask.FromResult<Stream>(new MemoryStream(_messages[id]));
-
-        public ValueTask<bool> ExistsAsync(StoredMessageId id, CancellationToken cancellationToken) =>
-            ValueTask.FromResult(_messages.ContainsKey(id));
-
-        public ValueTask<bool> DeleteAsync(StoredMessageId id, CancellationToken cancellationToken) =>
-            ValueTask.FromResult(_messages.Remove(id));
-
-        private sealed class Writer(InMemoryMessageStore store) : IMessageWriter
-        {
-            private readonly MemoryStream _buffer = new();
-
-            public StoredMessageId Id { get; } = StoredMessageId.New();
-
-            public long BytesWritten => _buffer.Length;
-
-            public async ValueTask WriteAsync(ReadOnlyMemory<byte> chunk, CancellationToken cancellationToken) =>
-                await _buffer.WriteAsync(chunk, cancellationToken);
-
-            public ValueTask<StoredMessage> CommitAsync(CancellationToken cancellationToken)
-            {
-                byte[] octets = _buffer.ToArray();
-
-                store._messages[Id] = octets;
-
-                return ValueTask.FromResult(new StoredMessage(
-                    Id,
-                    octets.Length,
-                    Sha256Hash.FromBytes(System.Security.Cryptography.SHA256.HashData(octets)),
-                    DateTimeOffset.UtcNow));
-            }
-
-            public ValueTask DisposeAsync() => _buffer.DisposeAsync();
-        }
+            throw new IOException("the socket died");
     }
 }

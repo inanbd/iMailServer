@@ -5,6 +5,7 @@ using MailServer.Application.Abstractions.Dns;
 using MailServer.Application.Abstractions.Platform;
 using MailServer.Application.Abstractions.Repositories;
 using MailServer.Application.Abstractions.Smtp;
+using MailServer.Domain.Deliverability;
 using MailServer.Domain.Entities;
 using MailServer.Domain.Enums;
 using MailServer.Domain.Mail;
@@ -120,6 +121,54 @@ public sealed class OutboundDkimSigningTests
         verified.Count.ShouldBe(1);
         verified[0].Result.ShouldBe(DkimVerificationResult.Pass);
         verified[0].SigningDomain.ShouldBe(domain.Name);
+    }
+
+    /// <summary>
+    /// <b>The selector that actually signed is the one reported.</b> "Which key signed this" is
+    /// a question only the signer can answer, and a caller that looked up the domain's active key
+    /// for itself would be a second source for one fact — disagreeing the moment a rotation
+    /// landed between the two reads.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task The_transcript_names_the_selector_that_signed(bool hasKey)
+    {
+        (MailDomain domain, DkimKey key, byte[] privateKey, _) = SetUpActiveKey("example.com");
+
+        IDomainRepository domains = hasKey ? new SingleDomainRepository(domain) : new FakeDomainRepository();
+        IDkimKeyRepository keys = hasKey ? new SingleKeyRepository(key, privateKey) : new FakeDkimKeyRepository();
+
+        await using FakeRemoteMta mta = new();
+        StoredMessageId messageId = await StoreMessageAsync(
+            "From: Alice <alice@example.com>\r\n" +
+            "To: bob@destination.example\r\n" +
+            "Subject: Hi\r\n" +
+            "Date: Wed, 16 Sep 2026 12:00:00 +0000\r\n" +
+            "Message-ID: <abc@example.com>\r\n" +
+            "\r\n" +
+            "Hello, Bob!\r\n");
+
+        DeliveryTranscript transcript = new();
+
+        await CreateClient(domains, keys).DeliverAsync(
+            new OutboundDeliveryRequest(
+                "127.0.0.1", mta.Port, EmailAddress.Parse("alice@example.com"),
+                EmailAddress.Parse("bob@destination.example"), messageId, RequireTls: false, transcript),
+            CancellationToken.None);
+
+        string detail = transcript.Steps
+            .Single(step => step.Stage == DeliveryStage.Body).Detail.ShouldNotBeNull();
+
+        if (hasKey)
+        {
+            detail.ShouldContain("DKIM-signed with selector mail202609");
+        }
+        else
+        {
+            detail.ShouldContain("unsigned");
+            detail.ShouldNotContain("mail202609");
+        }
     }
 
     [Fact]

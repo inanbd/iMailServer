@@ -260,6 +260,9 @@
             <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                 <TextBlock Text="To" VerticalAlignment="Center" Width="70" />
                 <TextBox Text="{Binding DeliveryTestTo, UpdateSourceTrigger=PropertyChanged}" Width="260" />
+                <CheckBox Content="Require TLS" IsChecked="{Binding DeliveryTestRequireTls}"
+                          VerticalAlignment="Center" Margin="12,0,0,0"
+                          ToolTip="Fail rather than send in plaintext if STARTTLS cannot reach a trusted, matching certificate." />
                 <Button Content="Send test message" Command="{Binding RunDeliveryTestCommand}"
                         Margin="8,0,0,0" IsEnabled="{Binding CanRunDeliveryTest}" />
             </StackPanel>
@@ -279,52 +282,92 @@
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
-                            <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
 
-                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Accepted" Style="{StaticResource Caption}" />
-                        <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding DeliveryTest.Succeeded}" />
+                        <!--
+                            The outcome is classified exactly as a queued delivery would be, so
+                            "Deferred" here means the queue would have retried and "Bounced"
+                            means it would not have.
+                        -->
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Outcome" Style="{StaticResource Caption}" />
+                        <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding DeliveryTest.Outcome}" />
 
                         <TextBlock Grid.Row="1" Grid.Column="0" Text="Exchanger" Style="{StaticResource Caption}" />
                         <TextBlock Grid.Row="1" Grid.Column="1" TextWrapping="Wrap">
-                            <Run Text="{Binding DeliveryTest.MxHost, Mode=OneWay}" />
-                            <Run Text="at" />
-                            <Run Text="{Binding DeliveryTest.RemoteAddress, Mode=OneWay}" />
+                            <Run Text="{Binding DecisiveAttempt.Hostname, Mode=OneWay}" />
+                            <Run Text="(preference" />
+                            <Run Text="{Binding DecisiveAttempt.Preference, Mode=OneWay}" /><Run Text=")" />
                         </TextBlock>
 
-                        <TextBlock Grid.Row="2" Grid.Column="0" Text="TLS" Style="{StaticResource Caption}" />
-                        <TextBlock Grid.Row="2" Grid.Column="1" TextWrapping="Wrap">
-                            <Run Text="{Binding DeliveryTest.TlsProtocol, Mode=OneWay}" />
-                            <Run Text="{Binding DeliveryTest.TlsCipher, Mode=OneWay}" />
+                        <!--
+                            Where the conversation stopped is usually the diagnosis: one that
+                            ended at RCPT TO was refused the recipient, one that ended at
+                            MAIL FROM was refused the sender, and one that never left Connect
+                            is what a blocked port 25 looks like.
+                        -->
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Stopped at" Style="{StaticResource Caption}" />
+                        <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding DecisiveAttempt.LastStage}" />
+
+                        <TextBlock Grid.Row="3" Grid.Column="0" Text="Final reply" Style="{StaticResource Caption}" />
+                        <TextBlock Grid.Row="3" Grid.Column="1" TextWrapping="Wrap">
+                            <Run Text="{Binding DecisiveAttempt.FinalReplyCode, Mode=OneWay}" />
+                            <Run Text="{Binding DecisiveAttempt.FinalReplyText, Mode=OneWay}" />
                         </TextBlock>
 
-                        <TextBlock Grid.Row="3" Grid.Column="0" Text="Peer certificate" Style="{StaticResource Caption}" />
-                        <TextBlock Grid.Row="3" Grid.Column="1" TextWrapping="Wrap"
-                                   Text="{Binding DeliveryTest.PeerCertificateSubject}" />
-
-                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Signed with" Style="{StaticResource Caption}" />
-                        <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding DeliveryTest.DkimSelector}" />
-
-                        <TextBlock Grid.Row="5" Grid.Column="0" Text="Final reply" Style="{StaticResource Caption}" />
-                        <TextBlock Grid.Row="5" Grid.Column="1" TextWrapping="Wrap">
-                            <Run Text="{Binding DeliveryTest.ReplyCode, Mode=OneWay}" />
-                            <Run Text="{Binding DeliveryTest.ReplyText, Mode=OneWay}" />
-                        </TextBlock>
-
-                        <TextBlock Grid.Row="6" Grid.Column="0" Text="Message-ID" Style="{StaticResource Caption}" />
-                        <TextBlock Grid.Row="6" Grid.Column="1" TextWrapping="Wrap"
+                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Message-ID" Style="{StaticResource Caption}" />
+                        <TextBlock Grid.Row="4" Grid.Column="1" TextWrapping="Wrap"
                                    Text="{Binding DeliveryTest.MessageId}" />
+
+                        <TextBlock Grid.Row="5" Grid.Column="0" Text="Took" Style="{StaticResource Caption}" />
+                        <TextBlock Grid.Row="5" Grid.Column="1">
+                            <Run Text="{Binding DeliveryTest.LatencyMilliseconds, Mode=OneWay, StringFormat={}{0:N0}}" />
+                            <Run Text="ms" />
+                        </TextBlock>
                     </Grid>
+
+                    <TextBlock Text="{Binding DeliveryTest.Diagnostic}" TextWrapping="Wrap" Margin="0,8,0,0"
+                               Foreground="{StaticResource State.Error}"
+                               Visibility="{Binding DeliveryTest.Diagnostic, Converter={StaticResource NullToVisibility}}" />
+
+                    <!--
+                        Every exchanger published, in the order this server would try them.
+                        Reporting only the one that answered would hide a primary that is down.
+                    -->
+                    <TextBlock Text="Exchangers published" FontWeight="SemiBold" Margin="0,12,0,4" />
+                    <ItemsControl ItemsSource="{Binding DeliveryTest.Candidates}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock FontFamily="Consolas" FontSize="12">
+                                    <Run Text="{Binding Preference, Mode=OneWay}" />
+                                    <Run Text="{Binding Hostname, Mode=OneWay}" />
+                                </TextBlock>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
 
                     <!--
                         Commands and replies only - never the message. That is what makes a
-                        transcript safe to paste into a support ticket.
+                        transcript safe to paste into a support ticket, and it is why the
+                        transcript is readable under ViewServerState when message content is
+                        not. One per attempt, because the conversation worth reading is usually
+                        the one that failed.
                     -->
-                    <TextBlock Text="Conversation" FontWeight="SemiBold" Margin="0,12,0,4" />
-                    <ItemsControl ItemsSource="{Binding DeliveryTest.Transcript}">
+                    <TextBlock Text="Conversations" FontWeight="SemiBold" Margin="0,12,0,4" />
+                    <ItemsControl ItemsSource="{Binding DeliveryTest.Attempts}">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
-                                <TextBlock Text="{Binding}" FontFamily="Consolas" FontSize="12" />
+                                <StackPanel Margin="0,0,0,10">
+                                    <TextBlock FontWeight="SemiBold">
+                                        <Run Text="{Binding Hostname, Mode=OneWay}" />
+                                        <Run Text="-" />
+                                        <Run Text="{Binding Outcome, Mode=OneWay}" />
+                                    </TextBlock>
+                                    <TextBox Text="{Binding Transcript, Mode=OneWay}" IsReadOnly="True"
+                                             FontFamily="Consolas" FontSize="12"
+                                             BorderThickness="0" Background="Transparent"
+                                             TextWrapping="NoWrap"
+                                             HorizontalScrollBarVisibility="Auto" />
+                                </StackPanel>
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>

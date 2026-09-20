@@ -125,10 +125,29 @@ public sealed partial class DeliverabilityViewModel(
     [ObservableProperty]
     public partial string DeliveryTestTo { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Fail rather than send in plaintext if STARTTLS cannot reach a trusted, matching
+    /// certificate.
+    /// </summary>
+    /// <remarks>
+    /// Off by default, matching the command: the ordinary question is "does my mail arrive",
+    /// and answering it with a policy failure the operator did not ask for would hide the
+    /// answer.
+    /// </remarks>
+    [ObservableProperty]
+    public partial bool DeliveryTestRequireTls { get; set; }
+
     [ObservableProperty]
     public partial DeliveryTestDto? DeliveryTest { get; set; }
 
     public bool HasDeliveryTest => DeliveryTest is not null;
+
+    /// <summary>
+    /// The attempt worth reading, which is the last one: the test stops at the first exchanger
+    /// that accepts, so the last attempt is either the delivery or the final refusal.
+    /// </summary>
+    public DeliveryAttemptDto? DecisiveAttempt =>
+        DeliveryTest?.Attempts is { Count: > 0 } attempts ? attempts[^1] : null;
 
     /// <summary>
     /// Both addresses must be filled in before the button does anything.
@@ -209,10 +228,14 @@ public sealed partial class DeliverabilityViewModel(
         async () =>
         {
             DeliveryTest = await gateway
-                .RunDeliveryTestAsync(DeliveryTestFrom.Trim(), DeliveryTestTo.Trim())
+                .RunDeliveryTestAsync(
+                    DeliveryTestFrom.Trim(),
+                    DeliveryTestTo.Trim(),
+                    DeliveryTestRequireTls)
                 .ConfigureAwait(true);
 
             OnPropertyChanged(nameof(HasDeliveryTest));
+            OnPropertyChanged(nameof(DecisiveAttempt));
         },
         reloadAfter: false);
 

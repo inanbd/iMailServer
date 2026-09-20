@@ -14,25 +14,25 @@ namespace MailServer.Application.Abstractions.Smtp;
 /// negotiated or the peer's certificate is not trusted. See <c>docs/TLS.md</c>'s outbound
 /// policy table.
 /// </param>
+/// <param name="Transcript">
+/// Somewhere to record the conversation, or null to record nothing — which is every queued
+/// delivery. A transcript is for an operator watching one message; building one per queued
+/// attempt would be work nobody reads.
+/// <para>
+/// <b>An argument rather than a second client.</b> The delivery test's value is that it
+/// exercises the path the mail really takes — MX selection, STARTTLS policy, DKIM signing,
+/// dot-stuffing. A client written to be observable would be a second implementation of all
+/// four, and a test of it would prove nothing about the one that carries the mail.
+/// </para>
+/// </param>
 public sealed record OutboundDeliveryRequest(
     string TargetHost,
     int Port,
     EmailAddress? ReversePath,
     EmailAddress RecipientAddress,
     StoredMessageId MessageId,
-    bool RequireTls)
-{
-    /// <summary>
-    /// Whether to keep a command-and-reply record of the conversation.
-    /// </summary>
-    /// <remarks>
-    /// Off for ordinary queue delivery, which runs thousands of these and already has
-    /// <see cref="Domain.Entities.DeliveryAttempt"/> rows for its evidence. The delivery test
-    /// turns it on because being able to read what the remote said at each step is the whole
-    /// point of it. Never records message content — see <c>SmtpTranscript</c>.
-    /// </remarks>
-    public bool RecordTranscript { get; init; }
-}
+    bool RequireTls,
+    Domain.Deliverability.DeliveryTranscript? Transcript = null);
 
 /// <summary>
 /// Everything worth recording about one attempt, whether it succeeded or not.
@@ -53,20 +53,7 @@ public sealed record OutboundDeliveryResult(
     int? ReplyCode,
     string? EnhancedStatus,
     string? ReplyText,
-    string? ErrorDetail)
-{
-    /// <summary>
-    /// The conversation, when <see cref="OutboundDeliveryRequest.RecordTranscript"/> asked for
-    /// one. Empty otherwise.
-    /// </summary>
-    /// <remarks>
-    /// An init-only property rather than another positional parameter, so that adding it did not
-    /// touch the several places a <see cref="OutboundDeliveryResult"/> is constructed — and so
-    /// that <see cref="Domain.Entities.DeliveryAttempt"/>, which this record is shaped to map
-    /// onto, keeps the same shape it had.
-    /// </remarks>
-    public IReadOnlyList<string> Transcript { get; init; } = [];
-}
+    string? ErrorDetail);
 
 /// <summary>
 /// Speaks the client side of one SMTP conversation to a remote mail exchanger.
