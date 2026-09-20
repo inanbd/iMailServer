@@ -379,7 +379,7 @@ public sealed class ImapCommandProcessor
             return TooManyAttempts(command.Tag);
         }
 
-        ImapAstringReader reader = new(command.Argument);
+        ImapAstringReader reader = new(command.Argument, command.Literals);
 
         if (!reader.TryReadText(out string? user) ||
             !reader.TryReadText(out string? password) ||
@@ -424,7 +424,7 @@ public sealed class ImapCommandProcessor
             return TooManyAttempts(command.Tag);
         }
 
-        ImapAstringReader reader = new(command.Argument);
+        ImapAstringReader reader = new(command.Argument, command.Literals);
 
         if (!reader.TryReadText(out string? mechanismName))
         {
@@ -670,7 +670,7 @@ public sealed class ImapCommandProcessor
             return ImapCommandResult.Single(ImapResponses.Bad(command.Tag, "Not authenticated"));
         }
 
-        ImapAstringReader reader = new(command.Argument);
+        ImapAstringReader reader = new(command.Argument, command.Literals);
 
         if (!reader.TryReadText(out string? wireName) || !reader.AtEnd)
         {
@@ -833,7 +833,7 @@ public sealed class ImapCommandProcessor
             return ImapCommandResult.Single(ImapResponses.Bad(command.Tag, "Not authenticated"));
         }
 
-        ImapAstringReader reader = new(command.Argument);
+        ImapAstringReader reader = new(command.Argument, command.Literals);
 
         if (!reader.TryReadText(out string? wireReference) ||
             !reader.TryReadListMailbox(out string? wirePattern) ||
@@ -1044,7 +1044,7 @@ public sealed class ImapCommandProcessor
             return ImapCommandResult.Single(ImapResponses.Bad(command.Tag, "Not authenticated"));
         }
 
-        ImapAstringReader reader = new(command.Argument);
+        ImapAstringReader reader = new(command.Argument, command.Literals);
 
         if (!reader.TryReadText(out string? wireName))
         {
@@ -1834,7 +1834,7 @@ public sealed class ImapCommandProcessor
             return ImapCommandResult.Single(ImapResponses.Bad(command.Tag, "Not authenticated"));
         }
 
-        ImapAstringReader reader = new(command.Argument);
+        ImapAstringReader reader = new(command.Argument, command.Literals);
 
         if (!reader.TryReadText(out string? wireName))
         {
@@ -1998,7 +1998,7 @@ public sealed class ImapCommandProcessor
                 ImapResponses.Bad(command.Tag, $"{verb} sequence set is not valid"));
         }
 
-        ImapAstringReader reader = new(argument[(split + 1)..]);
+        ImapAstringReader reader = new(argument[(split + 1)..], command.Literals);
 
         if (!reader.TryReadText(out string? wireName) || !reader.AtEnd)
         {
@@ -2086,7 +2086,7 @@ public sealed class ImapCommandProcessor
             return null;
         }
 
-        if (!ImapAppend.TryParse(command.Argument, out ImapAppendRequest? request))
+        if (!ImapAppend.TryParse(command.Argument, command.Literals, out ImapAppendRequest? request))
         {
             refusal = ImapCommandResult.Single(ImapResponses.Bad(
                 command.Tag,
@@ -2219,7 +2219,7 @@ public sealed class ImapCommandProcessor
                 ImapResponses.Bad(command.Tag, "No mailbox is selected"));
         }
 
-        if (!ImapSearch.TryParse(command.Argument, out ImapSearchKey? key, out bool badCharset))
+        if (!ImapSearch.TryParse(command.Argument, command.Literals, out ImapSearchKey? key, out bool badCharset))
         {
             return ImapCommandResult.Single(badCharset
                 ? ImapResponses.No(command.Tag, "Unsupported CHARSET; this server searches US-ASCII and UTF-8")
@@ -2444,5 +2444,13 @@ public sealed class ImapCommandProcessor
         // "MOVE" as one of the supported capabilities to the CAPABILITY command." Tied to the
         // writer, because without one every MOVE is refused as unimplemented - and the atom is
         // the only thing that makes the command present.
-        IsMoveAvailable: _writer is not null);
+        IsMoveAvailable: _writer is not null,
+
+        // RFC 7888 §4: the atom is the promise that a non-synchronising literal is "automatically
+        // limited to 4096 octets", and ImapConnectionHandler.MaxInlineLiteralOctets is that
+        // limit. Unconditional like NAMESPACE, because reading a literal depends on nothing
+        // optional - it is the connection's own loop, not a repository or a store - and because
+        // withholding the atom would not make this server refuse {n+}, only make a client spend
+        // a round trip per argument finding out that it need not have.
+        IsLiteralMinusAvailable: true);
 }

@@ -119,6 +119,32 @@ public enum ImapTagFailure
 public sealed record ImapCommand(string Tag, ImapVerb Verb, bool IsUid, string Argument, string Raw)
 {
     /// <summary>
+    /// The values of the literals that arrived with this command, in the order their specifiers
+    /// appear in <see cref="Argument"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Empty for the ordinary single-line command, which is most of them. RFC 3501 §4.3 admits a
+    /// literal wherever the grammar has an <c>astring</c>, so a mailbox name outside ASCII, a
+    /// userid or a <c>SEARCH</c> term may arrive as octets after the line rather than on it; the
+    /// connection reads them and puts them here, and <see cref="ImapAstringReader"/> hands each
+    /// one back in place of the <c>{n}</c> that stands for it.
+    /// </para>
+    /// <para>
+    /// <b><c>APPEND</c>'s message literal is deliberately not here.</b> It is the one literal
+    /// this server never holds in memory — it streams to the message store as it arrives — so
+    /// its specifier stays unresolved in <see cref="Argument"/> for <see cref="ImapAppend"/> to
+    /// read. A message is the one argument large enough for the difference to matter.
+    /// </para>
+    /// <para>
+    /// <b>Like <see cref="Argument"/> and <see cref="Raw"/>, this can hold a password</b> — a
+    /// client may send <c>LOGIN</c>'s userid and password as literals — which is why
+    /// <see cref="PrintMembers"/> does not print it. See that method's remarks.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<string> Literals { get; init; } = [];
+
+    /// <summary>
     /// The longest tag accepted.
     /// </summary>
     /// <remarks>
@@ -152,6 +178,14 @@ public sealed record ImapCommand(string Tag, ImapVerb Verb, bool IsUid, string A
     /// the failure is silent and the call site that forgets will not be the one anybody reviews.
     /// <c>ImapProtocolSecurityTests</c>'s scan for a logged <c>Raw</c> or <c>Argument</c> cannot
     /// catch this shape at all: the offending line mentions neither property by name.
+    /// </para>
+    /// <para>
+    /// <b><see cref="Literals"/> is a third way the same credential can arrive</b>, and is
+    /// excluded here for the same reason: RFC 3501 §4.3 lets a client send
+    /// <c>LOGIN {5}</c>/<c>alice</c>/<c>{8}</c>/<c>hunter2</c>, which puts the password in that
+    /// list rather than on the line. Every property that can hold one is left unprinted, so the
+    /// rule is "print the three that are safe" rather than "remember to exclude the unsafe
+    /// ones", and a property added later is excluded by default.
     /// </para>
     /// <para>
     /// The tag is safe to print: <see cref="TryParse"/> refuses anything outside RFC 3501 §9's

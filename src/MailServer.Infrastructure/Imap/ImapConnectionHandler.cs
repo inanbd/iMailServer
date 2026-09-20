@@ -88,6 +88,62 @@ public sealed class ImapConnectionHandler(
     IMessageStore messageStore,
     ILogger<ImapConnectionHandler> logger)
 {
+    /// <summary>
+    /// The largest literal this server will read into memory as a command argument.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>4096 is RFC 7888's number, and adopting it is what makes advertising <c>LITERAL-</c>
+    /// true.</b> §4 defines the capability as the promise that a non-synchronising literal is
+    /// "automatically limited to 4096 octets", so a server announcing the atom and then reading
+    /// an arbitrarily large <c>{n+}</c> is announcing <c>LITERAL+</c> under another name — the
+    /// one thing <c>docs/IMAP.md</c> says this server is not.
+    /// </para>
+    /// <para>
+    /// <b>It applies to the synchronising form too</b>, which RFC 7888 does not require and
+    /// which costs nothing: the arguments that arrive as literals are mailbox names, userids and
+    /// search text, and four kilobytes is already far past any of them. The one literal that is
+    /// legitimately larger is <c>APPEND</c>'s message, which never comes through here —
+    /// <see cref="ImapConnectionOptions.MaxAppendOctets"/> bounds it instead, and its octets go
+    /// to the message store rather than into memory.
+    /// </para>
+    /// </remarks>
+    public const int MaxInlineLiteralOctets = 4096;
+
+    /// <summary>
+    /// The most literals one command may carry.
+    /// </summary>
+    /// <remarks>
+    /// RFC 3501 sets no bound, so this server does. It also bounds the command as a whole: a
+    /// literal is the only thing that lets a command span more than one line, so at most this
+    /// many lines plus one can be spent on a single command, each already bounded by
+    /// <see cref="ImapConnectionOptions.MaxLineOctets"/>. Thirty-two is past anything a real
+    /// client sends — a <c>SEARCH</c> with a handful of non-ASCII terms is the busiest case —
+    /// while keeping a peer from assembling an unbounded command out of bounded pieces.
+    /// </remarks>
+    public const int MaxLiteralsPerCommand = 32;
+
+    /// <summary>The most literal content, in total, one command may carry.</summary>
+    /// <remarks>
+    /// <see cref="MaxLiteralsPerCommand"/> times <see cref="MaxInlineLiteralOctets"/> would be
+    /// 128 KiB held for one command; this halves that, because no real command needs even this
+    /// much and the two limits together are what bound the memory a single connection can make
+    /// this server hold while it is still deciding what the command says.
+    /// </remarks>
+    public const int MaxTotalInlineLiteralOctets = 64 * 1024;
+
+    /// <summary>
+    /// Decodes a literal's octets into the argument they stand for.
+    /// </summary>
+    /// <remarks>
+    /// <b>Never throws on what a client sent.</b> RFC 3501 §4.3 makes a literal a sequence of
+    /// octets with no encoding attached, so a client may send bytes that are not UTF-8 at all —
+    /// and it is a mailbox name or a search term, not a protocol violation worth dropping a
+    /// connection over. Invalid sequences become U+FFFD, which then simply matches no mailbox
+    /// and no message, exactly as a wrong name would.
+    /// </remarks>
+    private static readonly UTF8Encoding Utf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: false);
+
     /// <summary>Handles one connection to completion.</summary>
     /// <param name="transport">The accepted socket's stream. Not disposed here; the caller owns it.</param>
     /// <param name="remoteAddress">The peer, from the transport.</param>
@@ -218,24 +274,44 @@ public sealed class ImapConnectionHandler(
                     return;
             }
 
-            ImapCommandResult result;
+            // Everything the client owes before the command can be read at all: RFC 3501 §4.3
+            // lets any astring argument arrive as octets after the line rather than on it, so a
+            // command is a line plus however many literals it announced.
+            ImapLiteralRead literals = await ReadLiteralsAsync(
+                stream, reader, options, processor, line.Text, cancellationToken)
+                .ConfigureAwait(false);
 
-            if (!ImapCommand.TryParse(line.Text, out ImapCommand? command, out ImapTagFailure failure))
+            if (literals.Status == ImapLiteralStatus.Closed)
+            {
+                return;
+            }
+
+            ImapCommandResult result;
+            ImapCommand? command = null;
+
+            if (literals.Status == ImapLiteralStatus.Refused)
+            {
+                result = literals.Refusal!;
+            }
+            else if (!ImapCommand.TryParse(literals.Text, out ImapCommand? parsed, out ImapTagFailure failure))
             {
                 result = processor.MalformedLine(failure);
             }
-            else if (command.Verb == ImapVerb.Append)
-            {
-                // Intercepted before the ordinary dispatch, because APPEND's last argument is not
-                // on the line: RFC 3501 §6.3.11's "message literal" follows it, and only the loop
-                // owns the stream it arrives on.
-                result = await AppendAsync(
-                    stream, reader, processor, options, command, cancellationToken)
-                    .ConfigureAwait(false);
-            }
             else
             {
-                result = await processor.ExecuteAsync(command, cancellationToken).ConfigureAwait(false);
+                command = parsed with { Literals = literals.Values };
+
+                result = command.Verb == ImapVerb.Append
+
+                    // Intercepted before the ordinary dispatch, because APPEND's message literal
+                    // is the one this server never holds in memory: RFC 3501 §6.3.11's octets go
+                    // straight to the message store, and only the loop owns the stream they
+                    // arrive on. ReadLiteralsAsync leaves that specifier unresolved for exactly
+                    // this reason; every other literal on the line is already in command.Literals.
+                    ? await AppendAsync(
+                        stream, reader, processor, options, command, cancellationToken)
+                        .ConfigureAwait(false)
+                    : await processor.ExecuteAsync(command, cancellationToken).ConfigureAwait(false);
             }
 
             await WriteAsync(stream, result.Responses, cancellationToken).ConfigureAwait(false);
@@ -477,6 +553,210 @@ public sealed class ImapConnectionHandler(
     /// stream has to hold. Nothing here composes text.
     /// </para>
     /// </remarks>
+    /// <summary>How reading a command's literals ended.</summary>
+    private enum ImapLiteralStatus
+    {
+        /// <summary>Every literal arrived; the command is complete.</summary>
+        Complete = 0,
+
+        /// <summary>The command was refused before its octets were read.</summary>
+        Refused = 1,
+
+        /// <summary>The connection is finished and has already been told so.</summary>
+        Closed = 2,
+    }
+
+    /// <summary>The outcome of reading a command's literals.</summary>
+    /// <param name="Status">How the read ended.</param>
+    /// <param name="Text">
+    /// The whole command line, with each literal specifier left exactly where the client put it.
+    /// </param>
+    /// <param name="Values">The literals' values, in the order their specifiers appear.</param>
+    /// <param name="Refusal">What to answer, for <see cref="ImapLiteralStatus.Refused"/>.</param>
+    private readonly record struct ImapLiteralRead(
+        ImapLiteralStatus Status,
+        string Text,
+        IReadOnlyList<string> Values,
+        ImapCommandResult? Refusal);
+
+    /// <summary>
+    /// Reads whatever literals a command announced, leaving <c>APPEND</c>'s message alone.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A literal is always the last thing on the line that announces it</b>, and the command
+    /// resumes after the octets — RFC 3501 §4.3. So this is a loop, not a special case: read a
+    /// line, and while it ends in a specifier, answer it, take the octets, read the next line
+    /// and join it on. <c>LOGIN {5}</c>/<c>alice</c>/<c>{8}</c>/<c>hunter2</c> goes round twice.
+    /// </para>
+    /// <para>
+    /// <b>The specifiers stay in the text.</b> They are the placeholders the values are matched
+    /// against, positionally, by <see cref="ImapAstringReader"/>. Substituting the octets into
+    /// the line instead would mean re-quoting arbitrary binary into something the parser must
+    /// then take apart again — a round trip whose only possible outcomes are "unchanged" and
+    /// "wrong".
+    /// </para>
+    /// <para>
+    /// <b>The two refusals differ in kind, and RFC 7888 §4 is why.</b> A synchronising literal
+    /// has not been sent yet: withholding the continuation and answering <c>BAD</c> costs the
+    /// client one round trip and nothing else, which is the whole point of the handshake. A
+    /// non-synchronising one is already in flight, so there is no refusal that does not either
+    /// read the octets it was trying not to read or desynchronise the session — §4's own two
+    /// exits. This takes the second, with the untagged <c>BYE</c> §4 prescribes, and notes that
+    /// advertising <c>LITERAL-</c> is what makes it nearly unreachable: a client that has read
+    /// the capability knows the cap and sends a synchronising literal above it.
+    /// </para>
+    /// <para>
+    /// <b><c>APPEND</c>'s message literal is left for <see cref="AppendAsync"/>.</b> The test is
+    /// whether the command so far parses as a complete <c>APPEND</c> whose remaining argument is
+    /// this literal — which is what <see cref="ImapAppend.TryParse"/> answers — because RFC 3501
+    /// §6.3.11 puts the message last and nothing may follow it. A mailbox name earlier on the
+    /// same line is an ordinary literal and is read here, so
+    /// <c>APPEND {5}</c>/<c>INBOX (\Seen) {310}</c> resolves its name and still streams its
+    /// message.
+    /// </para>
+    /// </remarks>
+    private async Task<ImapLiteralRead> ReadLiteralsAsync(
+        Stream stream,
+        ImapLineReader reader,
+        ImapConnectionOptions options,
+        ImapCommandProcessor processor,
+        string firstLine,
+        CancellationToken cancellationToken)
+    {
+        string text = firstLine;
+        List<string> values = [];
+        long total = 0;
+
+        // How much of the text has already been answered. The specifiers stay in the text as the
+        // placeholders the values are matched against, so "does this line end in a specifier" is
+        // true again the moment a literal's own remainder is empty - SELECT {5} is still SELECT
+        // {5} after INBOX arrives. Only a specifier beginning at or after this point is a new
+        // one; without the mark the loop re-reads the literal it just read, and asks the client
+        // for octets it already sent.
+        int answered = 0;
+
+        while (true)
+        {
+            if (!ImapLiteralSpecifier.TryParseTrailing(text, out ImapLiteralSpecifier specifier, out int start) ||
+                start < answered)
+            {
+                return new ImapLiteralRead(ImapLiteralStatus.Complete, text, values, null);
+            }
+
+            // The tag has to be usable before anything is answered: a continuation cannot be
+            // matched to a command the client cannot identify, so this stops and lets the
+            // ordinary parse produce RFC 3501 §7.1.3's untagged BAD.
+            if (!ImapCommand.TryParse(text, out ImapCommand? sofar, out _))
+            {
+                return new ImapLiteralRead(ImapLiteralStatus.Complete, text, values, null);
+            }
+
+            if (sofar.Verb == ImapVerb.Append &&
+                ImapAppend.TryParse(sofar.Argument, values, out _))
+            {
+                return new ImapLiteralRead(ImapLiteralStatus.Complete, text, values, null);
+            }
+
+            if (specifier.ByteCount > MaxInlineLiteralOctets ||
+                values.Count >= MaxLiteralsPerCommand ||
+                total + specifier.ByteCount > MaxTotalInlineLiteralOctets)
+            {
+                if (!specifier.IsSynchronizing)
+                {
+                    await WriteAsync(
+                        stream,
+                        [ImapResponses.Bye("Non-synchronising literal is larger than this server accepts")],
+                        cancellationToken).ConfigureAwait(false);
+
+                    return new ImapLiteralRead(ImapLiteralStatus.Closed, text, values, null);
+                }
+
+                // No continuation, so the octets never leave the client. The command is over.
+                return new ImapLiteralRead(
+                    ImapLiteralStatus.Refused,
+                    text,
+                    values,
+                    ImapCommandResult.Single(ImapResponses.Bad(
+                        sofar.Tag,
+                        "Literal is larger than this server accepts")));
+            }
+
+            TimeSpan timeout = CurrentTimeout(processor.Session, options);
+
+            if (specifier.IsSynchronizing)
+            {
+                await WriteAsync(
+                    stream,
+                    [ImapResponses.ReadyForLiteral()],
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            byte[] octets = new byte[(int)specifier.ByteCount];
+            int written = 0;
+
+            bool complete = await reader
+                .ReadLiteralAsync(
+                    specifier.ByteCount,
+                    (chunk, _) =>
+                    {
+                        chunk.Span.CopyTo(octets.AsSpan(written));
+                        written += chunk.Length;
+                        return ValueTask.CompletedTask;
+                    },
+                    timeout,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            if (!complete)
+            {
+                await WriteAsync(
+                    stream,
+                    [ImapResponses.Bye("Literal was truncated")],
+                    cancellationToken).ConfigureAwait(false);
+
+                return new ImapLiteralRead(ImapLiteralStatus.Closed, text, values, null);
+            }
+
+            values.Add(Utf8.GetString(octets));
+            total += specifier.ByteCount;
+
+            // Everything up to here is answered, so the specifier just satisfied cannot be
+            // mistaken for the next one. What follows is the remainder of the command line,
+            // which RFC 3501 §4.3 has resume after the octets - and which may announce another.
+            answered = text.Length;
+
+            ImapLineResult next = await reader.ReadLineAsync(timeout, cancellationToken).ConfigureAwait(false);
+
+            switch (next.Status)
+            {
+                case ImapLineStatus.EndOfStream:
+                    return new ImapLiteralRead(ImapLiteralStatus.Closed, text, values, null);
+
+                case ImapLineStatus.Timeout:
+                    await WriteAsync(
+                        stream,
+                        [ImapResponses.Bye("Autologout; idle for too long")],
+                        cancellationToken).ConfigureAwait(false);
+
+                    return new ImapLiteralRead(ImapLiteralStatus.Closed, text, values, null);
+
+                case ImapLineStatus.LineTooLong:
+                    await WriteAsync(
+                        stream,
+                        [
+                            ImapResponses.UntaggedBad("Command line too long"),
+                            ImapResponses.Bye("Command line too long"),
+                        ],
+                        cancellationToken).ConfigureAwait(false);
+
+                    return new ImapLiteralRead(ImapLiteralStatus.Closed, text, values, null);
+            }
+
+            text += next.Text;
+        }
+    }
+
     /// <summary>
     /// Runs an <c>APPEND</c>: continuation, octets, then the command proper.
     /// </summary>

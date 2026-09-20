@@ -4767,4 +4767,146 @@ public sealed class ImapCommandProcessorTests
 
         Wire(await ExecuteAsync(processor, "a4 FETCH 1 FLAGS")).ShouldContain("(FLAGS ())");
     }
+
+    // -----------------------------------------------------------------------------------------
+    // Literals. RFC 3501 4.3 admits one wherever the grammar has an astring, so these are the
+    // ordinary commands reached through the other form of every argument they already take.
+    // -----------------------------------------------------------------------------------------
+
+    private static async Task<ImapCommandResult> ExecuteWithLiteralsAsync(
+        ImapCommandProcessor processor,
+        string line,
+        params string[] literals) =>
+        await processor.ExecuteAsync(
+            Parse(line) with { Literals = literals },
+            CancellationToken.None);
+
+    /// <summary>
+    /// The mailbox name is the argument literals matter most for: RFC 3501 §5.1 allows any name,
+    /// and a name outside ASCII is modified UTF-7 a client may well send as octets.
+    /// </summary>
+    [Fact]
+    public async Task Select_takes_a_mailbox_name_that_arrived_as_a_literal()
+    {
+        ImapCommandProcessor processor = await LiteralReadyAsync();
+
+        Wire(await ExecuteWithLiteralsAsync(processor, "a2 SELECT {5}", "INBOX"))
+            .ShouldContain("a2 OK [READ-WRITE] SELECT completed");
+
+        processor.Session.State.ShouldBe(ImapSessionState.Selected);
+    }
+
+    /// <summary>
+    /// Two literals in one command, which is where an order mistake would swap a credential
+    /// rather than merely fail.
+    /// </summary>
+    [Fact]
+    public async Task Login_takes_a_userid_and_password_that_arrived_as_literals()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+        ImapCommandProcessor processor = Processor(authenticator: authenticator);
+
+        Wire(await ExecuteWithLiteralsAsync(
+            processor, "a1 LOGIN {17} {7}", "alice@example.com", "hunter2"))
+            .ShouldStartWith("a1 OK ");
+
+        authenticator.SeenIdentities.ShouldBe(["alice@example.com"]);
+        authenticator.SeenPasswords.ShouldBe(["hunter2"]);
+    }
+
+    /// <summary>
+    /// A SEARCH term as a literal must be searched for, not searched for literally: a tokeniser
+    /// without this reads "FROM {5}" as a search for the five characters "{5}" and returns a
+    /// confidently empty result.
+    /// </summary>
+    [Fact]
+    public async Task Search_takes_a_term_that_arrived_as_a_literal()
+    {
+        Wire(await ExecuteWithLiteralsAsync(await SearchableAsync(), "a2 SEARCH FROM {5}", "alice"))
+            .ShouldStartWith("* SEARCH 1\r\n");
+    }
+
+    /// <summary>
+    /// The specifier is a placeholder, not text: a term whose octets never arrived must refuse
+    /// rather than search for the braces.
+    /// </summary>
+    [Fact]
+    public async Task Search_refuses_a_term_whose_octets_never_arrived()
+    {
+        Wire(await ExecuteAsync(await SearchableAsync(), "a2 SEARCH FROM {5}"))
+            .ShouldContain("a2 BAD");
+    }
+
+    /// <summary>
+    /// A literal search term is a value, never a key name — otherwise a client searching for the
+    /// word "NOT" would have it parsed as the operator.
+    /// </summary>
+    [Fact]
+    public async Task A_literal_search_term_is_never_read_as_an_operator()
+    {
+        Wire(await ExecuteWithLiteralsAsync(await SearchableAsync(), "a2 SEARCH SUBJECT {3}", "NOT"))
+            .ShouldStartWith("* SEARCH\r\n");
+    }
+
+    /// <summary>
+    /// STATUS takes its mailbox as an astring too, and its own parenthesised item list is not an
+    /// astring at all — so the literal must resolve without disturbing what follows it.
+    /// </summary>
+    [Fact]
+    public async Task Status_takes_a_mailbox_name_that_arrived_as_a_literal()
+    {
+        ImapCommandProcessor processor = await LiteralReadyAsync();
+
+        Wire(await ExecuteWithLiteralsAsync(processor, "a2 STATUS {5} (MESSAGES)", "INBOX"))
+            .ShouldContain("* STATUS ");
+    }
+
+    /// <summary>
+    /// A literal is the one argument whose octets bypass the line reader's own framing — CRLF
+    /// inside it is content, not a terminator — so it is the obvious way to try to smuggle a
+    /// response into the stream. Nothing a literal carries may reach the wire.
+    /// </summary>
+    [Fact]
+    public async Task A_hostile_literal_cannot_reach_the_response_stream()
+    {
+        ImapCommandProcessor processor = await LiteralReadyAsync();
+
+        string[] hostile =
+        [
+            "x\r\n* 1 EXPUNGE",
+            "\r\n* 0 EXISTS",
+            "INBOX\r\n+ OK",
+        ];
+
+        foreach (string value in hostile)
+        {
+            foreach (string line in (string[])["a2 SELECT {5}", "a3 STATUS {5} (MESSAGES)"])
+            {
+                string wire = Wire(await ExecuteWithLiteralsAsync(processor, line, value));
+
+                wire.ShouldNotContain("EXPUNGE");
+                wire.ShouldNotContain("EXISTS");
+                wire.ShouldNotContain("+ OK");
+                wire.Count(c => c == '\n').ShouldBeLessThanOrEqualTo(2, wire);
+            }
+        }
+    }
+
+    /// <summary>An authenticated session with one INBOX, for the literal cases above.</summary>
+    private static async Task<ImapCommandProcessor> LiteralReadyAsync()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox)
+            .Deliver(authenticator.KnownMailboxId, "INBOX", 1);
+
+        ImapCommandProcessor processor = Processor(
+            authenticator: authenticator,
+            mailboxes: mailboxes);
+
+        await ExecuteAsync(processor, "a1 LOGIN alice@example.com hunter2");
+
+        return processor;
+    }
 }

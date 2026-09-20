@@ -4,11 +4,9 @@
 >
 > Every command below is implemented and covered by tests, but that criterion is
 > "Thunderbird/Outlook/Apple Mail interoperate without mail loss" and no real client has
-> yet connected to this server. One known conformance gap stands in the way of even trying:
-> **literals are read only for `APPEND`** — see
-> [What is actually built, and the gap](#what-is-actually-built-and-the-gap). Everything here
-> rests on the RFC text and on this product's own tests. Read the next section for why that
-> distinction matters more here than anywhere else in this codebase.
+> yet connected to this server. Everything here rests on the RFC text and on this product's
+> own tests. Read the next section for why that distinction matters more here than anywhere
+> else in this codebase.
 
 ## Why this is the riskiest subsystem
 
@@ -46,8 +44,7 @@ incorrectly.
 **before the server can refuse**, which without a cap is a trivial memory exhaustion. Above a
 threshold, literals stream to disk rather than to memory.
 
-**The capability this design calls for is `LITERAL-`, not `LITERAL+`** — though note the next
-section: nothing is advertised yet. RFC 7888 defines both:
+**The capability advertised for this is `LITERAL-`, not `LITERAL+`.** RFC 7888 defines both:
 they permit the same `{n+}` syntax, but `LITERAL-` caps a non-synchronising literal at 4096
 octets while `LITERAL+` places no bound on one at all, and §5 forbids advertising both at once.
 Requiring a hard cap, as the paragraph above does, is the same thing as deciding this is not a
@@ -59,34 +56,46 @@ connection, which §4 notes "some naive clients are known to blindly reconnect" 
 `LITERAL-` states the cap up front instead, and a complying client sends a synchronising literal
 above it — which the server can refuse before a single octet of it arrives.
 
-### What is actually built, and the gap
+### How a literal is read
 
-**Only `APPEND` reads a literal.** `ImapConnectionHandler` intercepts `APPEND` before the
-ordinary dispatch precisely because its last argument is not on the command line, sends the
-continuation for a synchronising `{n}`, skips it for a non-synchronising `{n+}`, and streams the
-octets straight to the message store. That path is complete and tested.
+**Any argument may be one, and the connection loop is what makes that true.** RFC 3501 §4.3
+admits a literal wherever the grammar has an `astring`, so a mailbox name outside ASCII, a
+userid and a `SEARCH` term all legitimately arrive as octets after the line rather than on it.
+`ImapConnectionHandler.ReadLiteralsAsync` reads a line, and while that line ends in a specifier
+it answers the specifier, takes the octets, reads the next line and joins it on.
+`LOGIN {17}`/`alice@example.com {7}`/`hunter2` goes round twice.
 
-**Every other command is parsed from a single line, and that is the conformance gap.** RFC 3501
-§4.3 admits a literal wherever the grammar has an `astring` — a mailbox name, a userid, a
-`SEARCH` term. `ImapAstringReader` recognises the specifier and reports
-`ImapAstringKind.Literal` rather than resolving it, deliberately, because it is handed one line
-and the octets are not on it. But no handler outside `APPEND` then goes and fetches them, so
-`TryReadText` fails and the command draws a tagged `BAD`. The client, having been given no
-continuation, either waits for a `+` that never comes (synchronising) or sends octets that this
-server parses as a fresh command line (non-synchronising). Both are worse than a clean refusal.
+**The specifiers stay in the text, and the values travel beside it** as `ImapCommand.Literals`.
+`ImapAstringReader` hands back the *n*th value for the *n*th `{n}` it walks past, so the two
+sequences cannot drift — both come from one left-to-right pass over the same line. Substituting
+the octets into the line instead would mean re-quoting arbitrary binary into something the
+parser must immediately take apart again, and a round trip like that has only two possible
+outcomes: unchanged, or wrong.
 
-This is not a corner case. Clients send literals for mailbox names outside ASCII and for
-`SEARCH` strings with 8-bit characters, which is exactly the traffic
-"Thunderbird/Outlook/Apple Mail interoperate without mail loss" is meant to prove. **Closing it
-is a prerequisite for the milestone's exit criterion, not a follow-up to it.**
+**The loop marks how much of the line it has answered**, because a specifier is a placeholder
+that stays where the client put it. `SELECT {5}` is still `SELECT {5}` after `INBOX` arrives and
+its empty remainder is read, so a loop that asked only "does this end in a specifier?" would
+request the same literal forever. Only a specifier beginning past the mark is a new one.
 
-Closing it means: detecting a trailing specifier on any command line, reading the octets with the
-continuation handshake the synchronising form requires, reassembling the command with each
-literal's value substituted (a command may carry several), and bounding the total — the memory
-exhaustion the top of this section warns about applies to a `SEARCH` argument just as it does to
-a message. **`LITERAL-` can be advertised once that exists and the 4096-octet cap is enforced on
-the non-synchronising form specifically**; today `MaxAppendOctets`, sized for a message, is the
-only bound, so the atom would promise a cap this server does not apply.
+**`APPEND`'s message is the one literal that never comes through here.** It is identified by
+`ImapAppend.TryParse` succeeding on the command so far — RFC 3501 §6.3.11 puts the message last
+and lets nothing follow it — and is left unresolved for `AppendAsync` to stream to the message
+store. A mailbox name earlier on the same line is an ordinary argument and is read normally, so
+`APPEND {5}`/`INBOX (\Seen) {310}` resolves its name and still streams its message.
+
+**Three caps bound what a command can make this server hold**: 4096 octets per literal
+(`MaxInlineLiteralOctets`), thirty-two literals per command, and 64 KiB of literal content in
+total. The per-literal cap is RFC 7888's own number, which is what makes advertising `LITERAL-`
+true rather than decorative; the other two exist because a literal is the only thing that lets a
+command span more than one line, and a bounded line repeated without limit is not a bound.
+
+**The two refusals differ in kind, and RFC 7888 §4 is why.** A synchronising literal has not been
+sent yet, so withholding the continuation and answering `BAD` costs the client one round trip and
+leaves the session healthy — the whole point of the handshake. A non-synchronising one is already
+in flight, so there is no refusal that does not either read the octets it was trying not to read
+or desynchronise the session; this server takes §4's second exit, the untagged `BYE`. Advertising
+`LITERAL-` is what makes that path nearly unreachable in practice: a client that has read the
+capability knows the cap, and sends a synchronising literal above it.
 
 ## Special-use folders
 
