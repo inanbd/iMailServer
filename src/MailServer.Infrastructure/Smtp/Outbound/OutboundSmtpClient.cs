@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
@@ -10,6 +11,7 @@ using MailServer.Application.Abstractions.Platform;
 using MailServer.Application.Abstractions.Repositories;
 using MailServer.Application.Abstractions.Smtp;
 using MailServer.Application.Abstractions.Time;
+using MailServer.Domain.Deliverability;
 using MailServer.Domain.Entities;
 using MailServer.Domain.Enums;
 using MailServer.Domain.Mail;
@@ -93,6 +95,14 @@ internal sealed class OutboundSmtpClient(
         }
         catch (Exception ex) when (IsConnectFailure(ex, cancellationToken))
         {
+            // Recorded before returning: a conversation that never opened is the most common
+            // result of a delivery test against a host with no listener or a blocked port 25,
+            // and an empty transcript would look like the test had not run.
+            request.Transcript?.Record(
+                DeliveryStage.Connect,
+                clock.UtcNow,
+                detail: $"Could not connect to {request.TargetHost}:{request.Port}: {ex.Message}");
+
             return Result.Temporary(
                 null, errorDetail: $"Could not connect to {request.TargetHost}:{request.Port}: {ex.Message}");
         }
@@ -101,6 +111,12 @@ internal sealed class OutboundSmtpClient(
         {
             remoteAddress = IpAddressValue.From(remoteEndPoint.Address);
         }
+
+        request.Transcript?.Record(
+            DeliveryStage.Connect,
+            clock.UtcNow,
+            detail: $"{request.TargetHost}:{request.Port}" +
+                (remoteAddress is null ? string.Empty : $" [{remoteAddress.Value}]"));
 
         Stream stream = tcp.GetStream();
         SslStream? tls = null;
@@ -113,13 +129,16 @@ internal sealed class OutboundSmtpClient(
             SmtpReply banner = await SmtpReplyParser.ReadAsync(reader, commandTimeout, cancellationToken)
                 .ConfigureAwait(false);
 
+            request.Transcript?.Record(DeliveryStage.Banner, clock.UtcNow, reply: banner);
+
             if (!banner.IsSuccess)
             {
                 return Classify(remoteAddress, null, banner, "the banner");
             }
 
             (SmtpReply ehlo, IReadOnlyList<string> capabilities) = await EhloAsync(
-                stream, reader, commandTimeout, cancellationToken).ConfigureAwait(false);
+                stream, reader, commandTimeout, request.Transcript, DeliveryStage.Ehlo, cancellationToken)
+                .ConfigureAwait(false);
 
             if (!ehlo.IsSuccess)
             {
@@ -140,8 +159,13 @@ internal sealed class OutboundSmtpClient(
             if (startTlsOffered)
             {
                 TlsUpgradeOutcome tlsOutcome = await UpgradeToTlsAsync(
-                    stream, reader, request.TargetHost, request.RequireTls, commandTimeout, cancellationToken)
-                    .ConfigureAwait(false);
+                    stream,
+                    reader,
+                    request.TargetHost,
+                    request.RequireTls,
+                    commandTimeout,
+                    request.Transcript,
+                    cancellationToken).ConfigureAwait(false);
 
                 if (tlsOutcome.Tls is null)
                 {
@@ -162,8 +186,13 @@ internal sealed class OutboundSmtpClient(
                 // RFC 3207 §4.2: capabilities learned before the handshake must be discarded
                 // and re-learned over the encrypted channel, or a network attacker who stripped
                 // an advertised capability before the upgrade would still have succeeded.
-                (SmtpReply postTlsEhlo, _) = await EhloAsync(stream, reader, commandTimeout, cancellationToken)
-                    .ConfigureAwait(false);
+                (SmtpReply postTlsEhlo, _) = await EhloAsync(
+                    stream,
+                    reader,
+                    commandTimeout,
+                    request.Transcript,
+                    DeliveryStage.EhloAfterTls,
+                    cancellationToken).ConfigureAwait(false);
 
                 if (!postTlsEhlo.IsSuccess)
                 {
@@ -178,7 +207,8 @@ internal sealed class OutboundSmtpClient(
                 : $"MAIL FROM:<{request.ReversePath.Value}>";
 
             SmtpReply mailFromReply = await SendCommandAsync(
-                stream, reader, mailFromArgument, commandTimeout, cancellationToken).ConfigureAwait(false);
+                stream, reader, mailFromArgument, commandTimeout, request.Transcript,
+                DeliveryStage.MailFrom, cancellationToken).ConfigureAwait(false);
 
             if (!mailFromReply.IsSuccess)
             {
@@ -186,8 +216,8 @@ internal sealed class OutboundSmtpClient(
             }
 
             SmtpReply rcptReply = await SendCommandAsync(
-                stream, reader, $"RCPT TO:<{request.RecipientAddress.Value}>", commandTimeout, cancellationToken)
-                .ConfigureAwait(false);
+                stream, reader, $"RCPT TO:<{request.RecipientAddress.Value}>", commandTimeout,
+                request.Transcript, DeliveryStage.RcptTo, cancellationToken).ConfigureAwait(false);
 
             if (!rcptReply.IsSuccess)
             {
@@ -195,7 +225,8 @@ internal sealed class OutboundSmtpClient(
             }
 
             SmtpReply dataReply = await SendCommandAsync(
-                stream, reader, "DATA", commandTimeout, cancellationToken).ConfigureAwait(false);
+                stream, reader, "DATA", commandTimeout, request.Transcript,
+                DeliveryStage.Data, cancellationToken).ConfigureAwait(false);
 
             if (!dataReply.IsIntermediate)
             {
@@ -205,19 +236,28 @@ internal sealed class OutboundSmtpClient(
             byte[]? dkimSignatureLine = await ComputeDkimSignatureLineAsync(request.MessageId, cancellationToken)
                 .ConfigureAwait(false);
 
-            await StreamMessageBodyAsync(stream, request.MessageId, dkimSignatureLine, cancellationToken)
-                .ConfigureAwait(false);
+            long octets = await StreamMessageBodyAsync(
+                stream, request.MessageId, dkimSignatureLine, cancellationToken).ConfigureAwait(false);
+
+            request.Transcript?.Record(
+                DeliveryStage.Body,
+                clock.UtcNow,
+                detail: $"{octets.ToString(CultureInfo.InvariantCulture)} octets sent" +
+                    (dkimSignatureLine is { Length: > 0 } ? ", DKIM-signed" : ", unsigned"));
 
             TimeSpan dataTimeout = TimeSpan.FromSeconds(Options.DataTimeoutSeconds);
             SmtpReply finalReply = await SmtpReplyParser.ReadAsync(reader, dataTimeout, cancellationToken)
                 .ConfigureAwait(false);
 
+            request.Transcript?.Record(DeliveryStage.EndOfData, clock.UtcNow, reply: finalReply);
+
             // QUIT is best-effort: the delivery outcome is already decided by the reply above,
             // and a peer that hangs up first has already told us everything it is going to.
             try
             {
-                await SendCommandAsync(stream, reader, "QUIT", commandTimeout, cancellationToken)
-                    .ConfigureAwait(false);
+                await SendCommandAsync(
+                    stream, reader, "QUIT", commandTimeout, request.Transcript,
+                    DeliveryStage.Quit, cancellationToken).ConfigureAwait(false);
             }
             catch (IOException)
             {
@@ -243,10 +283,12 @@ internal sealed class OutboundSmtpClient(
         Stream stream,
         SmtpLineReader reader,
         TimeSpan timeout,
+        DeliveryTranscript? transcript,
+        DeliveryStage stage,
         CancellationToken cancellationToken)
     {
         SmtpReply ehlo = await SendCommandAsync(
-            stream, reader, $"EHLO {serverIdentity.Hostname}", timeout, cancellationToken)
+            stream, reader, $"EHLO {serverIdentity.Hostname}", timeout, transcript, stage, cancellationToken)
             .ConfigureAwait(false);
 
         if (ehlo.IsSuccess)
@@ -255,34 +297,64 @@ internal sealed class OutboundSmtpClient(
         }
 
         // A peer that does not understand EHLO at all - vanishingly rare, but RFC 5321 requires
-        // the fallback - simply cannot use any ESMTP extension, STARTTLS included.
+        // the fallback - simply cannot use any ESMTP extension, STARTTLS included. Recorded
+        // under the same stage, because both are this conversation's greeting and a transcript
+        // that hid the fallback would leave an operator wondering why no capabilities came back.
         SmtpReply helo = await SendCommandAsync(
-            stream, reader, $"HELO {serverIdentity.Hostname}", timeout, cancellationToken)
+            stream, reader, $"HELO {serverIdentity.Hostname}", timeout, transcript, stage, cancellationToken)
             .ConfigureAwait(false);
 
         return (helo, []);
     }
 
-    private static async Task<SmtpReply> SendCommandAsync(
+    /// <summary>
+    /// Sends one command, reads its reply, and records both.
+    /// </summary>
+    /// <remarks>
+    /// <b>The recording is here rather than at the call sites</b>, so that a command added to
+    /// this conversation later is in the transcript without anybody remembering to put it
+    /// there. A transcript missing a command is worse than no transcript: an operator reading
+    /// one trusts that what is not in it did not happen.
+    /// </remarks>
+    private async Task<SmtpReply> SendCommandAsync(
         Stream stream,
         SmtpLineReader reader,
         string command,
         TimeSpan timeout,
+        DeliveryTranscript? transcript,
+        DeliveryStage stage,
         CancellationToken cancellationToken)
     {
         byte[] bytes = Encoding.UTF8.GetBytes(command + "\r\n");
         await stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
         await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
 
-        return await SmtpReplyParser.ReadAsync(reader, timeout, cancellationToken).ConfigureAwait(false);
+        SmtpReply reply = await SmtpReplyParser
+            .ReadAsync(reader, timeout, cancellationToken)
+            .ConfigureAwait(false);
+
+        transcript?.Record(stage, clock.UtcNow, command, reply);
+
+        return reply;
     }
 
-    private async Task StreamMessageBodyAsync(
+    /// <returns>
+    /// How many octets went onto the wire, dot-stuffing and terminator included.
+    /// </returns>
+    /// <remarks>
+    /// The count is the only thing about the body that ever reaches a transcript. See
+    /// <see cref="DeliveryTranscript"/> on why the octets themselves must not: a transcript is
+    /// read under <c>ViewServerState</c>, and message content is guarded by
+    /// <c>ReadMessageContent</c>.
+    /// </remarks>
+    private async Task<long> StreamMessageBodyAsync(
         Stream stream,
         StoredMessageId messageId,
         byte[]? dkimSignatureLine,
         CancellationToken cancellationToken)
     {
+        long octets = 0;
+
         await using Stream content = await messageStore.OpenReadAsync(messageId, cancellationToken)
             .ConfigureAwait(false);
 
@@ -298,6 +370,8 @@ internal sealed class OutboundSmtpClient(
             int signatureWritten = stuffing.Stuff(dkimSignatureLine, stuffedSignature);
             await stream.WriteAsync(stuffedSignature.AsMemory(0, signatureWritten), cancellationToken)
                 .ConfigureAwait(false);
+
+            octets += signatureWritten;
         }
 
         byte[] input = new byte[BodyChunkBytes];
@@ -309,12 +383,16 @@ internal sealed class OutboundSmtpClient(
         {
             int written = stuffing.Stuff(input.AsSpan(0, read), output);
             await stream.WriteAsync(output.AsMemory(0, written), cancellationToken).ConfigureAwait(false);
+
+            octets += written;
         }
 
         byte[] terminator = new byte[5];
         int terminatorLength = stuffing.WriteTerminator(terminator);
         await stream.WriteAsync(terminator.AsMemory(0, terminatorLength), cancellationToken).ConfigureAwait(false);
         await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+
+        return octets + terminatorLength;
     }
 
     /// <summary>
@@ -435,10 +513,12 @@ internal sealed class OutboundSmtpClient(
         string targetHost,
         bool requireTls,
         TimeSpan timeout,
+        DeliveryTranscript? transcript,
         CancellationToken cancellationToken)
     {
         SmtpReply startTlsReply = await SendCommandAsync(
-            stream, reader, "STARTTLS", timeout, cancellationToken).ConfigureAwait(false);
+            stream, reader, "STARTTLS", timeout, transcript, DeliveryStage.StartTls, cancellationToken)
+            .ConfigureAwait(false);
 
         if (!startTlsReply.IsSuccess)
         {
@@ -517,7 +597,7 @@ internal sealed class OutboundSmtpClient(
 
             logger.LogDebug(ex, "STARTTLS handshake with {Host} failed.", targetHost);
 
-            return new TlsUpgradeOutcome(
+            TlsUpgradeOutcome failed = new(
                 null,
                 null,
                 null,
@@ -525,9 +605,13 @@ internal sealed class OutboundSmtpClient(
                 peerIssuer,
                 trusted,
                 validationDiagnostic ?? $"TLS handshake with {targetHost} failed: {ex.Message}");
+
+            transcript?.Record(DeliveryStage.Handshake, clock.UtcNow, detail: failed.Diagnostic);
+
+            return failed;
         }
 
-        return new TlsUpgradeOutcome(
+        TlsUpgradeOutcome outcome = new(
             tls,
             tls.SslProtocol.ToString(),
             tls.NegotiatedCipherSuite.ToString(),
@@ -535,6 +619,26 @@ internal sealed class OutboundSmtpClient(
             peerIssuer,
             trusted,
             validationDiagnostic);
+
+        // The certificate's subject and issuer, and whether the chain was trusted, are the whole
+        // reason an operator runs a delivery test against a receiver that is refusing them: an
+        // opportunistic session proceeds encrypted whether or not the chain validated, so
+        // "encrypted" on its own does not answer the question they are asking.
+        transcript?.Record(
+            DeliveryStage.Handshake,
+            clock.UtcNow,
+            detail: string.Join(", ",
+                new[]
+                {
+                    outcome.Protocol,
+                    outcome.Cipher,
+                    peerSubject is null ? null : $"subject {peerSubject}",
+                    peerIssuer is null ? null : $"issuer {peerIssuer}",
+                    trusted ? "chain trusted" : "chain NOT trusted",
+                    validationDiagnostic,
+                }.Where(part => part is { Length: > 0 })));
+
+        return outcome;
     }
 
     private static bool IsConnectFailure(Exception ex, CancellationToken cancellationToken) =>

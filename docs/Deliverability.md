@@ -408,15 +408,65 @@ An operator who follows this plan and then runs the report is not told they were
 Sends a real message to an address you nominate and records the whole conversation:
 
 ```text
-MX selected · remote address · SMTP banner · EHLO capabilities
-STARTTLS · TLS version · certificate details
-MAIL FROM result · RCPT result · DATA result · remote final response
-queue latency · delivery latency · DKIM selector used · Message-ID
+     0ms   [Connect] mx.example.net:25 [203.0.113.9]
+    40ms < 220 mx.example.net ESMTP ready
+    80ms > EHLO mail.example.com
+    82ms < 250 mx.example.net
+    82ms < 250-SIZE 52428800
+    82ms < 250-STARTTLS
+   120ms > STARTTLS
+   122ms < 220 Ready to start TLS
+   180ms   [Handshake] Tls13, subject CN=mx.example.net, chain trusted
+   220ms > EHLO mail.example.com
+   260ms > MAIL FROM:<postmaster@example.com>
+   262ms < 250 OK
+   300ms > RCPT TO:<someone@example.net>
+   302ms < 250 OK
+   340ms > DATA
+   342ms < 354 End data with <CRLF>.<CRLF>
+   380ms   [Body] 612 octets sent, DKIM-signed
+   900ms < 250 2.0.0 OK 1758362400 - gsmtp
 ```
 
 Sending to a Gmail account and reading the `Authentication-Results` header it adds is the
 fastest honest answer to "is my setup correct?" — it is the receiver's own verdict rather than
 our opinion of it.
+
+**Recorded on the real delivery path, not a copy of it.** The same `OutboundSmtpClient` the queue
+uses fills the transcript in, because a client written to be observable would be a second
+implementation of MX selection, STARTTLS policy, DKIM signing and dot-stuffing — and a test of
+that one would prove nothing about the one that carries the mail. The transcript is an optional
+argument on the delivery request, null for every queued attempt.
+
+**The recording happens where the command is sent**, in one place, so a command added to the
+conversation later appears in the transcript without anybody remembering to put it there. A
+transcript missing a command is worse than no transcript: an operator reading one trusts that
+what is not in it did not happen.
+
+**The message body is never in the transcript, and that is a rule rather than an omission.** A
+transcript is read under `ViewServerState`; message content is guarded by `ReadMessageContent`.
+A transcript carrying body octets would be a way to read mail with the weaker of the two
+permissions, so the body step records how many octets went out and nothing else. The test that
+pins this sends a distinctive string, checks the fake receiver really got it, and then asserts
+its absence from the whole rendering rather than from the body step alone — the leak this guards
+against would be somewhere nobody thought to look.
+
+**Where it stopped is the diagnosis.** A conversation that ended at `RCPT TO` was refused the
+recipient; one that ended at `MAIL FROM` was refused the sender, which is usually SPF or a
+blocklist; one that ended at the banner never got to speak; and one with only a `Connect` step
+never opened at all — which is what a blocked port 25 looks like, and the most common outcome of
+a first delivery test.
+
+**The capabilities reported are the ones learned after the handshake.** RFC 3207 §4.2 has the
+client discard everything it learned before it, so the pre-TLS list is not what the conversation
+ran on — and it is the list a network attacker can edit. The same rule decides the greeting
+reported when a receiver refuses `EHLO` and the client falls back to `HELO`: the second one is
+what the session ran on, so a refusal's own continuation lines are never reported as
+capabilities the session had.
+
+**Elapsed is measured from the first step, not from the previous one.** What an operator is
+looking for is which single stage took the time, and a greylisting receiver that pauses before
+its `RCPT TO` reply shows up as a jump in the column.
 
 ## Header analyser
 

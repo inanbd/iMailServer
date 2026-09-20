@@ -14,13 +14,25 @@ namespace MailServer.Application.Abstractions.Smtp;
 /// negotiated or the peer's certificate is not trusted. See <c>docs/TLS.md</c>'s outbound
 /// policy table.
 /// </param>
+/// <param name="Transcript">
+/// Somewhere to record the conversation, or null to record nothing — which is every queued
+/// delivery. A transcript is for an operator watching one message; building one per queued
+/// attempt would be work nobody reads.
+/// <para>
+/// <b>An argument rather than a second client.</b> The delivery test's value is that it
+/// exercises the path the mail really takes — MX selection, STARTTLS policy, DKIM signing,
+/// dot-stuffing. A client written to be observable would be a second implementation of all
+/// four, and a test of it would prove nothing about the one that carries the mail.
+/// </para>
+/// </param>
 public sealed record OutboundDeliveryRequest(
     string TargetHost,
     int Port,
     EmailAddress? ReversePath,
     EmailAddress RecipientAddress,
     StoredMessageId MessageId,
-    bool RequireTls);
+    bool RequireTls,
+    Domain.Deliverability.DeliveryTranscript? Transcript = null);
 
 /// <summary>
 /// Everything worth recording about one attempt, whether it succeeded or not.

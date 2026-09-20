@@ -1,5 +1,6 @@
 using MailServer.Application.Abstractions.Platform;
 using MailServer.Application.Abstractions.Smtp;
+using MailServer.Domain.Deliverability;
 using MailServer.Domain.Enums;
 using MailServer.Domain.ValueObjects;
 using MailServer.Infrastructure.Certificates;
@@ -228,4 +229,208 @@ public sealed class OutboundSmtpClientTests : IAsyncDisposable
     }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+    // ---------------------------------------------------------------------------------------
+    // The transcript, recorded on this same path rather than on a copy of it.
+    // ---------------------------------------------------------------------------------------
+
+    private async Task<(OutboundDeliveryResult Result, DeliveryTranscript Transcript)> DeliverWithTranscriptAsync(
+        FakeRemoteMta mta,
+        StoredMessageId messageId,
+        bool requireTls = false)
+    {
+        DeliveryTranscript transcript = new();
+
+        OutboundDeliveryResult result = await CreateClient().DeliverAsync(
+            new OutboundDeliveryRequest(
+                "127.0.0.1",
+                mta.Port,
+                EmailAddress.Parse("sender@origin.example"),
+                EmailAddress.Parse("recipient@destination.example"),
+                messageId,
+                requireTls,
+                transcript),
+            CancellationToken.None);
+
+        return (result, transcript);
+    }
+
+    /// <summary>
+    /// Every stage of a successful delivery, in order. A transcript missing a command is worse
+    /// than no transcript: an operator reading one trusts that what is not in it did not happen.
+    /// </summary>
+    [Fact]
+    public async Task A_successful_delivery_records_every_stage_in_order()
+    {
+        await using FakeRemoteMta mta = new();
+        StoredMessageId messageId = await StoreMessageAsync("Subject: hi\r\n\r\nHello there.\r\n");
+
+        (OutboundDeliveryResult result, DeliveryTranscript transcript) =
+            await DeliverWithTranscriptAsync(mta, messageId);
+
+        result.Outcome.ShouldBe(DeliveryOutcome.Delivered);
+
+        transcript.Steps.Select(s => s.Stage).ShouldBe(
+        [
+            DeliveryStage.Connect,
+            DeliveryStage.Banner,
+            DeliveryStage.Ehlo,
+            DeliveryStage.StartTls,
+            DeliveryStage.Handshake,
+            DeliveryStage.EhloAfterTls,
+            DeliveryStage.MailFrom,
+            DeliveryStage.RcptTo,
+            DeliveryStage.Data,
+            DeliveryStage.Body,
+            DeliveryStage.EndOfData,
+            DeliveryStage.Quit,
+        ]);
+    }
+
+    /// <summary>
+    /// The commands are recorded as issued, so the transcript can be read against the remote's
+    /// own log line for line.
+    /// </summary>
+    [Fact]
+    public async Task The_envelope_commands_are_recorded_as_they_went_out()
+    {
+        await using FakeRemoteMta mta = new();
+        StoredMessageId messageId = await StoreMessageAsync("Subject: hi\r\n\r\nHello there.\r\n");
+
+        (_, DeliveryTranscript transcript) = await DeliverWithTranscriptAsync(mta, messageId);
+
+        transcript.Steps.Single(s => s.Stage == DeliveryStage.MailFrom).Sent
+            .ShouldBe("MAIL FROM:<sender@origin.example>");
+
+        transcript.Steps.Single(s => s.Stage == DeliveryStage.RcptTo).Sent
+            .ShouldBe("RCPT TO:<recipient@destination.example>");
+
+        transcript.FinalReply.ShouldNotBeNull().Code.ShouldBe(250);
+    }
+
+    /// <summary>
+    /// <b>The body is a count and never content.</b> A transcript is read under
+    /// <c>ViewServerState</c> and message content is guarded by <c>ReadMessageContent</c>, so a
+    /// transcript carrying body octets would be a way to read mail with the weaker of the two.
+    /// Asserted against the whole rendering rather than against the body step alone, because the
+    /// leak this guards against would be somewhere nobody thought to look.
+    /// </summary>
+    [Fact]
+    public async Task The_transcript_never_carries_the_message_body()
+    {
+        const string Secret = "Salary-Review-Q3-CONFIDENTIAL";
+
+        await using FakeRemoteMta mta = new();
+        StoredMessageId messageId = await StoreMessageAsync(
+            $"Subject: hi\r\n\r\n{Secret}\r\n");
+
+        (_, DeliveryTranscript transcript) = await DeliverWithTranscriptAsync(mta, messageId);
+
+        // The fake remote really did receive it, so this is an absence in the transcript rather
+        // than a message that was never sent.
+        mta.ReceivedBody.ShouldNotBeNull().ShouldContain(Secret);
+
+        transcript.Render().ShouldNotContain(Secret);
+        transcript.Steps
+            .SelectMany(step => new[] { step.Sent, step.Detail, step.Reply?.Text })
+            .Where(text => text is not null)
+            .ShouldNotContain(text => text!.Contains(Secret, StringComparison.Ordinal));
+
+        transcript.Steps.Single(s => s.Stage == DeliveryStage.Body).Detail
+            .ShouldNotBeNull()
+            .ShouldContain("octets sent");
+    }
+
+    /// <summary>
+    /// A conversation the remote cut short stops where it was cut. Where it stopped is the
+    /// diagnosis — this one is the recipient, not the sender and not the message.
+    /// </summary>
+    [Fact]
+    public async Task A_delivery_refused_at_rcpt_stops_there()
+    {
+        await using FakeRemoteMta mta = new()
+        {
+            Script = FakeMtaScript.RejectRecipient("550 5.1.1 No such user here"),
+        };
+
+        StoredMessageId messageId = await StoreMessageAsync("Subject: hi\r\n\r\nHello there.\r\n");
+
+        (OutboundDeliveryResult result, DeliveryTranscript transcript) =
+            await DeliverWithTranscriptAsync(mta, messageId);
+
+        result.Outcome.ShouldBe(DeliveryOutcome.Bounced);
+
+        transcript.LastStage.ShouldBe(DeliveryStage.RcptTo);
+        transcript.Steps.ShouldNotContain(s => s.Stage == DeliveryStage.Body);
+        transcript.FinalReply.ShouldBeNull();
+
+        transcript.Steps.Single(s => s.Stage == DeliveryStage.RcptTo).Reply
+            .ShouldNotBeNull().Code.ShouldBe(550);
+    }
+
+    /// <summary>
+    /// The capabilities recorded are the ones learned after the handshake. RFC 3207 §4.2 has the
+    /// client discard what it learned before it, and that earlier list is the one a network
+    /// attacker can edit.
+    /// </summary>
+    [Fact]
+    public async Task The_capabilities_reported_are_the_ones_learned_over_tls()
+    {
+        await using FakeRemoteMta mta = new();
+        StoredMessageId messageId = await StoreMessageAsync("Subject: hi\r\n\r\nHello there.\r\n");
+
+        (_, DeliveryTranscript transcript) = await DeliverWithTranscriptAsync(mta, messageId);
+
+        transcript.Steps.ShouldContain(s => s.Stage == DeliveryStage.EhloAfterTls);
+        transcript.Capabilities.ShouldNotContain("STARTTLS");
+    }
+
+    /// <summary>
+    /// The handshake is where a receiver's refusal most often actually lives, so the transcript
+    /// carries what was negotiated and whether the chain validated — an opportunistic session
+    /// proceeds encrypted either way, so "encrypted" alone does not answer the question.
+    /// </summary>
+    [Fact]
+    public async Task The_handshake_records_what_was_negotiated()
+    {
+        await using FakeRemoteMta mta = new();
+        StoredMessageId messageId = await StoreMessageAsync("Subject: hi\r\n\r\nHello there.\r\n");
+
+        (_, DeliveryTranscript transcript) = await DeliverWithTranscriptAsync(mta, messageId);
+
+        string detail = transcript.Steps
+            .Single(s => s.Stage == DeliveryStage.Handshake).Detail.ShouldNotBeNull();
+
+        detail.ShouldContain("Tls1");
+        detail.ShouldContain("chain NOT trusted", Case.Sensitive);
+    }
+
+    /// <summary>
+    /// A conversation that never opened is the most common result of a delivery test against a
+    /// host with no listener or a blocked port 25, and an empty transcript would look like the
+    /// test had not run at all.
+    /// </summary>
+    [Fact]
+    public async Task A_connection_that_never_opened_still_says_so()
+    {
+        StoredMessageId messageId = await StoreMessageAsync("Subject: hi\r\n\r\nHello there.\r\n");
+        DeliveryTranscript transcript = new();
+
+        OutboundDeliveryResult result = await CreateClient().DeliverAsync(
+            new OutboundDeliveryRequest(
+                "127.0.0.1",
+                Port: 9,
+                EmailAddress.Parse("sender@origin.example"),
+                EmailAddress.Parse("recipient@destination.example"),
+                messageId,
+                RequireTls: false,
+                transcript),
+            CancellationToken.None);
+
+        result.Outcome.ShouldBe(DeliveryOutcome.Deferred);
+
+        transcript.LastStage.ShouldBe(DeliveryStage.Connect);
+        transcript.Steps.ShouldHaveSingleItem().Detail
+            .ShouldNotBeNull().ShouldContain("Could not connect");
+    }
 }
