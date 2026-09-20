@@ -51,13 +51,33 @@ public static class ImapAppend
     /// its own keyword.
     /// </para>
     /// </remarks>
-    public static bool TryParse(string argument, [NotNullWhen(true)] out ImapAppendRequest? request)
+    public static bool TryParse(string argument, [NotNullWhen(true)] out ImapAppendRequest? request) =>
+        TryParse(argument, null, out request);
+
+    /// <summary>
+    /// Parses an <c>APPEND</c> whose earlier arguments may have arrived as literals.
+    /// </summary>
+    /// <remarks>
+    /// <b>The mailbox is the argument this matters for.</b> RFC 3501 §5.1 allows any name, and a
+    /// name outside ASCII is modified UTF-7 that a client may perfectly well send as a literal
+    /// rather than an atom. <paramref name="literals"/> holds what the connection read for those
+    /// — never the message literal itself, which stays unresolved at the end of
+    /// <paramref name="argument"/> because its octets went to the message store rather than into
+    /// memory, and which is therefore what <see cref="ImapAppendRequest.Literal"/> describes.
+    /// </remarks>
+    /// <param name="argument">Everything after the command word.</param>
+    /// <param name="literals">The literals already read for this command, in order of appearance.</param>
+    /// <param name="request">The parsed command, when it parsed.</param>
+    public static bool TryParse(
+        string argument,
+        IReadOnlyList<string>? literals,
+        [NotNullWhen(true)] out ImapAppendRequest? request)
     {
         ArgumentNullException.ThrowIfNull(argument);
 
         request = null;
 
-        ImapAstringReader reader = new(argument);
+        ImapAstringReader reader = new(argument, literals);
 
         if (!reader.TryReadText(out string? wireName))
         {

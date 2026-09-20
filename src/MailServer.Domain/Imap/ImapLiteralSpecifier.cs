@@ -62,4 +62,53 @@ public readonly record struct ImapLiteralSpecifier(long ByteCount, bool IsSynchr
         result = new ImapLiteralSpecifier(byteCount, !nonSynchronizing);
         return true;
     }
+
+    /// <summary>
+    /// Finds a literal specifier at the very end of a command line, if there is one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A literal is always the last thing on the line that announces it.</b> RFC 3501 §4.3:
+    /// the octets follow the CRLF, and the rest of the command resumes after them. So this is
+    /// how the connection tells "this line is a whole command" from "this line is a command so
+    /// far, and the client is waiting to send me the next argument" — the distinction every
+    /// command but <c>APPEND</c> ignored until literals were supported generally.
+    /// </para>
+    /// <para>
+    /// <b>The closing brace is checked before the opening one is looked for</b>, which is what
+    /// keeps a quoted argument containing braces from being read as a specifier:
+    /// <c>SELECT "{5}"</c> ends with a quote, so the scan never starts. A line genuinely ending
+    /// in <c>}</c> with no <c>{</c> before it — an atom may contain the closing brace, RFC 3501
+    /// §9's <c>atom-specials</c> excluding only the opening one — finds no candidate and is
+    /// likewise left alone.
+    /// </para>
+    /// </remarks>
+    /// <param name="line">One command line, without its terminator.</param>
+    /// <param name="result">The specifier, when the line ended with one.</param>
+    /// <param name="start">
+    /// Where the specifier's opening brace sits, so a caller can see the text that precedes it.
+    /// −1 when there is no trailing specifier.
+    /// </param>
+    public static bool TryParseTrailing(string line, out ImapLiteralSpecifier result, out int start)
+    {
+        ArgumentNullException.ThrowIfNull(line);
+
+        result = default;
+        start = -1;
+
+        if (line.Length == 0 || line[^1] != '}')
+        {
+            return false;
+        }
+
+        int open = line.LastIndexOf('{');
+
+        if (open < 0 || !TryParse(line[open..], out result))
+        {
+            return false;
+        }
+
+        start = open;
+        return true;
+    }
 }

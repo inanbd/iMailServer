@@ -10,7 +10,7 @@ diagnostics — not an SMTP sending utility.
 > criterion is not yet met.** The foundation, security, certificates, ACME, mailbox
 > administration, SMTP inbound and submission, outbound delivery, mail authentication — DKIM
 > signing/verification, SPF, DMARC alignment and enforcement, ARC groundwork — and now IMAP and
-> POP3 are built, compile with warnings as errors, and are covered by 5,704 passing tests. This
+> POP3 are built, compile with warnings as errors, and are covered by 6,603 passing tests. This
 > server can receive mail from the Internet, accept authenticated submission from a mail client,
 > relay it onward to another server's MX, evaluate and enforce SPF+DKIM+DMARC on the way in, and
 > serve the resulting mailbox over IMAP or POP3.
@@ -58,7 +58,7 @@ diagnostics — not an SMTP sending utility.
 | SPF (parser, evaluator, DNS resolver) | Built and tested against every RFC 7208 Appendix A example |
 | DMARC (Public Suffix List, alignment, `pct=` sampling, `p=reject` enforcement) | Built and tested against RFC 7489's official alignment examples; **aggregate/failure reporting not implemented** — see `docs/DMARC.md` |
 | ARC (groundwork) | Structural parsing and grouping only; **no cryptographic chain validation** |
-| IMAP | Built and tested: UID/UIDVALIDITY correctness, `SELECT`/`EXAMINE`, `LIST`/`LSUB`, `STATUS`, the whole `FETCH` surface including `ENVELOPE`, `BODY`/`BODYSTRUCTURE` and numbered MIME parts, `STORE`, `EXPUNGE`, `COPY`, `APPEND`, `SEARCH`, `IDLE`, `NAMESPACE`, `UNSELECT`, `CHILDREN`, `SPECIAL-USE`; **never exercised by a real mail client** — see `docs/IMAP.md` |
+| IMAP | Built and tested: UID/UIDVALIDITY correctness, `SELECT`/`EXAMINE`, `LIST`/`LSUB`, `STATUS`, the whole `FETCH` surface including `ENVELOPE`, `BODY`/`BODYSTRUCTURE` and numbered MIME parts, `STORE`, `EXPUNGE`, `COPY`, `APPEND`, `SEARCH`, `IDLE`, `NAMESPACE`, `UNSELECT`, `CHILDREN`, `SPECIAL-USE`, and RFC 3501 §4.3 literals for every command that takes an `astring`; **never exercised by a real mail client** — see `docs/IMAP.md` |
 | POP3 | Built and tested, **disabled by default** — for legacy devices only; see `docs/POP3.md` |
 | Filtering | **Not yet built** — milestone 12 |
 
@@ -269,7 +269,7 @@ assemblies looks finished and provides no compile-time value.
 | 7 | SMTP Submission | **Complete** |
 | 8 | Outbound MTA | **Complete** |
 | 9 | Mail Authentication (DKIM/SPF/DMARC) | **Complete** |
-| 10 | IMAP (+ optional POP3) | Protocol work **complete and tested**; exit criterion (real-client interoperability) **not yet attempted** |
+| 10 | IMAP (+ optional POP3) | Protocol work **complete and tested**, literals included; exit criterion (real-client interoperability) **not yet attempted** |
 | 11 | Deliverability | Planned |
 | 12 | Filtering | Planned |
 | 13 | Production Hardening (installer, backups, migration) | Planned |

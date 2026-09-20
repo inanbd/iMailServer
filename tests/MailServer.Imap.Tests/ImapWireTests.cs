@@ -1517,4 +1517,277 @@ public sealed class ImapWireTests : IDisposable
 
         await served;
     }
+
+    // -----------------------------------------------------------------------------------------
+    // Literals outside APPEND. RFC 3501 4.3 admits one wherever the grammar has an astring, and
+    // only a real connection can exercise the continuation handshake they turn on.
+    // -----------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// A mailbox name sent as a synchronising literal: the server must ask for the octets, take
+    /// them, and then read the rest of the command line that follows them.
+    /// </summary>
+    [Fact]
+    public async Task Select_reads_a_mailbox_name_sent_as_a_literal()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(tls, "a2 SELECT {5}");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+
+            // The octets, then the CRLF that ends the (empty) remainder of the command line.
+            await WriteLineAsync(tls, "INBOX");
+
+            (await ReadUntilTaggedAsync(tls, "a2"))[^1].ShouldStartWith("a2 OK ");
+
+            await WriteLineAsync(tls, "a3 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a3");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// Two literals in one command, each with its own continuation — RFC 3501 §6.2.3's LOGIN is
+    /// the case where getting the order wrong would hand the authenticator a swapped credential.
+    /// </summary>
+    [Fact]
+    public async Task Login_reads_a_userid_and_password_sent_as_literals()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(),
+            authenticator: authenticator);
+
+        using (client)
+        {
+            NetworkStream transport = client.GetStream();
+
+            await ReadLineAsync(transport);
+            await WriteLineAsync(transport, "x1 STARTTLS");
+            await ReadLineAsync(transport);
+
+            await using SslStream tls = new(
+                transport,
+                leaveInnerStreamOpen: false,
+                userCertificateValidationCallback: (_, _, _, _) => true);
+
+            await tls.AuthenticateAsClientAsync("mail.example.com");
+
+            await WriteLineAsync(tls, "a1 LOGIN {17}");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+
+            // The userid's octets, then the rest of the line — which announces the next literal.
+            await WriteLineAsync(tls, "alice@example.com {7}");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+
+            await WriteLineAsync(tls, "hunter2");
+
+            (await ReadUntilTaggedAsync(tls, "a1"))[^1].ShouldStartWith("a1 OK ");
+
+            authenticator.SeenIdentities.ShouldBe(["alice@example.com"]);
+            authenticator.SeenPasswords.ShouldBe(["hunter2"]);
+
+            await WriteLineAsync(tls, "a2 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a2");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// RFC 7888's <c>{n+}</c> outside APPEND: no continuation, because the octets are already
+    /// on their way.
+    /// </summary>
+    [Fact]
+    public async Task A_non_synchronising_literal_argument_gets_no_continuation()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await tls.WriteAsync(Encoding.ASCII.GetBytes("a2 SELECT {5+}\r\nINBOX\r\n"));
+            await tls.FlushAsync();
+
+            // The first line back is the tagged completion, not a continuation.
+            (await ReadUntilTaggedAsync(tls, "a2"))[^1].ShouldStartWith("a2 OK ");
+
+            await WriteLineAsync(tls, "a3 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a3");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// An APPEND whose mailbox is a literal and whose message is another: the first is read into
+    /// memory as an argument, the second still streams to the message store.
+    /// </summary>
+    [Fact]
+    public async Task Append_reads_a_literal_mailbox_and_still_streams_its_message()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(tls, "a2 APPEND {5}");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+
+            // The mailbox's octets, then the rest of the line — which announces the message.
+            await WriteLineAsync(tls, "INBOX {5}");
+            (await ReadLineAsync(tls)).ShouldStartWith("+ ");
+
+            await WriteLineAsync(tls, "hello");
+
+            (await ReadUntilTaggedAsync(tls, "a2"))[^1].ShouldStartWith("a2 OK ");
+
+            await WriteLineAsync(tls, "a3 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a3");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// A synchronising literal over the cap is refused without a continuation, so its octets
+    /// never leave the client — the whole point of the handshake, and why RFC 7888 §4 treats the
+    /// two forms differently.
+    /// </summary>
+    [Fact]
+    public async Task An_oversized_synchronising_literal_argument_is_refused_before_its_octets()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(
+                tls,
+                $"a2 SELECT {{{ImapConnectionHandler.MaxInlineLiteralOctets + 1}}}");
+
+            // A refusal, not a continuation: nothing was asked for, so nothing is sent.
+            string reply = await ReadLineAsync(tls);
+
+            reply.ShouldStartWith("a2 BAD");
+            reply.ShouldNotStartWith("+ ");
+
+            // The session survives it, which is what distinguishes this from the {n+} case.
+            await WriteLineAsync(tls, "a3 SELECT INBOX");
+            (await ReadUntilTaggedAsync(tls, "a3"))[^1].ShouldStartWith("a3 OK ");
+
+            await WriteLineAsync(tls, "a4 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a4");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// A non-synchronising literal over the cap has already been sent, so RFC 7888 §4 leaves
+    /// only the untagged BYE: there is no refusal that does not either read the octets or
+    /// desynchronise the session.
+    /// </summary>
+    [Fact]
+    public async Task An_oversized_non_synchronising_literal_ends_the_connection()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX", specialUse: FolderSpecialUse.Inbox);
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(
+                tls,
+                $"a2 SELECT {{{ImapConnectionHandler.MaxInlineLiteralOctets + 1}+}}");
+
+            (await ReadLineAsync(tls)).ShouldStartWith("* BYE");
+        }
+
+        await served;
+    }
+
+    /// <summary>
+    /// RFC 7888 §4 makes the atom a promise about the cap, so it is advertised only now that
+    /// there is a cap to promise — and only as LITERAL-, never LITERAL+, which §5 forbids
+    /// alongside it.
+    /// </summary>
+    [Fact]
+    public async Task The_capability_listing_offers_literal_minus_and_never_literal_plus()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        ScriptedImapMailboxReader mailboxes = new ScriptedImapMailboxReader()
+            .Add(authenticator.KnownMailboxId, "INBOX");
+
+        (TcpClient client, Task served) = await ConnectAsync(
+            Options(),
+            mailboxes: mailboxes,
+            authenticator: authenticator);
+
+        using (client)
+        {
+            await using SslStream tls = await AuthenticatedAsync(client.GetStream());
+
+            await WriteLineAsync(tls, "a2 CAPABILITY");
+            List<string> lines = await ReadUntilTaggedAsync(tls, "a2");
+
+            lines[0].ShouldContain("LITERAL-");
+            lines[0].ShouldNotContain("LITERAL+");
+
+            await WriteLineAsync(tls, "a3 LOGOUT");
+            await ReadUntilTaggedAsync(tls, "a3");
+        }
+
+        await served;
+    }
 }

@@ -69,4 +69,64 @@ public sealed class ImapLiteralSpecifierTests
         ImapLiteralSpecifier.TryParse(text, out ImapLiteralSpecifier result).ShouldBeFalse();
         result.ShouldBe(default);
     }
+
+    // ---- TryParseTrailing -------------------------------------------------------------------
+
+    /// <summary>
+    /// The specifier that makes a line "a command so far" rather than a whole command.
+    /// </summary>
+    [Theory]
+    [InlineData("a1 SELECT {5}", 5, true, 10)]
+    [InlineData("a1 SELECT {5+}", 5, false, 10)]
+    [InlineData("a1 LOGIN {17} {7}", 7, true, 14)]
+    [InlineData("a1 APPEND INBOX (\\Seen) {310}", 310, true, 24)]
+    public void Finds_a_trailing_specifier(string line, long bytes, bool synchronizing, int start)
+    {
+        ImapLiteralSpecifier.TryParseTrailing(line, out ImapLiteralSpecifier result, out int at)
+            .ShouldBeTrue();
+
+        result.ByteCount.ShouldBe(bytes);
+        result.IsSynchronizing.ShouldBe(synchronizing);
+        at.ShouldBe(start);
+        line[at].ShouldBe('{');
+    }
+
+    /// <summary>
+    /// A line that does not end in a specifier is a whole command, and reading one out of it
+    /// would make the connection wait for octets the client is not going to send.
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("a1 NOOP")]
+    [InlineData("a1 SELECT INBOX")]
+    [InlineData("a1 SELECT {5} ")]              // trailing space: the specifier is not last.
+    [InlineData("a1 SELECT \"{5}\"")]            // quoted, so the braces are content.
+    [InlineData("a1 SELECT weird}")]            // an atom may end in a closing brace.
+    [InlineData("a1 SELECT {}")]
+    [InlineData("a1 SELECT {-1}")]
+    [InlineData("a1 SELECT {5x}")]
+    public void Finds_no_trailing_specifier(string line)
+    {
+        ImapLiteralSpecifier.TryParseTrailing(line, out ImapLiteralSpecifier result, out int at)
+            .ShouldBeFalse();
+
+        result.ShouldBe(default);
+        at.ShouldBe(-1);
+    }
+
+    /// <summary>
+    /// The scan takes the <i>last</i> opening brace, so a quoted argument containing one does
+    /// not capture the specifier that follows it.
+    /// </summary>
+    [Fact]
+    public void Takes_the_last_opening_brace()
+    {
+        ImapLiteralSpecifier.TryParseTrailing(
+            "a1 APPEND \"my{folder\" {42}",
+            out ImapLiteralSpecifier result,
+            out int at).ShouldBeTrue();
+
+        result.ByteCount.ShouldBe(42L);
+        at.ShouldBe(22);
+    }
 }

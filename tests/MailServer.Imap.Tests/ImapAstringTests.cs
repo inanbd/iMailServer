@@ -386,6 +386,112 @@ public sealed class ImapAstringReaderTests
         token.Kind.ShouldBe(ImapAstringKind.Literal);
         reader.TryReadListMailbox(out _).ShouldBeFalse();
     }
+    // ---- Resolved literals ------------------------------------------------------------------
+
+    /// <summary>
+    /// The whole point of the literals list: a mailbox name that arrived as octets after the
+    /// line reads back as ordinary text, so every handler that calls TryReadText works
+    /// unchanged.
+    /// </summary>
+    [Fact]
+    public void Resolves_a_literal_from_the_values_the_connection_read()
+    {
+        ImapAstringReader reader = new("{5}", ["INBOX"]);
+
+        ImapAstringToken token = reader.Read();
+
+        token.Kind.ShouldBe(ImapAstringKind.ResolvedLiteral);
+        token.IsText.ShouldBeTrue();
+        token.Value.ShouldBe("INBOX");
+        token.Literal.ByteCount.ShouldBe(5L);
+        reader.AtEnd.ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// Two literals on one line are matched to their specifiers by position, left to right —
+    /// LOGIN's userid and password, which is the shape that would silently swap a credential if
+    /// the order were ever taken from anywhere else.
+    /// </summary>
+    [Fact]
+    public void Resolves_several_literals_in_order()
+    {
+        ImapAstringReader reader = new("{17} {7}", ["alice@example.com", "hunter2"]);
+
+        reader.TryReadText(out string? user).ShouldBeTrue();
+        reader.TryReadText(out string? password).ShouldBeTrue();
+
+        user.ShouldBe("alice@example.com");
+        password.ShouldBe("hunter2");
+        reader.AtEnd.ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// A specifier with no value behind it stays unresolved, which is what leaves APPEND's
+    /// message literal for ImapAppend to find.
+    /// </summary>
+    [Fact]
+    public void Leaves_a_specifier_unresolved_when_no_value_was_read()
+    {
+        ImapAstringReader reader = new("{5} {310}", ["INBOX"]);
+
+        reader.TryReadText(out string? mailbox).ShouldBeTrue();
+        mailbox.ShouldBe("INBOX");
+
+        ImapAstringToken message = reader.Read();
+
+        message.Kind.ShouldBe(ImapAstringKind.Literal);
+        message.IsText.ShouldBeFalse();
+        message.Value.ShouldBe(string.Empty);
+        message.Literal.ByteCount.ShouldBe(310L);
+    }
+
+    /// <summary>
+    /// Mixing forms is conformant — RFC 3501 §4.3 makes atom, quoted and literal alternatives of
+    /// one production — and the index must count only the literals.
+    /// </summary>
+    [Fact]
+    public void Counts_only_literals_when_the_forms_are_mixed()
+    {
+        ImapAstringReader reader = new("\"first\" {6} third {5}", ["second", "fourth"]);
+
+        reader.TryReadText(out string? a).ShouldBeTrue();
+        reader.TryReadText(out string? b).ShouldBeTrue();
+        reader.TryReadText(out string? c).ShouldBeTrue();
+        reader.TryReadText(out string? d).ShouldBeTrue();
+
+        a.ShouldBe("first");
+        b.ShouldBe("second");
+        c.ShouldBe("third");
+        d.ShouldBe("fourth");
+    }
+
+    /// <summary>
+    /// A LIST pattern may arrive as a literal too, and goes through the separate list-mailbox
+    /// production — RFC 3501 §9's <c>list-mailbox = 1*list-char / string</c>.
+    /// </summary>
+    [Fact]
+    public void Resolves_a_literal_list_pattern()
+    {
+        ImapAstringReader reader = new("\"\" {3}", ["%/%"]);
+
+        reader.TryReadText(out string? reference).ShouldBeTrue();
+        reader.TryReadListMailbox(out string? pattern).ShouldBeTrue();
+
+        reference.ShouldBe(string.Empty);
+        pattern.ShouldBe("%/%");
+    }
+
+    /// <summary>
+    /// Passing no literals leaves the reader exactly as it behaved before they were supported,
+    /// which is what every caller parsing a line in isolation relies on.
+    /// </summary>
+    [Fact]
+    public void Reports_an_unresolved_literal_when_none_were_supplied()
+    {
+        new ImapAstringReader("{5}").Read().Kind.ShouldBe(ImapAstringKind.Literal);
+        new ImapAstringReader("{5}", null).Read().Kind.ShouldBe(ImapAstringKind.Literal);
+        new ImapAstringReader("{5}", []).Read().Kind.ShouldBe(ImapAstringKind.Literal);
+    }
 }
 
 public sealed class ImapAstringFormatTests

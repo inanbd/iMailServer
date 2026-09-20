@@ -124,6 +124,28 @@ public static class ImapSearch
     public static bool TryParse(
         string criteria,
         [NotNullWhen(true)] out ImapSearchKey? key,
+        out bool unsupportedCharset) =>
+        TryParse(criteria, null, out key, out unsupportedCharset);
+
+    /// <summary>
+    /// Parses search criteria whose strings may have arrived as literals.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the command literals matter most for.</b> RFC 3501 §6.4.4 takes an
+    /// <c>astring</c> for every text key — <c>FROM</c>, <c>SUBJECT</c>, <c>BODY</c>, <c>TEXT</c>
+    /// and the rest — and §6.4.4's own <c>CHARSET</c> argument exists precisely so a client can
+    /// search for text outside ASCII, which is exactly the text a client sends as a literal
+    /// rather than an atom. A tokeniser without this would read <c>FROM {5}</c> as a search for
+    /// the five characters <c>{5}</c>, and return a confidently empty result.
+    /// </remarks>
+    /// <param name="criteria">The criteria text, with each literal left as its <c>{n}</c>.</param>
+    /// <param name="literals">The literals already read for this command, in order of appearance.</param>
+    /// <param name="key">The parsed criteria, when they parsed.</param>
+    /// <param name="unsupportedCharset">Whether the refusal was a charset this server cannot decode.</param>
+    public static bool TryParse(
+        string criteria,
+        IReadOnlyList<string>? literals,
+        [NotNullWhen(true)] out ImapSearchKey? key,
         out bool unsupportedCharset)
     {
         ArgumentNullException.ThrowIfNull(criteria);
@@ -131,7 +153,7 @@ public static class ImapSearch
         key = null;
         unsupportedCharset = false;
 
-        if (!TryTokenise(criteria, out List<Token> tokens) || tokens.Count == 0)
+        if (!TryTokenise(criteria, literals, out List<Token> tokens) || tokens.Count == 0)
         {
             return false;
         }
@@ -450,10 +472,11 @@ public static class ImapSearch
     /// Quoted strings are taken whole, so <c>SUBJECT "quarterly report"</c> is one argument
     /// rather than two keys — and a bracket inside quotes is text, not structure.
     /// </remarks>
-    private static bool TryTokenise(string text, out List<Token> tokens)
+    private static bool TryTokenise(string text, IReadOnlyList<string>? literals, out List<Token> tokens)
     {
         tokens = [];
 
+        int literalIndex = 0;
         int i = 0;
 
         while (i < text.Length)
@@ -490,6 +513,31 @@ public static class ImapSearch
                 }
 
                 tokens.Add(new Token(TokenKind.Quoted, text[(i + 1)..close]));
+                i = close + 1;
+                continue;
+            }
+
+            // A literal specifier stands where a string would, so it produces a Quoted token
+            // rather than an Atom: an atom can be a key name - FROM, SUBJECT, ALL - and a
+            // literal never is. Reading it as an atom would let a client whose search text
+            // happened to be "NOT" have it parsed as the operator.
+            if (c == '{')
+            {
+                int close = text.IndexOf('}', i);
+
+                if (close < 0 || !ImapLiteralSpecifier.TryParse(text[i..(close + 1)], out _))
+                {
+                    return false;
+                }
+
+                if (literals is null || literalIndex >= literals.Count)
+                {
+                    // The specifier is here but its octets are not, so there is nothing to
+                    // search for. Refusing beats searching for the specifier's own text.
+                    return false;
+                }
+
+                tokens.Add(new Token(TokenKind.Quoted, literals[literalIndex++]));
                 i = close + 1;
                 continue;
             }

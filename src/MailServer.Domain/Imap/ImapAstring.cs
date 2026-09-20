@@ -28,6 +28,20 @@ public enum ImapAstringKind
 
     /// <summary>The argument was not any of the above.</summary>
     Malformed = 4,
+
+    /// <summary>
+    /// A literal whose octets the connection has already read, and whose value is therefore
+    /// available here as ordinary text.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="Literal"/> rather than folded into it, because the difference is
+    /// the difference between "the client owes me octets" and "I have them". Distinct from
+    /// <see cref="Quoted"/> too, because <c>APPEND</c> needs to know that its last argument
+    /// arrived as a literal in order to stream the octets to disk rather than buffer them — a
+    /// reader that reported every resolved literal as a quoted string would take that
+    /// distinction away from the one command whose correctness depends on it.
+    /// </remarks>
+    ResolvedLiteral = 5,
 }
 
 /// <summary>One argument, as read.</summary>
@@ -44,7 +58,10 @@ public readonly record struct ImapAstringToken(
     ImapLiteralSpecifier Literal)
 {
     /// <summary>True when an argument was read and is usable as it stands.</summary>
-    public bool IsText => Kind is ImapAstringKind.Unquoted or ImapAstringKind.Quoted;
+    public bool IsText => Kind is
+        ImapAstringKind.Unquoted or
+        ImapAstringKind.Quoted or
+        ImapAstringKind.ResolvedLiteral;
 }
 
 /// <summary>
@@ -76,15 +93,40 @@ public readonly record struct ImapAstringToken(
 public sealed class ImapAstringReader
 {
     private readonly string _text;
+    private readonly IReadOnlyList<string> _literals;
     private int _position;
+    private int _literalIndex;
 
     /// <summary>Creates a reader over one command's argument text.</summary>
     /// <param name="text">Everything after the command word — <see cref="ImapCommand.Argument"/>.</param>
     public ImapAstringReader(string text)
+        : this(text, null)
+    {
+    }
+
+    /// <summary>Creates a reader over one command's argument text and its literals.</summary>
+    /// <param name="text">Everything after the command word — <see cref="ImapCommand.Argument"/>.</param>
+    /// <param name="literals">
+    /// The values of the literals the connection already read for this command, in the order
+    /// their specifiers appear in <paramref name="text"/> — <see cref="ImapCommand.Literals"/>.
+    /// Null or empty leaves every <c>{n}</c> unresolved, which is what a caller parsing a line
+    /// in isolation wants.
+    /// </param>
+    /// <remarks>
+    /// <b>The values are matched to their specifiers by position, not by offset.</b> The text
+    /// keeps every <c>{n}</c> exactly where the client put it, so the <i>n</i>th specifier this
+    /// reader walks past is the <i>n</i>th literal the connection read — the two sequences
+    /// cannot drift because they are produced by one left-to-right pass over the same line.
+    /// Substituting the octets into the text instead would mean quoting and escaping arbitrary
+    /// binary back into a string the parser then has to take apart again, which is a round trip
+    /// that can only lose.
+    /// </remarks>
+    public ImapAstringReader(string text, IReadOnlyList<string>? literals)
     {
         ArgumentNullException.ThrowIfNull(text);
 
         _text = text;
+        _literals = literals ?? [];
     }
 
     /// <summary>Whether every argument has been read.</summary>
@@ -334,6 +376,19 @@ public sealed class ImapAstringReader
         }
 
         _position = close + 1;
+
+        // Resolved when the connection already read this one's octets. The index advances only
+        // here, so a specifier the reader never reaches never consumes a value, and APPEND's
+        // trailing message literal - deliberately left out of the list, because its octets went
+        // to the message store rather than into memory - falls through as an unresolved
+        // ImapAstringKind.Literal for ImapAppend to act on.
+        if (_literalIndex < _literals.Count)
+        {
+            return new ImapAstringToken(
+                ImapAstringKind.ResolvedLiteral,
+                _literals[_literalIndex++],
+                specifier);
+        }
 
         return new ImapAstringToken(ImapAstringKind.Literal, string.Empty, specifier);
     }

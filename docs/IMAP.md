@@ -56,6 +56,47 @@ connection, which §4 notes "some naive clients are known to blindly reconnect" 
 `LITERAL-` states the cap up front instead, and a complying client sends a synchronising literal
 above it — which the server can refuse before a single octet of it arrives.
 
+### How a literal is read
+
+**Any argument may be one, and the connection loop is what makes that true.** RFC 3501 §4.3
+admits a literal wherever the grammar has an `astring`, so a mailbox name outside ASCII, a
+userid and a `SEARCH` term all legitimately arrive as octets after the line rather than on it.
+`ImapConnectionHandler.ReadLiteralsAsync` reads a line, and while that line ends in a specifier
+it answers the specifier, takes the octets, reads the next line and joins it on.
+`LOGIN {17}`/`alice@example.com {7}`/`hunter2` goes round twice.
+
+**The specifiers stay in the text, and the values travel beside it** as `ImapCommand.Literals`.
+`ImapAstringReader` hands back the *n*th value for the *n*th `{n}` it walks past, so the two
+sequences cannot drift — both come from one left-to-right pass over the same line. Substituting
+the octets into the line instead would mean re-quoting arbitrary binary into something the
+parser must immediately take apart again, and a round trip like that has only two possible
+outcomes: unchanged, or wrong.
+
+**The loop marks how much of the line it has answered**, because a specifier is a placeholder
+that stays where the client put it. `SELECT {5}` is still `SELECT {5}` after `INBOX` arrives and
+its empty remainder is read, so a loop that asked only "does this end in a specifier?" would
+request the same literal forever. Only a specifier beginning past the mark is a new one.
+
+**`APPEND`'s message is the one literal that never comes through here.** It is identified by
+`ImapAppend.TryParse` succeeding on the command so far — RFC 3501 §6.3.11 puts the message last
+and lets nothing follow it — and is left unresolved for `AppendAsync` to stream to the message
+store. A mailbox name earlier on the same line is an ordinary argument and is read normally, so
+`APPEND {5}`/`INBOX (\Seen) {310}` resolves its name and still streams its message.
+
+**Three caps bound what a command can make this server hold**: 4096 octets per literal
+(`MaxInlineLiteralOctets`), thirty-two literals per command, and 64 KiB of literal content in
+total. The per-literal cap is RFC 7888's own number, which is what makes advertising `LITERAL-`
+true rather than decorative; the other two exist because a literal is the only thing that lets a
+command span more than one line, and a bounded line repeated without limit is not a bound.
+
+**The two refusals differ in kind, and RFC 7888 §4 is why.** A synchronising literal has not been
+sent yet, so withholding the continuation and answering `BAD` costs the client one round trip and
+leaves the session healthy — the whole point of the handshake. A non-synchronising one is already
+in flight, so there is no refusal that does not either read the octets it was trying not to read
+or desynchronise the session; this server takes §4's second exit, the untagged `BYE`. Advertising
+`LITERAL-` is what makes that path nearly unreachable in practice: a client that has read the
+capability knows the cap, and sends a synchronising literal above it.
+
 ## Special-use folders
 
 `Inbox`, `Sent`, `Drafts`, `Trash`, `Junk`, `Archive` are created with the mailbox and the
