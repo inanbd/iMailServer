@@ -267,6 +267,12 @@ public static class DependencyInjection
         services.TryAddSingleton<IMtaStsPolicyFetcher, MtaStsPolicyFetcher>();
         services.TryAddScoped<TransportPolicyProbe>();
 
+        // The other direction: the fetcher above reads other domains' policies to check them,
+        // this composes the one this server publishes about itself. A singleton because the
+        // policy's id is a hash of its content, and RFC 8461 §3.1 has senders re-fetch only when
+        // that id changes - so the served bytes and the advertised id must be one fact.
+        services.TryAddSingleton<IMtaStsPolicySource, MtaStsPolicySource>();
+
         // The blocklists are whatever the operator named, and nothing by default: see
         // DeliverabilityOptions.BlockLists for why shipping a default set would be wrong.
         services.TryAddSingleton<IReputationProvider>(provider => new DnsBlockListProvider(

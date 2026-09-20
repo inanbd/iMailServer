@@ -94,6 +94,111 @@ public sealed class MtaStsPolicy
         return replaced.Length > 0 && !replaced.Contains('.', StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Composes the policy this server publishes for its own domain.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The counterpart of <see cref="TryParse"/>, and validated to the same rules rather than to
+    /// looser ones: a policy this server would refuse to read from somebody else is not one it
+    /// should ask the Internet to read from it.
+    /// </para>
+    /// <para>
+    /// <b><c>max_age</c> is capped rather than rejected at the ceiling.</b> RFC 8461 §3.2 gives
+    /// 31557600 as the "maximum value", and a configuration that asked for more meant "as long
+    /// as possible" — refusing to publish anything at all would take a working domain's policy
+    /// off the air over a number nobody would notice was too large.
+    /// </para>
+    /// </remarks>
+    /// <param name="mode">What senders should do when validation fails.</param>
+    /// <param name="mxPatterns">The hosts this domain's mail may be delivered to.</param>
+    /// <param name="maxAgeSeconds">How long senders may cache it, capped at <see cref="MaxAgeCeiling"/>.</param>
+    public static MtaStsPolicy Create(MtaStsMode mode, IEnumerable<string> mxPatterns, long maxAgeSeconds)
+    {
+        ArgumentNullException.ThrowIfNull(mxPatterns);
+        ArgumentOutOfRangeException.ThrowIfNegative(maxAgeSeconds);
+
+        List<string> patterns = [.. mxPatterns
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Select(p => p.Trim().TrimEnd('.'))];
+
+        // §5: only "none" describes a domain with no active policy, so it is the one mode that
+        // needs nowhere to deliver. Every other mode without an mx would publish a policy that
+        // forbids delivery to every host, which is an outage rather than a configuration.
+        if (patterns.Count == 0 && mode != MtaStsMode.None)
+        {
+            throw new ArgumentException(
+                "A policy in enforce or testing mode must list at least one mx pattern; " +
+                "publishing one without would forbid delivery to every host.",
+                nameof(mxPatterns));
+        }
+
+        return new MtaStsPolicy(mode, patterns, Math.Min(maxAgeSeconds, MaxAgeCeiling));
+    }
+
+    /// <summary>
+    /// Renders the policy as the resource body senders fetch.
+    /// </summary>
+    /// <remarks>
+    /// <b>CRLF, because §3.2's ABNF says so.</b> <see cref="TryParse"/> accepts bare LF from
+    /// other people's servers, for the reason its own remarks give; that leniency is about what
+    /// this server will read, and says nothing about what it should write. Emitting exactly what
+    /// the grammar specifies costs nothing and keeps this server off the list of implementations
+    /// that made the leniency necessary in the first place.
+    /// </remarks>
+    public string Format()
+    {
+        System.Text.StringBuilder builder = new();
+
+        builder.Append("version: STSv1\r\n");
+        builder.Append("mode: ").Append(NameOf(Mode)).Append("\r\n");
+
+        foreach (string pattern in _mxPatterns)
+        {
+            builder.Append("mx: ").Append(pattern).Append("\r\n");
+        }
+
+        builder.Append("max_age: ")
+            .Append(MaxAgeSeconds.ToString(CultureInfo.InvariantCulture))
+            .Append("\r\n");
+
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// The <c>id</c> for the <c>_mta-sts</c> TXT record that advertises this policy.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Derived from the policy's own content, never from a clock or a counter.</b> RFC 8461
+    /// §3.1 makes the id how a sender knows its cached copy is stale — it re-fetches when the id
+    /// changes and not otherwise. A timestamp would change the id on every restart and make
+    /// every sender on the Internet re-fetch an identical file; a counter would need storage
+    /// that has to survive a reinstall, and getting that wrong is worse, because a policy that
+    /// changed while the id did not is one senders keep enforcing the old version of until their
+    /// cache expires.
+    /// </para>
+    /// <para>
+    /// §3.1 constrains the id to 1–32 printable ASCII characters, so this is the hash in hex,
+    /// truncated. Truncation is safe here because the id is a change detector rather than a
+    /// security boundary: the policy it points at is fetched over HTTPS and validated on its own.
+    /// </para>
+    /// </remarks>
+    public string PolicyId()
+    {
+        byte[] hash = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(Format()));
+
+        return Convert.ToHexStringLower(hash)[..32];
+    }
+
+    private static string NameOf(MtaStsMode mode) => mode switch
+    {
+        MtaStsMode.Enforce => "enforce",
+        MtaStsMode.Testing => "testing",
+        _ => "none",
+    };
+
     /// <summary>Reads a policy resource, or explains why it is not one.</summary>
     public static bool TryParse(
         string? text,

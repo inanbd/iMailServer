@@ -140,6 +140,11 @@ public static class Program
         // no-op unless MailServer:Acme:EnableHttpChallengeListener is set.
         builder.Services.AddHostedService<AcmeChallengeListener>();
 
+        // The MTA-STS policy endpoint. Binds 443 and serves exactly one route; a no-op unless
+        // MailServer:Deliverability:MtaSts:Enabled is set. Separate from the ACME listener above
+        // because the two differ in transport, port and lifetime - see the class's remarks.
+        builder.Services.AddHostedService<MtaStsPolicyListener>();
+
         // The outbound queue worker (Milestone 8). After certificates, because a STARTTLS
         // handshake to a remote MX needs no certificate of its own but does need
         // CertificateChainValidator's dependencies ready; before the SMTP listener only by

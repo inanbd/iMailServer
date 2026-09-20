@@ -34,6 +34,7 @@ public sealed class DnsPlanService(
     IDomainRepository domains,
     IDkimKeyRepository dkimKeys,
     IPublicSuffixListProvider publicSuffixList,
+    IMtaStsPolicySource mtaSts,
     IOptions<MailServerOptions> options,
     ILogger<DnsPlanService> logger) : IDnsPlanService
 {
@@ -54,9 +55,22 @@ public sealed class DnsPlanService(
             await ActiveKeyAsync(domain, cancellationToken).ConfigureAwait(false),
             planOptions.DmarcReportAddress,
             planOptions.TlsReportAddress,
-            planOptions.MtaStsId,
+            planOptions.MtaStsId ?? PublishedPolicyId(),
             publicSuffixList.List));
     }
+
+    /// <summary>
+    /// The id of the policy this server is actually serving, when it is serving one.
+    /// </summary>
+    /// <remarks>
+    /// <b>The caller's own value wins, and this is the fallback.</b> An operator planning a
+    /// migration may want a plan for a policy that is not live yet; what they must not have to
+    /// do is read a hash out of a log and retype it, because RFC 8461 §3.1 makes the id the one
+    /// thing senders compare, and a TXT record advertising an id the served policy does not have
+    /// is a policy no sender ever re-fetches. Defaulting to the live policy's own id keeps the
+    /// record and the resource one fact.
+    /// </remarks>
+    private string? PublishedPolicyId() => mtaSts.Current()?.PolicyId();
 
     /// <summary>
     /// The addresses to put in SPF and to ask for reverse records on.

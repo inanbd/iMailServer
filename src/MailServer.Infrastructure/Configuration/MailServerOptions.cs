@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using MailServer.Domain.Enums;
+using MailServer.Domain.ValueObjects;
 using MailServer.Infrastructure.Deliverability;
 
 namespace MailServer.Infrastructure.Configuration;
@@ -150,6 +151,79 @@ public sealed class DeliverabilityOptions
     /// somebody else's say-so.
     /// </remarks>
     public IList<ReputationListOptions> BlockLists { get; set; } = [];
+
+    /// <summary>The MTA-STS policy this server publishes for its own domain.</summary>
+    public MtaStsOptions MtaSts { get; set; } = new();
+}
+
+/// <summary>
+/// The MTA-STS policy this server publishes, and the endpoint that serves it.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Disabled by default, and that is not timidity.</b> RFC 8461 §8.3 is blunt about what a
+/// mistake here costs: a policy in <c>enforce</c> mode whose <c>mx</c> list is wrong makes
+/// conforming senders <i>refuse to deliver</i>, and they go on refusing for
+/// <see cref="MaxAgeSeconds"/> because they cached it. Every other check in this product reports
+/// a problem; this one is the only setting that can create an outage for mail that was arriving
+/// perfectly well, and it needs three things an installer cannot verify on its own — a
+/// <c>mta-sts.</c> hostname in DNS, a trusted certificate for it, and an <c>mx</c> list that
+/// really is every host that accepts this domain's mail.
+/// </para>
+/// <para>
+/// <b>Start in <see cref="MtaStsMode.Testing"/>.</b> §8.3 recommends exactly that: senders
+/// report failures through TLS-RPT and deliver anyway, so a wrong <c>mx</c> list shows up as a
+/// report rather than as a bounce. Move to <c>enforce</c> once the reports are quiet.
+/// </para>
+/// </remarks>
+public sealed class MtaStsOptions
+{
+    /// <summary>Whether to serve a policy at all.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>
+    /// What senders should do when validation fails.
+    /// </summary>
+    /// <remarks>
+    /// Testing by default, per RFC 8461 §8.3 — see this class's own remarks for why the
+    /// difference between this and <c>enforce</c> is the difference between a report and an
+    /// outage.
+    /// </remarks>
+    public MtaStsMode Mode { get; set; } = MtaStsMode.Testing;
+
+    /// <summary>
+    /// The hosts this domain's mail may be delivered to.
+    /// </summary>
+    /// <remarks>
+    /// Every host with an MX record for this domain, including any backup exchanger. A host
+    /// missing from this list is one a conforming sender in <c>enforce</c> mode will not deliver
+    /// to. Patterns follow §4.1: <c>*</c> may stand only for the entire leftmost label.
+    /// </remarks>
+    public IList<string> MxHosts { get; set; } = [];
+
+    /// <summary>
+    /// How long senders may cache the policy, in seconds. One week by default.
+    /// </summary>
+    /// <remarks>
+    /// §3.2 caps it at 31557600 and the value is capped rather than refused. The trade is
+    /// symmetric and worth understanding: a long age is a stronger defence, because a
+    /// downgrade attacker has to outlast every sender's cache, and a longer mistake, because a
+    /// wrong policy stays wrong for senders that already fetched it. A week is the usual
+    /// starting point.
+    /// </remarks>
+    [Range(0, MtaStsPolicy.MaxAgeCeiling)]
+    public long MaxAgeSeconds { get; set; } = 604_800;
+
+    /// <summary>
+    /// The port the policy endpoint listens on. 443, and effectively fixed.
+    /// </summary>
+    /// <remarks>
+    /// RFC 8461 §3.2 has senders fetch <c>https://mta-sts.&lt;domain&gt;/.well-known/mta-sts.txt</c>
+    /// and §3.3 forbids them from following a redirect, so a policy on another port is a policy
+    /// nobody fetches. Configurable only for a reverse proxy that forwards to it.
+    /// </remarks>
+    [Range(1, 65535)]
+    public int Port { get; set; } = 443;
 }
 
 /// <summary>One DNS blocklist to query.</summary>

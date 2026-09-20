@@ -64,13 +64,18 @@ public sealed class DnsPlanServiceTests
         MailServerOptions? settings = null,
         bool hosted = true,
         IReadOnlyList<DkimKey>? keys = null,
-        string suffixes = "com\nnet\n") =>
-        new(
+        string suffixes = "com\nnet\n")
+    {
+        MailServerOptions resolved = settings ?? Settings();
+
+        return new DnsPlanService(
             new FakeDomains(hosted ? Record : null),
             new FakeDkimKeys(keys),
             new FakePsl(suffixes),
-            Options.Create(settings ?? Settings()),
+            new MtaStsPolicySource(Options.Create(resolved), NullLogger<MtaStsPolicySource>.Instance),
+            Options.Create(resolved),
             NullLogger<DnsPlanService>.Instance);
+    }
 
     private static async Task<DnsZonePlan> PlanAsync(
         DnsPlanService service,
@@ -241,5 +246,74 @@ public sealed class DnsPlanServiceTests
 
         await Should.ThrowAsync<ArgumentNullException>(
             () => service.CreateAsync(Domain, null!, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// RFC 8461 §3.1 makes the id the one thing senders compare, so a TXT record advertising an
+    /// id the served policy does not have is a policy nobody ever re-fetches. When this server
+    /// is publishing, the plan defaults to the live policy's own id rather than making an
+    /// operator read a hash out of a log and retype it.
+    /// </summary>
+    [Fact]
+    public async Task The_plan_advertises_the_policy_this_server_actually_serves()
+    {
+        MailServerOptions settings = Settings();
+
+        settings.Deliverability.MtaSts.Enabled = true;
+        settings.Deliverability.MtaSts.MxHosts = ["mail.example.com"];
+
+        string expected = MtaStsPolicy
+            .Create(MtaStsMode.Testing, ["mail.example.com"], 604_800)
+            .PolicyId();
+
+        DnsZonePlan plan = await Service(settings).CreateAsync(
+            DomainName.Parse("example.com"),
+            new DnsPlanOptions(),
+            CancellationToken.None);
+
+        plan.Records
+            .Where(r => r.Name.Contains("_mta-sts", StringComparison.Ordinal))
+            .ShouldHaveSingleItem()
+            .Values
+            .ShouldContain(v => v.Contains($"id={expected}", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The caller's own value still wins: an operator planning a migration may want a plan for a
+    /// policy that is not live yet.
+    /// </summary>
+    [Fact]
+    public async Task An_explicit_policy_id_overrides_the_served_one()
+    {
+        MailServerOptions settings = Settings();
+
+        settings.Deliverability.MtaSts.Enabled = true;
+        settings.Deliverability.MtaSts.MxHosts = ["mail.example.com"];
+
+        DnsZonePlan plan = await Service(settings).CreateAsync(
+            DomainName.Parse("example.com"),
+            new DnsPlanOptions(MtaStsId: "planned20260920"),
+            CancellationToken.None);
+
+        plan.Records
+            .Where(r => r.Name.Contains("_mta-sts", StringComparison.Ordinal))
+            .ShouldHaveSingleItem()
+            .Values
+            .ShouldContain(v => v.Contains("id=planned20260920", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Publishing is opt-in, so an installation that serves no policy gets no record proposed —
+    /// a TXT record pointing at a resource that 404s is worse than none.
+    /// </summary>
+    [Fact]
+    public async Task No_record_is_proposed_when_nothing_is_published()
+    {
+        DnsZonePlan plan = await Service().CreateAsync(
+            DomainName.Parse("example.com"),
+            new DnsPlanOptions(),
+            CancellationToken.None);
+
+        plan.Records.ShouldNotContain(r => r.Name.Contains("_mta-sts", StringComparison.Ordinal));
     }
 }

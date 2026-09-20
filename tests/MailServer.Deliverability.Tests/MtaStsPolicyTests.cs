@@ -219,4 +219,125 @@ public sealed class MtaStsPolicyTests
         Parse("version: STSv1\nmode: enforce\nmx: a.example.com\nmax_age: 604800")
             .Covers(host).ShouldBeFalse();
     }
+
+    // ---- Publishing our own policy ------------------------------------------------------------
+
+    /// <summary>
+    /// The writer's output must be readable by the reader: a policy this server would refuse to
+    /// read from somebody else is not one it should ask the Internet to read from it.
+    /// </summary>
+    [Fact]
+    public void A_composed_policy_round_trips_through_the_parser()
+    {
+        MtaStsPolicy written = MtaStsPolicy.Create(
+            MtaStsMode.Enforce,
+            ["mail.example.com", "*.backup.example.net"],
+            604_800);
+
+        MtaStsPolicy read = Parse(written.Format());
+
+        read.Mode.ShouldBe(MtaStsMode.Enforce);
+        read.MxPatterns.ShouldBe(["mail.example.com", "*.backup.example.net"]);
+        read.MaxAgeSeconds.ShouldBe(604_800L);
+    }
+
+    /// <summary>§3.2's ABNF is CRLF-separated, and what this server writes follows it exactly.</summary>
+    [Fact]
+    public void A_composed_policy_is_written_with_crlf()
+    {
+        string text = MtaStsPolicy
+            .Create(MtaStsMode.Testing, ["mail.example.com"], 86_400)
+            .Format();
+
+        text.ShouldBe(
+            "version: STSv1\r\n" +
+            "mode: testing\r\n" +
+            "mx: mail.example.com\r\n" +
+            "max_age: 86400\r\n");
+    }
+
+    [Theory]
+    [InlineData(MtaStsMode.Enforce, "enforce")]
+    [InlineData(MtaStsMode.Testing, "testing")]
+    [InlineData(MtaStsMode.None, "none")]
+    public void Every_mode_is_written_with_the_name_the_rfc_uses(MtaStsMode mode, string expected)
+    {
+        MtaStsPolicy.Create(mode, ["mail.example.com"], 86_400)
+            .Format()
+            .ShouldContain($"mode: {expected}\r\n");
+    }
+
+    /// <summary>
+    /// §5 makes "none" the one mode that describes a domain with no active policy, so it is the
+    /// one that needs nowhere to deliver — and it is the file a domain publishes to withdraw a
+    /// policy senders have cached.
+    /// </summary>
+    [Fact]
+    public void Only_mode_none_may_be_published_without_an_mx()
+    {
+        MtaStsPolicy.Create(MtaStsMode.None, [], 86_400)
+            .Format()
+            .ShouldNotContain("mx:");
+
+        Should.Throw<ArgumentException>(() => MtaStsPolicy.Create(MtaStsMode.Enforce, [], 86_400));
+        Should.Throw<ArgumentException>(() => MtaStsPolicy.Create(MtaStsMode.Testing, [], 86_400));
+    }
+
+    /// <summary>
+    /// §3.2 gives 31557600 as the "maximum value". Capping beats refusing: a configuration
+    /// asking for more meant "as long as possible", and refusing would take a working domain's
+    /// policy off the air over a number nobody would notice was too large.
+    /// </summary>
+    [Fact]
+    public void An_over_long_max_age_is_capped_rather_than_refused()
+    {
+        MtaStsPolicy.Create(MtaStsMode.Enforce, ["mail.example.com"], long.MaxValue)
+            .MaxAgeSeconds
+            .ShouldBe(MtaStsPolicy.MaxAgeCeiling);
+    }
+
+    /// <summary>Blank entries and trailing dots are cleaned up rather than published verbatim.</summary>
+    [Fact]
+    public void Mx_patterns_are_normalised()
+    {
+        MtaStsPolicy.Create(
+                MtaStsMode.Enforce,
+                ["  mail.example.com.  ", "", "   ", "backup.example.com"],
+                86_400)
+            .MxPatterns
+            .ShouldBe(["mail.example.com", "backup.example.com"]);
+    }
+
+    /// <summary>
+    /// §3.1 makes the id how a sender knows its cached copy is stale, so it must change with the
+    /// content and only with the content — a policy that changed while its id did not is one
+    /// senders keep enforcing the old version of until their cache expires.
+    /// </summary>
+    [Fact]
+    public void The_policy_id_follows_the_content()
+    {
+        MtaStsPolicy original = MtaStsPolicy.Create(MtaStsMode.Testing, ["mail.example.com"], 86_400);
+        MtaStsPolicy identical = MtaStsPolicy.Create(MtaStsMode.Testing, ["mail.example.com"], 86_400);
+
+        original.PolicyId().ShouldBe(identical.PolicyId());
+
+        MtaStsPolicy.Create(MtaStsMode.Enforce, ["mail.example.com"], 86_400)
+            .PolicyId().ShouldNotBe(original.PolicyId());
+
+        MtaStsPolicy.Create(MtaStsMode.Testing, ["other.example.com"], 86_400)
+            .PolicyId().ShouldNotBe(original.PolicyId());
+
+        MtaStsPolicy.Create(MtaStsMode.Testing, ["mail.example.com"], 86_401)
+            .PolicyId().ShouldNotBe(original.PolicyId());
+    }
+
+    /// <summary>§3.1 constrains the id to 1–32 printable ASCII characters.</summary>
+    [Fact]
+    public void The_policy_id_fits_what_the_txt_record_allows()
+    {
+        string id = MtaStsPolicy.Create(MtaStsMode.Enforce, ["mail.example.com"], 86_400).PolicyId();
+
+        id.Length.ShouldBe(32);
+        id.ShouldAllBe(c => char.IsAsciiLetterOrDigit(c));
+    }
 }
