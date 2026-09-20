@@ -314,11 +314,49 @@ our opinion of it.
 
 ## Header analyser
 
-Paste raw headers; get SPF, DKIM, DMARC and ARC results with the reasoning, plus the
-`Received` chain, `Return-Path`, `Reply-To` and `List-Unsubscribe`.
+Paste raw headers. The analyser **re-evaluates SPF, DKIM and DMARC itself** — its own DNS
+lookups, its own reasoning, never the message's own claims about them — and shows the `Received`
+chain with per-hop delays, `Return-Path`, `Reply-To` and `List-Unsubscribe`.
 
 Useful in both directions: diagnosing why your mail was refused, and diagnosing why something
 arrived that should not have.
+
+**It never reads an `Authentication-Results` header, and this is the point rather than a
+limitation.** An analyser that echoed back `dmarc=pass` from a header the sender wrote would be
+reporting the forgery as a finding. `docs/DMARC.md`: "Trusting an attacker-supplied
+`Authentication-Results: dmarc=pass` header is a complete authentication bypass, and it is
+trivially easy to do by accident." RFC 8601 §7.1 says the same to consumers: results "should be
+ignored, at least for the purposes of enacting filtering decisions, unless specifically enabled
+by the user or administrator after verifying that the border MTA is compliant".
+
+For the same reason **DKIM is reported as what was signed and by whom, not as pass or fail**. A
+pasted header block has no body, and a body hash cannot be checked without one. What the analyser
+can establish — and does — is whether the selector's key is published, whether it is usable, and
+whether the signing domain lines up with `From`.
+
+**ARC is deliberately absent.** `NoUntrustedAuthenticationHeaderTrustTests` allows exactly one
+production file to touch the ARC types, and its own comment explains why the check scans for the
+type names and not just the header text: "A hypothetical bridge file that reads
+`ArcSet.AuthenticationResults.ResultsText` and string-searches it for a result token would
+reference none of the four header-name literals". A display surface in the analyser is that
+bridge file. Showing an ARC chain is worth less than the boundary that stops one from being
+built by accident, so the analyser does not show one; `ArcChain` remains groundwork with no
+consumer.
+
+### What it reports
+
+| From | Judged by |
+|---|---|
+| `Received` chain | `ReceivedTrace` — clauses per RFC 5321 §4.4, per-hop delays, and an ambiguity flag |
+| `From`, `Return-Path`, `Reply-To` | Read as addresses; a `Return-Path` that differs from `From` is where SPF and DMARC part company |
+| `List-Unsubscribe` | Present, and whether it offers the one-click POST RFC 8058 defines |
+| `DKIM-Signature` | `DkimSignatureTags` — selector, `d=`, algorithm, signed headers, `t=`/`x=` |
+
+The `Received` chain's per-hop delays exist because RFC 5321 §4.4 asks for them: "As the Internet
+grows, comparability of Received header fields is important for detecting problems, especially
+slow relays." Every delay is a difference between two independent clocks, so a negative one is
+reported rather than clamped — it is the only evidence in the header block that one of those two
+hosts has its clock wrong.
 
 ## The Operations category
 
