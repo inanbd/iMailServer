@@ -160,7 +160,15 @@ UI before treating it as a report about the server.
          **That verdict is the real result of this milestone** — SPF, DKIM and DMARC should all
          pass. It is the receiver's own judgement and it is worth more than every local check.
 
-6. **MTA-STS, only if you publish a policy.** It is off by default for good reason: RFC 8461
+6. **TLS report collection, if you publish a `_smtp._tls` record.** Point
+   `MailServer:Deliverability:TlsRpt:ReportMailbox` at the address in that record and enable
+   collection. Reports are daily and aggregate, so this is the one step with a wait in it.
+   - [ ] A day or two after publishing, a report from Google or Microsoft appears in that mailbox
+   - [ ] It is collected, and appears in the reports listing rather than sitting unread
+   - [ ] The mailbox is **unchanged** — nothing marked, moved or deleted by the collector
+   - [ ] A non-report in the same mailbox (a bounce, a note) is not re-opened on the next pass
+
+7. **MTA-STS, only if you publish a policy.** It is off by default for good reason: RFC 8461
    §8.3's `enforce` mode with a wrong `mx` list makes senders **refuse to deliver**, and they
    keep refusing for `max_age` because they cached it.
    - [ ] Start in `testing` mode
@@ -176,8 +184,10 @@ UI before treating it as a report about the server.
 Two things stay open regardless of how the above goes, and should not be read as passing because
 the checklist did:
 
-- **TLS-RPT collection.** Reports are parsed and analysed, but nothing harvests them from the
-  `rua` mailbox — an operator submits the report by hand. See `docs/Deliverability.md`.
+- **Whether senders actually deliver TLS reports here.** Collection is built and tested, but no
+  real sender has ever delivered a report to this server. Publishing the `_smtp._tls` record and
+  waiting a day or two for Google to send one is the only way to find out, and it is worth doing
+  while you have the environment up. See `docs/Deliverability.md`.
 - **The folder-name case divergence.** `docs/IMAP.md` records that folder names match exactly on
   SQLite and case-insensitively on a default-collation SQL Server. If you run SQL Server, step
   2 above may behave differently from the same test on SQLite, and that is the known reason.

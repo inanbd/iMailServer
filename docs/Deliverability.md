@@ -433,8 +433,9 @@ our opinion of it.
 
 ## TLS reports
 
-> **Partly built.** A submitted report is parsed and analysed; **nothing collects reports
-> automatically yet.**
+> **Built.** Reports are collected from the `rua` mailbox, parsed and analysed. Collection is
+> **off by default** — it needs the `_smtp._tls` record published and a mailbox here for the
+> address to deliver into.
 
 RFC 8460 has senders deliver a JSON report to the address in your `_smtp._tls` record, describing
 the TLS sessions they had with you over a period — how many succeeded, how many failed, and why.
@@ -456,11 +457,29 @@ entry as a defect in their mail configuration would go looking for a problem tha
 in RFC 8460 proves the organisation named actually sent it. Read them, act when several
 independent senders agree, and never treat one as grounds on its own to change a policy.
 
-**What is not built is the collection.** §3 has reports arrive as gzipped JSON attached to a
-message. Recognising such a message in a mailbox, unpacking it and filing it is a mail-processing
-pipeline, and that belongs with Milestone 12's filtering. Until then, open the report your `rua`
-mailbox received and submit it — which gets you the analysis without the product pretending to an
-automatic collection it does not have.
+**How collection works.** Point `MailServer:Deliverability:TlsRpt:ReportMailbox` at the address
+in your `_smtp._tls` record and enable it. Every six hours the collector makes a bounded pass over
+that mailbox, opens what it has not seen before, and files what it finds.
+
+**It reads that mailbox and never changes it.** Nothing is marked seen, moved or deleted — a human
+may be reading the same folder, and a collector that marked its own reading would fight them for
+the unread count. What has been examined is recorded separately, so pointing it at a mailbox
+somebody uses is safe.
+
+**Failures are recorded too, and that is deliberate.** A bounce, a covering note or somebody's
+reply will sit in that mailbox forever. A collector that only remembered its successes would open
+and reject each of them on every pass for the life of the installation.
+
+**A report is filed under the domain whose `rua` address received it**, never the policy-domain
+the sender wrote in the report. Taking the sender's word would let anyone who can reach the
+address file a report against any domain this server hosts.
+
+Three sizes in a report message are a stranger's choice — the MIME part, the transfer encoding and
+the compression — so each is bounded separately. A small attachment that decompresses to gigabytes
+is the classic version of this attack, and a bound on the attachment alone would not catch it.
+
+A report can still be submitted by hand, which is the route to use before the record is published
+or when somebody forwards you one.
 
 ## Header analyser
 

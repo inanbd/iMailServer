@@ -11,7 +11,7 @@ diagnostics — not an SMTP sending utility.
 > administration, SMTP inbound and submission, outbound delivery, mail authentication — DKIM
 > signing/verification, SPF, DMARC alignment and enforcement, ARC groundwork — IMAP and POP3, and
 > now the deliverability report with its DNS wizard, header analyser and delivery test are built,
-> compile with warnings as errors, and are covered by 6,753 passing tests. This server can
+> compile with warnings as errors, and are covered by 6,820 passing tests. This server can
 > receive mail from the Internet, accept authenticated submission from a mail client, relay it
 > onward to another server's MX, evaluate and enforce SPF+DKIM+DMARC on the way in, serve the
 > resulting mailbox over IMAP or POP3, and report on its own readiness with the evidence for
@@ -66,7 +66,7 @@ diagnostics — not an SMTP sending utility.
 | POP3 | Built and tested, **disabled by default** — for legacy devices only; see `docs/POP3.md` |
 | Deliverability (readiness report, DNS wizard, header analyser, delivery test) | Built and tested: six scored check categories with evidence for every check, rendered in the admin UI; **never exercised against a live Internet exchange** — see `docs/Deliverability.md` |
 | MTA-STS | Checked for other domains, and **this server publishes its own policy** over HTTPS — **off by default**, and `testing` mode when enabled; see `docs/Standards.md` |
-| TLS-RPT | The `_smtp._tls` record is checked and proposed, and a submitted report is parsed and analysed; **automatic collection from the `rua` mailbox is not built** |
+| TLS-RPT | Built and tested: the `_smtp._tls` record is checked and proposed, and reports are collected from the `rua` mailbox, parsed and analysed — **off by default**; see `docs/Deliverability.md` |
 | Filtering | **Not yet built** — milestone 12 |
 
 ---

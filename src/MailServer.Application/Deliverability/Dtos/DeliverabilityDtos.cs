@@ -393,3 +393,43 @@ public sealed record TlsReportDto
     /// <summary>The one-sentence verdict.</summary>
     public required string Summary { get; init; }
 }
+
+/// <summary>One collected TLS report, as the listing shows it.</summary>
+/// <remarks>
+/// The same shape as <see cref="TlsReportDto"/> minus the fields only a freshly-parsed report
+/// has, plus when this server collected it. Kept as a separate type rather than reused because
+/// the two answer different questions — "what does this report say" and "what have we been
+/// sent" — and a shared type would grow nullable fields for whichever question was not asked.
+/// </remarks>
+public sealed record CollectedTlsReportDto
+{
+    public required Guid Id { get; init; }
+
+    /// <summary>
+    /// The domain this report is about — the domain of the mailbox that received it, never the
+    /// policy-domain the sender wrote.
+    /// </summary>
+    public required string PolicyDomain { get; init; }
+
+    /// <summary>Who said they sent it. A claim.</summary>
+    public string? OrganizationName { get; init; }
+
+    public string? ContactInfo { get; init; }
+
+    public string? ReportId { get; init; }
+
+    public DateTimeOffset? StartUtc { get; init; }
+
+    public DateTimeOffset? EndUtc { get; init; }
+
+    public required long SuccessfulSessionCount { get; init; }
+
+    public required long FailedSessionCount { get; init; }
+
+    /// <summary>When this server collected it, not when the sender sent it.</summary>
+    public required DateTimeOffset CollectedUtc { get; init; }
+
+    public required string Summary { get; init; }
+
+    public required IReadOnlyList<TlsFailureSummaryDto> Failures { get; init; }
+}

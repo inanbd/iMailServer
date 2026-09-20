@@ -154,6 +154,9 @@ public sealed class DeliverabilityOptions
 
     /// <summary>The MTA-STS policy this server publishes for its own domain.</summary>
     public MtaStsOptions MtaSts { get; set; } = new();
+
+    /// <summary>Collecting the TLS reports other senders deliver.</summary>
+    public TlsRptOptions TlsRpt { get; set; } = new();
 }
 
 /// <summary>
@@ -996,4 +999,49 @@ public sealed class AcmeOptions
     /// <summary>Key size for issued certificates.</summary>
     [Range(2048, 4096)]
     public int CertificateKeySizeBits { get; set; } = 3072;
+}
+
+/// <summary>
+/// Collecting the RFC 8460 TLS reports other senders deliver.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Off by default, because it needs a mailbox that exists.</b> §3 has senders deliver reports
+/// to the address in the <c>_smtp._tls</c> record, so collection only makes sense once that
+/// address is published and has a mailbox here to deliver into. Turning it on before then would
+/// log a warning every pass about a mailbox nobody created.
+/// </para>
+/// <para>
+/// <b>Reading only.</b> The collector never marks, moves or deletes anything in that mailbox —
+/// a human may be reading the same folder — so pointing it at a mailbox somebody uses is safe.
+/// </para>
+/// </remarks>
+public sealed class TlsRptOptions
+{
+    /// <summary>Whether to collect reports at all.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>
+    /// The address reports are delivered to — the one in the <c>_smtp._tls</c> record's
+    /// <c>rua=mailto:</c>.
+    /// </summary>
+    /// <remarks>
+    /// A mailbox on this server. The report is filed under <i>this</i> address's domain rather
+    /// than under the policy-domain the sender wrote, because a report is about the domain whose
+    /// reporting address received it — taking the sender's word would let anyone who can reach
+    /// the address file a report against any domain this server hosts.
+    /// </remarks>
+    public string ReportMailbox { get; set; } = string.Empty;
+
+    /// <summary>
+    /// How often to look, in minutes. Six hours by default.
+    /// </summary>
+    /// <remarks>
+    /// Reports are aggregate and daily — §3 has senders send at most one per day per domain — so
+    /// polling often buys nothing and costs a mailbox scan. Six hours means a report is picked
+    /// up the same day it arrives without the collector running on anybody's idea of a busy
+    /// loop.
+    /// </remarks>
+    [Range(5, 1440)]
+    public int PollMinutes { get; set; } = 360;
 }

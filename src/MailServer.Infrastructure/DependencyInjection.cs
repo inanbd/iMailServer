@@ -278,6 +278,11 @@ public static class DependencyInjection
 
         // Stateless: it turns one string into one model and reaches nothing.
         services.TryAddSingleton<ITlsReportReader, TlsReportReader>();
+        services.TryAddSingleton<ITlsReportExtractor, TlsReportExtractor>();
+
+        // Scoped: the collector reads the mailbox and the report tables through repositories.
+        services.TryAddScoped<ITlsReportRepository, TlsReportRepository>();
+        services.TryAddScoped<ITlsReportCollector, TlsReportCollector>();
 
         // The blocklists are whatever the operator named, and nothing by default: see
         // DeliverabilityOptions.BlockLists for why shipping a default set would be wrong.

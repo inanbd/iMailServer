@@ -145,6 +145,10 @@ public static class Program
         // because the two differ in transport, port and lifetime - see the class's remarks.
         builder.Services.AddHostedService<MtaStsPolicyListener>();
 
+        // The TLS report collector. A no-op unless
+        // MailServer:Deliverability:TlsRpt:Enabled is set and the rua address has a mailbox.
+        builder.Services.AddHostedService<TlsReportCollectionService>();
+
         // The outbound queue worker (Milestone 8). After certificates, because a STARTTLS
         // handshake to a remote MX needs no certificate of its own but does need
         // CertificateChainValidator's dependencies ready; before the SMTP listener only by
