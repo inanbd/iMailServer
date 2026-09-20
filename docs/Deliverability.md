@@ -1,7 +1,14 @@
 # Deliverability
 
-> **Status: in progress — Milestone 11.** The check model and the score are built and
-> tested; the checks that feed them are landing one group at a time.
+> **Status: built and tested — Milestone 11.** All six check categories are implemented and
+> wired into `DeliverabilityReportService`, the score is computed over them, and the readiness
+> report renders in the admin console with the evidence for every check — which is this
+> milestone's exit criterion.
+>
+> **Two things to know.** The report has **never been run against a live Internet exchange**:
+> every check here is exercised against this product's own tests and the RFC text, the same
+> caveat `docs/Standards.md` records for the mail-authentication work. And **TLS-RPT reports are
+> read but not collected** — see the section below.
 
 ## What this product promises, and what it does not
 
@@ -405,6 +412,12 @@ An operator who follows this plan and then runs the report is not told they were
 
 ## Delivery test
 
+> Built. `DeliveryTestService` sends down the production path — the same resolver, the same MX
+> selection, the same outbound client with the same DKIM signing as ordinary mail — and adds a
+> stopwatch and a transcript. It sends straight rather than through the queue, because an
+> operator running a diagnostic wants to know what happened now rather than have a failure
+> retried quietly for six hours.
+
 Sends a real message to an address you nominate and records the whole conversation:
 
 ```text
@@ -417,6 +430,37 @@ queue latency · delivery latency · DKIM selector used · Message-ID
 Sending to a Gmail account and reading the `Authentication-Results` header it adds is the
 fastest honest answer to "is my setup correct?" — it is the receiver's own verdict rather than
 our opinion of it.
+
+## TLS reports
+
+> **Partly built.** A submitted report is parsed and analysed; **nothing collects reports
+> automatically yet.**
+
+RFC 8460 has senders deliver a JSON report to the address in your `_smtp._tls` record, describing
+the TLS sessions they had with you over a period — how many succeeded, how many failed, and why.
+
+**It is the only feedback channel in this product that reports a real handshake from a real
+sender.** A certificate that validates perfectly on this host and fails at Google is invisible to
+every other check here, and is exactly what a report tells you.
+
+`TlsReportReader` parses §4's JSON and `TlsReport` does the analysis: failures are grouped by
+result type, ordered by the sessions each one cost, and given a remedy. The grouping matters
+because a sender reports per MX host and per sending address, so one expired certificate arrives
+as a dozen entries that are all the same problem.
+
+**Several result types are not your fault, and the remedies say so.** `dane-required` is the
+sender's own policy and `dnssec-invalid` is about your zone's signing — an operator reading every
+entry as a defect in their mail configuration would go looking for a problem that is not there.
+
+**Reports are unauthenticated.** Anyone who can reach the `rua` address can send one, and nothing
+in RFC 8460 proves the organisation named actually sent it. Read them, act when several
+independent senders agree, and never treat one as grounds on its own to change a policy.
+
+**What is not built is the collection.** §3 has reports arrive as gzipped JSON attached to a
+message. Recognising such a message in a mailbox, unpacking it and filing it is a mail-processing
+pipeline, and that belongs with Milestone 12's filtering. Until then, open the report your `rua`
+mailbox received and submit it — which gets you the analysis without the product pretending to an
+automatic collection it does not have.
 
 ## Header analyser
 

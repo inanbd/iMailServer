@@ -329,3 +329,67 @@ public sealed record DeliveryTestDto
     /// <summary>The conversation, command and reply.</summary>
     public required IReadOnlyList<string> Transcript { get; init; }
 }
+
+/// <summary>One result type's total impact across a TLS report.</summary>
+public sealed record TlsFailureSummaryDto
+{
+    /// <summary>The RFC 8460 §4.3 wire name, so an operator can look it up.</summary>
+    public required string ResultType { get; init; }
+
+    public required long FailedSessionCount { get; init; }
+
+    /// <summary>The hosts of ours it happened on.</summary>
+    public required IReadOnlyList<string> ReceivingMxHostnames { get; init; }
+
+    /// <summary>
+    /// What it means here and what to do about it.
+    /// </summary>
+    /// <remarks>
+    /// Several result types are not this server's fault — <c>dane-required</c> is the sender's
+    /// policy, <c>dnssec-invalid</c> is the zone's signing — and the remedy says so, because an
+    /// operator reading every entry as a defect in their own configuration would go looking for
+    /// a problem that is not there.
+    /// </remarks>
+    public required string Remedy { get; init; }
+}
+
+/// <summary>What one submitted TLS report said.</summary>
+/// <remarks>
+/// <b>Everything here is a claim from outside.</b> A report is unauthenticated: anyone who can
+/// reach the <c>rua</c> address can send one, and nothing in RFC 8460 proves the organisation
+/// named actually sent it. It is worth reading, and worth acting on when several independent
+/// senders agree; it is never on its own grounds to change a policy.
+/// </remarks>
+public sealed record TlsReportDto
+{
+    /// <summary>Who says they sent it.</summary>
+    public string? OrganizationName { get; init; }
+
+    public string? ContactInfo { get; init; }
+
+    /// <summary>Their identifier for it, for de-duplication.</summary>
+    public string? ReportId { get; init; }
+
+    public DateTimeOffset? StartDate { get; init; }
+
+    public DateTimeOffset? EndDate { get; init; }
+
+    public required long SuccessfulSessionCount { get; init; }
+
+    public required long FailedSessionCount { get; init; }
+
+    /// <summary>
+    /// The share of sessions that negotiated TLS, or null when the report covers none.
+    /// </summary>
+    /// <remarks>
+    /// Null rather than 1.0 for an empty report: "every session succeeded" and "there were no
+    /// sessions" are different, and a quiet period should not read as a clean bill of health.
+    /// </remarks>
+    public double? SuccessRate { get; init; }
+
+    /// <summary>The failures, worst first, with each result type's sessions added up.</summary>
+    public required IReadOnlyList<TlsFailureSummaryDto> Failures { get; init; }
+
+    /// <summary>The one-sentence verdict.</summary>
+    public required string Summary { get; init; }
+}

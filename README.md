@@ -6,21 +6,25 @@ This is a complete mail platform — SMTP receipt, authenticated submission, dir
 delivery, IMAP access, DKIM/SPF/DMARC, automatic TLS certificates and deliverability
 diagnostics — not an SMTP sending utility.
 
-> **Status: Milestones 1–9 complete; Milestone 10's protocol work is built and its exit
-> criterion is not yet met.** The foundation, security, certificates, ACME, mailbox
+> **Status: Milestones 1–9 complete; 10 and 11 are built, and both are waiting on a real-world
+> exercise rather than on code.** The foundation, security, certificates, ACME, mailbox
 > administration, SMTP inbound and submission, outbound delivery, mail authentication — DKIM
-> signing/verification, SPF, DMARC alignment and enforcement, ARC groundwork — and now IMAP and
-> POP3 are built, compile with warnings as errors, and are covered by 6,603 passing tests. This
-> server can receive mail from the Internet, accept authenticated submission from a mail client,
-> relay it onward to another server's MX, evaluate and enforce SPF+DKIM+DMARC on the way in, and
-> serve the resulting mailbox over IMAP or POP3.
+> signing/verification, SPF, DMARC alignment and enforcement, ARC groundwork — IMAP and POP3, and
+> now the deliverability report with its DNS wizard, header analyser and delivery test are built,
+> compile with warnings as errors, and are covered by 6,753 passing tests. This server can
+> receive mail from the Internet, accept authenticated submission from a mail client, relay it
+> onward to another server's MX, evaluate and enforce SPF+DKIM+DMARC on the way in, serve the
+> resulting mailbox over IMAP or POP3, and report on its own readiness with the evidence for
+> every check.
 >
-> **Three gaps are worth knowing before relying on this.** Milestone 10's exit criterion is
+> **Four gaps are worth knowing before relying on this.** Milestone 10's exit criterion is
 > "Thunderbird/Outlook/Apple Mail interoperate without mail loss", and that has not been
 > attempted — every IMAP and POP3 claim here rests on this product's own tests and on the RFC
-> text, not on a real client. There is no operator-facing way yet to generate and activate a DKIM
-> key for a domain. And none of the mail authentication work has been proven against a live
-> Gmail/Microsoft 365 exchange, only RFC test vectors and this product's own round-trip.
+> text, not on a real client. Milestone 11's report renders with evidence for every check, but
+> has **never been run against a live Internet exchange**, and its UI has not been exercised on
+> Windows. There is no operator-facing way yet to generate and activate a DKIM key for a domain.
+> And none of the mail authentication work has been proven against a live Gmail/Microsoft 365
+> exchange, only RFC test vectors and this product's own round-trip.
 >
 > See [Roadmap](#roadmap) for what lands when, and `docs/Standards.md` for exactly which
 > standards are implemented versus planned. Nothing is described as working until it has tests.
@@ -60,6 +64,9 @@ diagnostics — not an SMTP sending utility.
 | ARC (groundwork) | Structural parsing and grouping only; **no cryptographic chain validation** |
 | IMAP | Built and tested: UID/UIDVALIDITY correctness, `SELECT`/`EXAMINE`, `LIST`/`LSUB`, `STATUS`, the whole `FETCH` surface including `ENVELOPE`, `BODY`/`BODYSTRUCTURE` and numbered MIME parts, `STORE`, `EXPUNGE`, `COPY`, `APPEND`, `SEARCH`, `IDLE`, `NAMESPACE`, `UNSELECT`, `CHILDREN`, `SPECIAL-USE`, and RFC 3501 §4.3 literals for every command that takes an `astring`; **never exercised by a real mail client** — see `docs/IMAP.md` |
 | POP3 | Built and tested, **disabled by default** — for legacy devices only; see `docs/POP3.md` |
+| Deliverability (readiness report, DNS wizard, header analyser, delivery test) | Built and tested: six scored check categories with evidence for every check, rendered in the admin UI; **never exercised against a live Internet exchange** — see `docs/Deliverability.md` |
+| MTA-STS | Checked for other domains, and **this server publishes its own policy** over HTTPS — **off by default**, and `testing` mode when enabled; see `docs/Standards.md` |
+| TLS-RPT | The `_smtp._tls` record is checked and proposed, and a submitted report is parsed and analysed; **automatic collection from the `rua` mailbox is not built** |
 | Filtering | **Not yet built** — milestone 12 |
 
 ---
@@ -270,7 +277,7 @@ assemblies looks finished and provides no compile-time value.
 | 8 | Outbound MTA | **Complete** |
 | 9 | Mail Authentication (DKIM/SPF/DMARC) | **Complete** |
 | 10 | IMAP (+ optional POP3) | Protocol work **complete and tested**, literals included; exit criterion (real-client interoperability) **not yet attempted** |
-| 11 | Deliverability | Planned |
+| 11 | Deliverability | Checks, scoring, DNS wizard, header analyser, delivery test, MTA-STS publishing and the readiness UI **built and tested**; TLS-RPT reports are read and analysed but **not collected automatically** |
 | 12 | Filtering | Planned |
 | 13 | Production Hardening (installer, backups, migration) | Planned |
 

@@ -276,6 +276,9 @@ public static class DependencyInjection
         // The delivery test. Scoped, because it reads the domain and DKIM repositories.
         services.TryAddScoped<IDeliveryTestService, DeliveryTestService>();
 
+        // Stateless: it turns one string into one model and reaches nothing.
+        services.TryAddSingleton<ITlsReportReader, TlsReportReader>();
+
         // The blocklists are whatever the operator named, and nothing by default: see
         // DeliverabilityOptions.BlockLists for why shipping a default set would be wrong.
         services.TryAddSingleton<IReputationProvider>(provider => new DnsBlockListProvider(

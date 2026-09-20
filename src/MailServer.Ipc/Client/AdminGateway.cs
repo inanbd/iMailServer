@@ -302,6 +302,11 @@ public interface IAdminGateway
         string from,
         string to,
         CancellationToken cancellationToken = default);
+
+    /// <summary>Reads an RFC 8460 TLS report and says what it means.</summary>
+    Task<TlsReportDto> AnalyseTlsReportAsync(
+        string report,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>Implements <see cref="IAdminGateway"/> over <see cref="IpcClient"/>.</summary>
@@ -1074,4 +1079,15 @@ public sealed class AdminGateway(IpcClient client) : IAdminGateway
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false)
         ?? throw new InvalidOperationException("The service returned an empty delivery test result.");
+
+    public async Task<TlsReportDto> AnalyseTlsReportAsync(
+        string report,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<AnalyseTlsReportQuery, TlsReportDto>(
+                "Deliverability.AnalyseTlsReport",
+                new AnalyseTlsReportQuery { Report = report },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException("The service returned an empty TLS report analysis.");
 }
