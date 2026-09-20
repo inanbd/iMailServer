@@ -62,6 +62,11 @@ security guarantee the server cannot actually make. See `docs/Standards.md`.
 
 ## Records a domain needs
 
+These are generated for a specific domain by the DNS wizard — `Deliverability.DnsPlan`, described
+in `docs/Deliverability.md`. What follows is the shape; the wizard fills in this server's own
+hostname, address and DKIM key, splits the key across TXT strings, and says which records are not
+yours to publish.
+
 For `example.com` with mail host `mail.example.com` at `203.0.113.10`:
 
 ```text

@@ -55,8 +55,13 @@ internal sealed class FakeDkimKeys(IReadOnlyList<DkimKey>? keys = null) : IDkimK
     public Task<DkimKey?> GetAsync(DkimKeyId id, CancellationToken cancellationToken) =>
         throw new NotSupportedException();
 
+    /// <summary>
+    /// Answered from the same seed rather than from a second one, so a test cannot set up a
+    /// folder of keys whose "active" one is not among them — which no real repository can
+    /// produce and which would let a consumer that picked the wrong key pass.
+    /// </summary>
     public Task<DkimKey?> GetActiveForDomainAsync(DomainId domainId, CancellationToken cancellationToken) =>
-        throw new NotSupportedException();
+        Task.FromResult(keys?.FirstOrDefault(k => k.Status == DkimKeyStatus.Active));
 
     public Task<IReadOnlyList<DkimKey>> GetAllAsync(CancellationToken cancellationToken) =>
         throw new NotSupportedException();

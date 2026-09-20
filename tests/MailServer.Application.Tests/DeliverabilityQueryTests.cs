@@ -28,6 +28,24 @@ internal sealed class ScriptedReportService(DeliverabilityReport report) : IDeli
     }
 }
 
+internal sealed class ScriptedDnsPlanService(DnsZonePlan plan) : IDnsPlanService
+{
+    public DomainName? Domain { get; private set; }
+
+    public DnsPlanOptions? Options { get; private set; }
+
+    public Task<DnsZonePlan> CreateAsync(
+        DomainName domain,
+        DnsPlanOptions options,
+        CancellationToken cancellationToken)
+    {
+        Domain = domain;
+        Options = options;
+
+        return Task.FromResult(plan);
+    }
+}
+
 internal sealed class ScriptedAnalysisService(AnalysedHeaders analysis) : IHeaderAnalysisService
 {
     public IpAddressValue? Address { get; private set; }
@@ -349,5 +367,164 @@ public sealed class DeliverabilityQueryTests
             CancellationToken.None);
 
         service.Address.ShouldBeNull();
+    }
+}
+
+/// <summary>
+/// The DNS wizard's half of the IPC surface: what reaches the planner, and what comes back.
+/// </summary>
+/// <remarks>
+/// What the plan itself says is <c>DnsRecordPlanTests</c>'s business. These are about the
+/// handler: whether an operator's typo is reported as a validation failure or silently dropped,
+/// and whether the shape that crosses the wire keeps the two things a caller must not confuse —
+/// a TXT record's several strings, and several records under one name.
+/// </remarks>
+public sealed class DnsPlanQueryTests
+{
+    private static readonly DnsZonePlan Plan = new(
+        [
+            new DnsRecordAdvice(
+                "mail.example.com",
+                DnsRecordKind.A,
+                ["203.0.113.10"],
+                DnsRecordPlacement.OwnZone,
+                "Resolves this server's name."),
+            new DnsRecordAdvice(
+                "10.113.0.203.in-addr.arpa",
+                DnsRecordKind.Ptr,
+                ["mail.example.com."],
+                DnsRecordPlacement.IpOwner,
+                "The reverse name."),
+        ],
+        [new DnsPlanCaveat("Reverse DNS", "Not yours to publish.")]);
+
+    private static async Task<DnsPlanDto> RunAsync(
+        GetDnsPlanQuery query,
+        ScriptedDnsPlanService? plans = null)
+    {
+        IRequestHandler<GetDnsPlanQuery, DnsPlanDto> handler =
+            new GetDnsPlanQueryHandler(plans ?? new ScriptedDnsPlanService(Plan));
+
+        return await handler.Handle(query, CancellationToken.None);
+    }
+
+    [Fact]
+    public void The_query_asks_only_to_view_server_state()
+    {
+        new GetDnsPlanQuery { Domain = "example.com" }
+            .RequiredPermission.ShouldBe(AdminPermission.ViewServerState);
+    }
+
+    [Fact]
+    public async Task The_operators_choices_reach_the_planner_unchanged()
+    {
+        ScriptedDnsPlanService plans = new(Plan);
+
+        await RunAsync(
+            new GetDnsPlanQuery
+            {
+                Domain = "example.com",
+                DmarcReportAddress = "dmarc@example.com",
+                TlsReportAddress = "tlsrpt@example.com",
+                MtaStsId = "20260919T120000",
+            },
+            plans);
+
+        plans.Domain!.Value.ShouldBe("example.com");
+        plans.Options!.DmarcReportAddress!.Value.ShouldBe("dmarc@example.com");
+        plans.Options.TlsReportAddress!.Value.ShouldBe("tlsrpt@example.com");
+        plans.Options.MtaStsId.ShouldBe("20260919T120000");
+    }
+
+    /// <summary>An omitted address is a choice not to have reports, not an empty mailbox name.</summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public async Task An_omitted_reporting_address_reaches_the_planner_as_none(string? text)
+    {
+        ScriptedDnsPlanService plans = new(Plan);
+
+        await RunAsync(
+            new GetDnsPlanQuery { Domain = "example.com", DmarcReportAddress = text },
+            plans);
+
+        plans.Options!.DmarcReportAddress.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task A_domain_that_is_not_one_is_refused()
+    {
+        await Should.ThrowAsync<ValidationFailedException>(
+            () => RunAsync(new GetDnsPlanQuery { Domain = "not a domain" }));
+    }
+
+    /// <summary>
+    /// Both typos at once, because an operator filling in two reporting addresses and getting
+    /// both wrong should be told about both rather than sent round the loop twice.
+    /// </summary>
+    [Fact]
+    public async Task Every_bad_field_is_reported_together()
+    {
+        ValidationFailedException failure = await Should.ThrowAsync<ValidationFailedException>(
+            () => RunAsync(new GetDnsPlanQuery
+            {
+                Domain = "not a domain",
+                DmarcReportAddress = "dmarc at example.com",
+                TlsReportAddress = "also not an address",
+            }));
+
+        failure.Errors.Keys.ShouldBe(
+            ["Domain", "DmarcReportAddress", "TlsReportAddress"],
+            ignoreOrder: true);
+    }
+
+    /// <summary>
+    /// An MTA-STS id the grammar refuses is deliberately not a validation failure. The plan
+    /// answers it with a caveat that quotes the grammar, which is more use to an operator than a
+    /// rejected request naming a field.
+    /// </summary>
+    [Fact]
+    public async Task A_malformed_policy_id_is_left_to_the_plan_to_explain()
+    {
+        ScriptedDnsPlanService plans = new(Plan);
+
+        await RunAsync(
+            new GetDnsPlanQuery { Domain = "example.com", MtaStsId = "2026-09-19T12:00:00Z" },
+            plans);
+
+        plans.Options!.MtaStsId.ShouldBe("2026-09-19T12:00:00Z");
+    }
+
+    [Fact]
+    public async Task The_dto_carries_each_records_placement_and_purpose()
+    {
+        DnsPlanDto dto = await RunAsync(new GetDnsPlanQuery { Domain = "example.com" });
+
+        dto.Records.Count.ShouldBe(2);
+        dto.Records[0].Kind.ShouldBe("A");
+        dto.Records[0].Placement.ShouldBe("OwnZone");
+        dto.Records[1].Kind.ShouldBe("PTR");
+        dto.Records[1].Placement.ShouldBe("IpOwner");
+        dto.Records[1].Purpose.ShouldBe("The reverse name.");
+        dto.Caveats.ShouldHaveSingleItem().Subject.ShouldBe("Reverse DNS");
+    }
+
+    /// <summary>
+    /// The zone text travels with the records rather than being rebuilt by every caller, so the
+    /// rules about absolute names and commented-out foreign records are stated once.
+    /// </summary>
+    [Fact]
+    public async Task The_dto_carries_the_zone_text()
+    {
+        DnsPlanDto dto = await RunAsync(new GetDnsPlanQuery { Domain = "example.com" });
+
+        dto.ZoneText.ShouldContain("mail.example.com. IN A 203.0.113.10");
+        dto.ZoneText.ShouldContain("; 10.113.0.203.in-addr.arpa. IN PTR mail.example.com.");
+    }
+
+    [Fact]
+    public async Task The_handler_refuses_a_null_request()
+    {
+        await Should.ThrowAsync<ArgumentNullException>(() => RunAsync(null!));
     }
 }

@@ -192,3 +192,64 @@ public sealed record HeaderObservationDto
 
     public required string Text { get; init; }
 }
+
+/// <summary>One record an operator should publish.</summary>
+/// <remarks>
+/// <see cref="Placement"/> is carried on every record rather than left to the caller to infer
+/// from the name, because the one record that is not the operator's to publish is also the one
+/// most often published into the wrong zone with no effect — see <c>docs/DNS.md</c>.
+/// </remarks>
+public sealed record DnsRecordDto
+{
+    /// <summary>The record's fully qualified owner name, without a trailing dot.</summary>
+    public required string Name { get; init; }
+
+    /// <summary>The record type, as a zone file writes it: <c>A</c>, <c>MX</c>, <c>TXT</c>.</summary>
+    public required string Kind { get; init; }
+
+    /// <summary>
+    /// The record's data.
+    /// </summary>
+    /// <remarks>
+    /// For a <c>TXT</c> record these are the character-strings of one record and are
+    /// concatenated by whoever reads it; for anything else they are separate records sharing an
+    /// owner name. Rendering the two the same way would publish two addresses as one.
+    /// </remarks>
+    public required IReadOnlyList<string> Values { get; init; }
+
+    /// <summary>Whose zone it belongs in: <c>OwnZone</c> or <c>IpOwner</c>.</summary>
+    public required string Placement { get; init; }
+
+    /// <summary>What breaks without it.</summary>
+    public required string Purpose { get; init; }
+
+    /// <summary>Whether it improves a working configuration rather than being required.</summary>
+    public required bool IsOptional { get; init; }
+}
+
+/// <summary>Something true about a plan that no record in it discharges.</summary>
+public sealed record DnsPlanCaveatDto
+{
+    public required string Subject { get; init; }
+
+    public required string Text { get; init; }
+}
+
+/// <summary>Everything an operator should publish for one domain.</summary>
+public sealed record DnsPlanDto
+{
+    /// <summary>In the order they should be worked through.</summary>
+    public required IReadOnlyList<DnsRecordDto> Records { get; init; }
+
+    /// <summary>Obligations no record in the plan discharges.</summary>
+    public required IReadOnlyList<DnsPlanCaveatDto> Caveats { get; init; }
+
+    /// <summary>
+    /// The same records as zone-file lines, for an operator who would rather paste than click.
+    /// </summary>
+    /// <remarks>
+    /// Owner names are absolute and records the operator cannot publish are commented out, so
+    /// the text can be pasted into a zone whole — see <c>DnsRecordPlan.ToZoneText</c>.
+    /// </remarks>
+    public required string ZoneText { get; init; }
+}

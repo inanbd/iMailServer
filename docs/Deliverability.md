@@ -299,17 +299,19 @@ RRset does.
 
 ## Reaching it
 
-Two IPC commands, both read-only:
+Three IPC commands, all read-only:
 
 | Command | Request | Returns |
 |---|---|---|
 | `Deliverability.Report` | domain, plus three run switches | `DeliverabilityReportDto` |
 | `Deliverability.AnalyseHeaders` | pasted headers, optional client address | `HeaderAnalysisDto` |
+| `Deliverability.DnsPlan` | domain, plus three operator choices | `DnsPlanDto` |
 
-Both require `ViewServerState`, not `ReadMessageContent`. The report reads this server's own
-configuration and public DNS; the analyser reads headers the operator pasted into the request.
-Neither opens a stored message, which is the boundary `ReadMessageContent` exists to guard — and
-the moment either did, it would need that permission instead.
+All require `ViewServerState`, not `ReadMessageContent`. The report reads this server's own
+configuration and public DNS; the analyser reads headers the operator pasted into the request;
+the plan reads configuration and the DKIM key's **public** half. None opens a stored message,
+which is the boundary `ReadMessageContent` exists to guard — and the moment one did, it would
+need that permission instead.
 
 **The run switches are on the request rather than in configuration** because they decide what
 this server does to other people: whether it opens an SMTP connection to itself, fetches a policy
@@ -322,6 +324,84 @@ header block cannot keep, and the name is the safeguard. Each signature is paire
 selector's lookup by name, never by position: a signature that fails to parse is never looked up,
 so a positional join would attribute the next signature's key state to it and report a published
 key for a selector that has none.
+
+## DNS wizard
+
+The report says what is wrong. The wizard says what to publish — and an operator with nothing
+published yet needs the second first, because the report's answer for them is a score of zero and
+a list of failures.
+
+`Deliverability.DnsPlan` returns every record for one domain, each with the reason it is being
+asked for, plus the zone-file text for an operator who would rather paste than click. It reads
+DNS not at all and writes it never: this product holds no credentials to any registrar, and the
+plan is advice for a person to check.
+
+### What it proposes
+
+For `example.com` on `mail.example.com` at `203.0.113.10`, with a key generated and reporting
+addresses chosen:
+
+```text
+mail.example.com.               IN A    203.0.113.10
+example.com.                    IN MX   10 mail.example.com.
+example.com.                    IN TXT  "v=spf1 mx ip4:203.0.113.10 -all"
+mail2026._domainkey.example.com. IN TXT "v=DKIM1; k=rsa; p=…" "…"
+_dmarc.example.com.             IN TXT  "v=DMARC1; p=none; rua=mailto:dmarc@example.com"
+_mta-sts.example.com.           IN TXT  "v=STSv1; id=20260919T120000;"
+_smtp._tls.example.com.         IN TXT  "v=TLSRPTv1; rua=mailto:tlsrpt@example.com"
+; 10.113.0.203.in-addr.arpa.    IN PTR  mail.example.com.
+```
+
+**Owner names are absolute and end with a dot.** A relative name pasted under the wrong `$ORIGIN`
+becomes `_dmarc.example.com.example.com` — which resolves, answers nothing, and looks right at a
+glance.
+
+**The reverse record is commented out, not omitted.** It is not the operator's to publish, and
+every record carries which zone it belongs in so a UI can say so. Leaving it out entirely would
+let an operator think the plan had forgotten reverse DNS; leaving it in uncommented would have
+them publish it into their own zone, where it does nothing.
+
+### The three choices
+
+`DmarcReportAddress`, `TlsReportAddress` and `MtaStsId` are on the request because each is a
+decision rather than a fact. Where reports go is a mailbox somebody has to read, and advertising
+an MTA-STS policy commits the operator to serving one over HTTPS for as long as the record
+stands. Defaulting them would put records in front of an operator that look like this server's
+findings rather than their own choices. Omitting one leaves its record out of the plan — except
+DMARC, where a record with no `rua=` is still proposed and flagged as a policy published blind.
+
+### The traps it exists to catch
+
+**A DKIM key does not fit in one TXT string.** RFC 1035 §3.3.14's `character-string` is a length
+octet and up to 255 more, and a 2048-bit key's base64 is around 392 characters. The plan splits
+it and says so, because some providers take the strings in one field, some want them quoted and
+separated, and a few silently truncate — and a truncated key parses and verifies nothing. The
+split is positional and needs no token awareness: RFC 6376 §3.6.2.2 has readers concatenate
+"with no intervening whitespace", and RFC 7208 §3.3 says the same for SPF. It is a limit on
+octets, so a character is never cut in half to reach it.
+
+**Reports addressed outside the domain need the receiver's permission.** RFC 7489 §7.1: a
+receiver that finds `rua=` pointing outside the policy's own organizational domain must query
+`{policy-domain}._report._dmarc.{reporting-domain}`, and "Where the above algorithm fails to
+confirm that the external reporting was authorized by the Report Receiver, the URI MUST be
+ignored". An operator who points `rua=` at a third-party service and publishes nothing else gets
+silence, with no error anywhere to explain it. The plan names the exact record the other domain
+must publish. The comparison is by organizational domain, not by name, so
+`rua=mailto:dmarc@example.com` on `mail.example.com` is not flagged.
+
+**An MTA-STS id is alphanumeric and at most 32 characters.** RFC 8461 §3.1:
+`sts-id = %s"id=" 1*32(ALPHA / DIGIT)`. `20260919T120000` fits; the same timestamp with
+separators does not, and a record carrying one is discarded by every sender. The plan refuses to
+propose it and quotes the grammar instead.
+
+**The MX target must not be a CNAME.** RFC 2181 §10.3: "The domain name used as the value of a NS
+resource record, or part of the value of a MX resource record must not be an alias." It works
+with some senders and not others, which is the worst way for a configuration to be wrong.
+
+**`p=none` is where DMARC starts, and the plan says what comes next.** The readiness report warns
+about the same value, and the two agree: that check's own text calls it "the right setting while
+you are reading reports" and its remedy is the next step rather than a different starting point.
+An operator who follows this plan and then runs the report is not told they were misled.
 
 ## Delivery test
 

@@ -253,5 +253,6 @@ public sealed class IpcCommandRegistry
         // that permission instead.
         new("Deliverability.Report", typeof(GetDeliverabilityReportQuery), typeof(DeliverabilityReportDto)),
         new("Deliverability.AnalyseHeaders", typeof(AnalyseHeadersQuery), typeof(HeaderAnalysisDto)),
+        new("Deliverability.DnsPlan", typeof(GetDnsPlanQuery), typeof(DnsPlanDto)),
     ];
 }

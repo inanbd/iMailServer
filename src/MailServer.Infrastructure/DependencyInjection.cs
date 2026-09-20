@@ -282,6 +282,7 @@ public static class DependencyInjection
         services.TryAddScoped<OperationsProbe>();
         services.TryAddScoped<IDeliverabilityReportService, DeliverabilityReportService>();
         services.TryAddScoped<IHeaderAnalysisService, HeaderAnalysisService>();
+        services.TryAddScoped<IDnsPlanService, DnsPlanService>();
         services.TryAddScoped<IOutboundDeliveryClient, OutboundSmtpClient>();
         services.TryAddScoped<IDsnComposer, PlainTextDsnComposer>();
 
