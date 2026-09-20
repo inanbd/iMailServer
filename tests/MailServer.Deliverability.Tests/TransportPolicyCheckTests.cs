@@ -65,7 +65,7 @@ public sealed class TransportPolicyCheckTests
         int certificate = TlsChecks.Evaluate(new TlsFacts(
             DomainName.Parse("mail.example.com"),
             null,
-            null,
+            MailServer.Domain.Enums.CertificateChainStatus.NotBuilt,
             null,
             new Domain.Policies.CertificateRenewalPolicy(),
             DateTimeOffset.UnixEpoch)).Sum(c => c.Weight);

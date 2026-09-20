@@ -9,11 +9,21 @@ namespace MailServer.Infrastructure.Deliverability;
 /// <param name="Relayed">Whether the server accepted the outside recipient.</param>
 /// <param name="Source">The address the test connected from.</param>
 /// <param name="Transcript">The conversation, for the report to show.</param>
+/// <param name="StartTlsOffered">
+/// Whether the EHLO answer advertised STARTTLS, or null when no EHLO answer was read.
+/// </param>
+/// <remarks>
+/// STARTTLS comes out of this test rather than out of a second connection because the EHLO
+/// answer is already on the wire: the relay test has to send EHLO to get anywhere, and
+/// <c>tls.starttls-offered</c> is asking about that exact response. A separate probe would open
+/// a second connection to learn something this one already knows.
+/// </remarks>
 public sealed record OpenRelayResult(
     bool Ran,
     bool Relayed,
     string? Source,
-    IReadOnlyList<string> Transcript);
+    IReadOnlyList<string> Transcript,
+    bool? StartTlsOffered = null);
 
 /// <summary>
 /// Asks this server, over SMTP, whether it will relay for a stranger.
@@ -92,7 +102,16 @@ public sealed class OpenRelaySelfTest
             }
 
             await SendAsync(stream, $"EHLO {ehloName}", transcript, timeout.Token).ConfigureAwait(false);
-            await ReadReplyAsync(reader, transcript, timeout.Token).ConfigureAwait(false);
+
+            List<string> ehlo = [];
+
+            await ReadReplyAsync(reader, transcript, timeout.Token, ehlo).ConfigureAwait(false);
+
+            // RFC 5321 §4.1.1.1: the EHLO answer's lines after the first are the extensions the
+            // server offers, one keyword per line. STARTTLS is RFC 3207 §2's keyword.
+            bool startTls = ehlo.Skip(1).Any(l =>
+                l.Length > 4 &&
+                l[4..].TrimEnd().Equals("STARTTLS", StringComparison.OrdinalIgnoreCase));
 
             await SendAsync(stream, $"MAIL FROM:<{ProbeSender}>", transcript, timeout.Token).ConfigureAwait(false);
 
@@ -106,7 +125,7 @@ public sealed class OpenRelaySelfTest
                 await SendAsync(stream, "QUIT", transcript, timeout.Token).ConfigureAwait(false);
                 await ReadReplyAsync(reader, transcript, timeout.Token).ConfigureAwait(false);
 
-                return new OpenRelayResult(false, false, source, transcript);
+                return new OpenRelayResult(false, false, source, transcript, startTls);
             }
 
             await SendAsync(stream, $"RCPT TO:<{ProbeRecipient}>", transcript, timeout.Token).ConfigureAwait(false);
@@ -128,7 +147,7 @@ public sealed class OpenRelaySelfTest
             // reads like a fault rather than a clean exit.
             await ReadReplyAsync(reader, transcript, timeout.Token).ConfigureAwait(false);
 
-            return new OpenRelayResult(rcpt is not null, relayed, source, transcript);
+            return new OpenRelayResult(rcpt is not null, relayed, source, transcript, startTls);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -172,13 +191,15 @@ public sealed class OpenRelaySelfTest
     private static async Task<string?> ReadReplyAsync(
         StreamReader reader,
         List<string> transcript,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        List<string>? lines = null)
     {
         string? last = null;
 
         while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
         {
             transcript.Add($"S: {line}");
+            lines?.Add(line);
             last = line;
 
             if (line.Length < 4 || line[3] != '-')

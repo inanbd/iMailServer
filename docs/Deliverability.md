@@ -124,6 +124,59 @@ receiver rejects, while DMARC alignment quietly falls back to SPF and keeps pass
 visibly breaks until an SPF change, at which point the cause is weeks old. The weakest live key
 decides the strength check, since a forger picks which selector to claim.
 
+## Running the report
+
+`IDeliverabilityReportService` runs every probe once and judges everything they gathered.
+`DeliverabilityRunOptions` decides what a run is allowed to do: `Full` does everything, `DnsOnly`
+makes no SMTP connection, no HTTPS request to a policy host and no query to a third-party list.
+The checks those would have fed report as not tested, which the score already carries — and the
+summary leads with the real denominator rather than rescaling a handful of checks to a hundred.
+
+**One run, one report.** Two data dependencies make the order matter, and both are real:
+
+* The **MX hosts** come out of `DnsProbe` and are what an MTA-STS policy's `mx` list is judged
+  against. Resolving them a second time would let the two halves of one report disagree about
+  what the domain publishes — and the disagreement would surface as a finding about the policy
+  rather than as the inconsistency it is.
+* **STARTTLS** comes out of the relay test's EHLO answer, which is already on the wire. One
+  connection, two findings; a second probe would open another connection to read a line this one
+  already has.
+
+**A probe that throws does not take the report with it.** Each category is gathered inside a
+boundary that turns a failure into no facts. An operator with one unreachable nameserver gets the
+ninety points that were measurable, not an error page. Cancellation is the exception and is
+rethrown: the caller asked for the run to stop, and turning that into "the probe failed, here are
+ninety points" would hand back a report they no longer wanted.
+
+**Only active DKIM keys count as this server's selectors.** A retired key's selector may still be
+published on purpose so signatures made before the rotation still verify; reporting it would make
+a completed rotation look like a configuration to fix, and would start failing once the grace
+window ended and the record was withdrawn.
+
+### The chain build, and revocation
+
+`tls.certificate-trusted` needs a chain built against the certificate the provider would actually
+hand a listener — the fault it catches is an intermediate the server does not send, which is
+invisible in stored metadata.
+
+**Revocation is checked, not skipped.** RFC 8461 §4.2 lets a sending MTA check the receiving
+one's certificate for revocation, so a revoked certificate is a real deliverability failure and
+one an operator would rather hear from their own report than from a receiver. The cost is a
+network round trip, which a diagnostic run on demand can afford where a handshake could not.
+(`docs/Standards.md` rule 105 forbids certificate-validation bypasses, and a security test
+enforces it against every production source file — which is how this was caught.)
+
+That makes the chain's outcome four states rather than two, because three of them have different
+remedies: **self-signed** is a certificate to replace, **untrusted** is almost always a missing
+intermediate, and **revoked** has to be reissued and is urgent — and if the operator did not ask
+for the revocation, the private key is the real news.
+
+**Revocation that could not be determined is not a broken chain.** An unreachable CRL or OCSP
+endpoint fails the build with nothing but `RevocationStatusUnknown` or `OfflineRevocation` to
+show for it. The chain itself built; only its revocation state is unknown. Treating that as
+untrusted would send an operator to reinstall intermediates that were never missing — and it
+would happen to everyone whose outbound network blocks OCSP, which is a great many people.
+
 ## The TLS category
 
 **Nothing in this category is required to carry mail, which is exactly why it scores twenty.**

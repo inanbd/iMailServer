@@ -8,10 +8,9 @@ namespace MailServer.Domain.Deliverability;
 /// <summary>What the TLS probe observed.</summary>
 /// <param name="Hostname">The name this server presents, which its certificate must cover.</param>
 /// <param name="Certificate">The certificate bound to the SMTP listeners, or null if none is.</param>
-/// <param name="ChainIsTrusted">
-/// Whether the chain builds to a root in the platform trust store, or null when it was not
-/// determined. Not something the Domain can decide — chain building needs the trust store and
-/// the network, neither of which a model with no dependencies outside the BCL has.
+/// <param name="Chain">
+/// What building the chain established. Not something the Domain can decide — it needs the trust
+/// store and the network, neither of which a model with no dependencies outside the BCL has.
 /// </param>
 /// <param name="StartTlsOffered">
 /// Whether the server advertised STARTTLS on port 25, or null when no probe was made.
@@ -21,7 +20,7 @@ namespace MailServer.Domain.Deliverability;
 public sealed record TlsFacts(
     DomainName Hostname,
     Certificate? Certificate,
-    bool? ChainIsTrusted,
+    CertificateChainStatus Chain,
     bool? StartTlsOffered,
     CertificateRenewalPolicy RenewalPolicy,
     DateTimeOffset Now);
@@ -198,18 +197,35 @@ public static class TlsChecks
                 "can request one over ACME at no cost.");
         }
 
-        if (facts.ChainIsTrusted is not { } trusted)
-        {
-            return Unmeasured(Id, Title, Weight, "The chain was not built.");
-        }
-
         DeliverabilityEvidence evidence = new(
             "A chain to a trusted root",
-            trusted ? "chain builds" : "chain does not build");
+            facts.Chain switch
+            {
+                CertificateChainStatus.Trusted => "chain builds",
+                CertificateChainStatus.Revoked => "revoked by the issuer",
+                CertificateChainStatus.Untrusted => "chain does not build",
+                _ => null,
+            });
 
-        return trusted
-            ? Pass(Id, Title, Weight, "The chain builds to a trusted root.", evidence)
-            : Fail(
+        return facts.Chain switch
+        {
+            CertificateChainStatus.Trusted =>
+                Pass(Id, Title, Weight, "The chain builds to a trusted root.", evidence),
+
+            // Its own finding because the remedy shares nothing with the others: there is no
+            // chain to repair and no certificate to keep. A revoked certificate is also the one
+            // state here that gets worse on its own, as the revocation propagates.
+            CertificateChainStatus.Revoked => Fail(
+                Id,
+                Title,
+                Weight,
+                "The issuer has revoked this certificate. Every client that checks will refuse " +
+                "it, and more of them will as the revocation propagates.",
+                evidence,
+                "Reissue the certificate and install the new one. If you did not ask for the " +
+                "revocation, treat the private key as compromised."),
+
+            CertificateChainStatus.Untrusted => Fail(
                 Id,
                 Title,
                 Weight,
@@ -219,7 +235,10 @@ public static class TlsChecks
                 "copy does not.",
                 evidence,
                 "Install the issuer's intermediate certificates alongside the leaf, so the whole " +
-                "chain is presented during the handshake.");
+                "chain is presented during the handshake."),
+
+            _ => Unmeasured(Id, Title, Weight, "The chain was not built."),
+        };
     }
 
     /// <summary>

@@ -39,10 +39,10 @@ public sealed class TlsCheckTests
     /// </remarks>
     private static TlsFacts Facts(
         Certificate? certificate = null,
-        bool? trusted = true,
+        CertificateChainStatus chain = CertificateChainStatus.Trusted,
         bool? startTls = true,
         DateTimeOffset? now = null) =>
-        new(Hostname, certificate ?? Cert(), trusted, startTls, Policy, now ?? Now);
+        new(Hostname, certificate ?? Cert(), chain, startTls, Policy, now ?? Now);
 
     private static DeliverabilityCheck Check(TlsFacts facts, string id) =>
         TlsChecks.Evaluate(facts).Single(c => c.Id == id);
@@ -96,10 +96,10 @@ public sealed class TlsCheckTests
     {
         TlsFacts[] broken =
         [
-            new(Hostname, null, true, true, Policy, Now),
+            new(Hostname, null, CertificateChainStatus.Trusted, true, Policy, Now),
             Facts(certificate: Cert(sans: "other.example.net")),
             Facts(certificate: Cert(source: CertificateSource.SelfSigned)),
-            Facts(trusted: false),
+            Facts(chain: CertificateChainStatus.Untrusted),
             Facts(now: Now.AddDays(100)),
             Facts(now: Now.AddDays(-20)),
             Facts(certificate: Cert(validForDays: 20)),
@@ -126,7 +126,7 @@ public sealed class TlsCheckTests
     [Fact]
     public void No_certificate_fails_and_leaves_the_rest_unjudged()
     {
-        TlsFacts facts = new(Hostname, null, true, true, Policy, Now);
+        TlsFacts facts = new(Hostname, null, CertificateChainStatus.Trusted, true, Policy, Now);
 
         Check(facts, TlsChecks.CertificateInstalledId).Outcome.ShouldBe(DeliverabilityOutcome.Fail);
 
@@ -146,7 +146,7 @@ public sealed class TlsCheckTests
     [Fact]
     public void Starttls_is_still_judged_without_a_certificate()
     {
-        Check(new TlsFacts(Hostname, null, true, false, Policy, Now), TlsChecks.StartTlsOfferedId)
+        Check(new TlsFacts(Hostname, null, CertificateChainStatus.Trusted, false, Policy, Now), TlsChecks.StartTlsOfferedId)
             .Outcome.ShouldBe(DeliverabilityOutcome.Fail);
     }
 
@@ -227,11 +227,32 @@ public sealed class TlsCheckTests
     [Fact]
     public void An_untrusted_chain_is_reported_separately_from_a_self_signed_certificate()
     {
-        DeliverabilityCheck check = Check(Facts(trusted: false), TlsChecks.CertificateTrustedId);
+        DeliverabilityCheck check = Check(Facts(chain: CertificateChainStatus.Untrusted), TlsChecks.CertificateTrustedId);
 
         check.Outcome.ShouldBe(DeliverabilityOutcome.Fail);
         check.Detail.ShouldContain("intermediate");
         check.Remedy.ShouldNotBeNull().ShouldContain("intermediate");
+    }
+
+    /// <summary>
+    /// A revoked certificate is its own finding, with its own remedy.
+    /// </summary>
+    /// <remarks>
+    /// It shares nothing with the other two: there is no chain to repair and no certificate to
+    /// keep. It is also the one state here that gets worse on its own, as the revocation
+    /// propagates — and if the operator did not ask for it, the private key is the real news.
+    /// </remarks>
+    [Fact]
+    public void A_revoked_certificate_is_reported_as_revoked()
+    {
+        DeliverabilityCheck check = Check(
+            Facts(chain: CertificateChainStatus.Revoked),
+            TlsChecks.CertificateTrustedId);
+
+        check.Outcome.ShouldBe(DeliverabilityOutcome.Fail);
+        check.Detail.ShouldContain("revoked");
+        check.Remedy.ShouldNotBeNull().ShouldContain("compromised");
+        check.Detail.ShouldNotContain("intermediate");
     }
 
     /// <summary>
@@ -244,7 +265,7 @@ public sealed class TlsCheckTests
     [Fact]
     public void An_unbuilt_chain_leaves_trust_unjudged()
     {
-        Check(Facts(trusted: null), TlsChecks.CertificateTrustedId)
+        Check(Facts(chain: CertificateChainStatus.NotBuilt), TlsChecks.CertificateTrustedId)
             .Outcome.ShouldBe(DeliverabilityOutcome.Inconclusive);
     }
 
@@ -260,7 +281,7 @@ public sealed class TlsCheckTests
     public void A_self_signed_certificate_fails_even_with_no_chain_result()
     {
         Check(
-                Facts(certificate: Cert(source: CertificateSource.SelfSigned), trusted: null),
+                Facts(certificate: Cert(source: CertificateSource.SelfSigned), chain: CertificateChainStatus.NotBuilt),
                 TlsChecks.CertificateTrustedId)
             .Outcome.ShouldBe(DeliverabilityOutcome.Fail);
     }
@@ -436,7 +457,7 @@ public sealed class TlsCheckTests
     public void A_server_with_no_certificate_is_not_ready()
     {
         DeliverabilityReport report = DeliverabilityReport.From(
-            TlsChecks.Evaluate(new TlsFacts(Hostname, null, true, true, Policy, Now)),
+            TlsChecks.Evaluate(new TlsFacts(Hostname, null, CertificateChainStatus.Trusted, true, Policy, Now)),
             Now);
 
         report.Readiness.ShouldBe(DeliverabilityReadiness.NotReady);

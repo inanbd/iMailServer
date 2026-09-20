@@ -302,6 +302,70 @@ public sealed class OpenRelaySelfTestTests
         result.Transcript.ShouldNotBeEmpty();
     }
 
+    /// <summary>
+    /// STARTTLS is read out of the same EHLO answer.
+    /// </summary>
+    /// <remarks>
+    /// RFC 3207 §2 gives the keyword; RFC 5321 §4.1.1.1 puts it on its own line of the EHLO
+    /// answer. The relay test has to send EHLO to get anywhere, so a separate probe would open a
+    /// second connection to learn something this one already has on the wire.
+    /// </remarks>
+    [Fact]
+    public async Task Starttls_is_read_from_the_same_ehlo_answer()
+    {
+        using ScriptedSmtpListener offering = new("220 mail.example.com ESMTP\n", Refusing);
+
+        (await RunAsync(offering)).StartTlsOffered.ShouldBe(true);
+
+        using ScriptedSmtpListener silent = new(
+            "220 mail.example.com ESMTP\n",
+            c => c.StartsWith("EHLO", StringComparison.OrdinalIgnoreCase)
+                ? "250-mail.example.com\n250 SIZE 10240000\n"
+                : Refusing(c));
+
+        (await RunAsync(silent)).StartTlsOffered.ShouldBe(false);
+    }
+
+    /// <summary>
+    /// A keyword that merely begins with STARTTLS is not STARTTLS.
+    /// </summary>
+    /// <remarks>
+    /// A prefix match would read a hypothetical extension named STARTTLSNG as the real thing and
+    /// report a server offering no TLS at all as offering it — a false pass on the one check
+    /// MTA-STS's enforce mode turns on.
+    /// </remarks>
+    [Fact]
+    public async Task A_keyword_beginning_with_starttls_is_not_starttls()
+    {
+        using ScriptedSmtpListener listener = new(
+            "220 mail.example.com ESMTP\n",
+            c => c.StartsWith("EHLO", StringComparison.OrdinalIgnoreCase)
+                ? "250-mail.example.com\n250 STARTTLSNG\n"
+                : Refusing(c));
+
+        (await RunAsync(listener)).StartTlsOffered.ShouldBe(false);
+    }
+
+    /// <summary>
+    /// The greeting line is not one of the extensions.
+    /// </summary>
+    /// <remarks>
+    /// RFC 5321 §4.1.1.1 makes the first line of an EHLO answer the server's greeting, not a
+    /// keyword. A server whose hostname happened to be "starttls" would otherwise be read as
+    /// offering it.
+    /// </remarks>
+    [Fact]
+    public async Task The_ehlo_greeting_line_is_not_an_extension()
+    {
+        using ScriptedSmtpListener listener = new(
+            "220 mail.example.com ESMTP\n",
+            c => c.StartsWith("EHLO", StringComparison.OrdinalIgnoreCase)
+                ? "250 STARTTLS\n"
+                : Refusing(c));
+
+        (await RunAsync(listener)).StartTlsOffered.ShouldBe(false);
+    }
+
     /// <summary>The transcript records both sides, for the report to show.</summary>
     [Fact]
     public async Task The_transcript_records_both_sides()

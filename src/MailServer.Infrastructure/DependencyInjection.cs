@@ -280,6 +280,7 @@ public static class DependencyInjection
         services.TryAddSingleton<IMessageStoreLocation>(provider => new ConfiguredMessageStoreLocation(
             provider.GetRequiredService<IOptions<MailServerOptions>>().Value.Storage.DataRoot));
         services.TryAddScoped<OperationsProbe>();
+        services.TryAddScoped<IDeliverabilityReportService, DeliverabilityReportService>();
         services.TryAddScoped<IOutboundDeliveryClient, OutboundSmtpClient>();
         services.TryAddScoped<IDsnComposer, PlainTextDsnComposer>();
 
