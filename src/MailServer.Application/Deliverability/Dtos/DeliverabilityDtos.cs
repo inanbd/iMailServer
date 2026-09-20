@@ -253,3 +253,96 @@ public sealed record DnsPlanDto
     /// </remarks>
     public required string ZoneText { get; init; }
 }
+
+/// <summary>One exchanger a domain published.</summary>
+public sealed record MailExchangerDto
+{
+    public required string Hostname { get; init; }
+
+    public required int Preference { get; init; }
+}
+
+/// <summary>One step of one SMTP conversation.</summary>
+/// <remarks>
+/// <see cref="Sent"/> is never message content: see <c>DeliveryTranscript</c> on why a
+/// transcript read under one permission must not carry what another guards.
+/// </remarks>
+public sealed record DeliveryStepDto
+{
+    /// <summary>Where in the conversation — <c>Banner</c>, <c>MailFrom</c>, <c>Handshake</c>.</summary>
+    public required string Stage { get; init; }
+
+    /// <summary>The command as issued, or null for a stage that sends none.</summary>
+    public string? Sent { get; init; }
+
+    public int? ReplyCode { get; init; }
+
+    public string? ReplyText { get; init; }
+
+    /// <summary>The reply's further lines, which for <c>EHLO</c> are the capabilities.</summary>
+    public required IReadOnlyList<string> ReplyContinuations { get; init; }
+
+    /// <summary>What the protocol does not carry: TLS version, certificate, body length.</summary>
+    public string? Detail { get; init; }
+
+    /// <summary>Since the first step, not the previous one.</summary>
+    public required double ElapsedMilliseconds { get; init; }
+}
+
+/// <summary>One attempt against one exchanger.</summary>
+public sealed record DeliveryAttemptDto
+{
+    public required string Hostname { get; init; }
+
+    public required int Preference { get; init; }
+
+    public required string Outcome { get; init; }
+
+    public string? Diagnostic { get; init; }
+
+    public string? Banner { get; init; }
+
+    /// <summary>From the greeting after the handshake, never the one before it.</summary>
+    public required IReadOnlyList<string> Capabilities { get; init; }
+
+    /// <summary>Where the conversation stopped, which is usually the diagnosis.</summary>
+    public string? LastStage { get; init; }
+
+    /// <summary>The reply to the terminating dot — the only one that means delivered.</summary>
+    public int? FinalReplyCode { get; init; }
+
+    public string? FinalReplyText { get; init; }
+
+    public required IReadOnlyList<DeliveryStepDto> Steps { get; init; }
+
+    /// <summary>The same conversation as log-shaped text, for pasting into a support ticket.</summary>
+    public required string Transcript { get; init; }
+}
+
+/// <summary>What one delivery test established.</summary>
+public sealed record DeliveryTestDto
+{
+    /// <summary>The last attempt's outcome, classified as a queued delivery would be.</summary>
+    public required string Outcome { get; init; }
+
+    public required string Sender { get; init; }
+
+    public required string Recipient { get; init; }
+
+    /// <summary>The <c>Message-ID</c> as sent, for finding it in the receiver's logs.</summary>
+    public required string MessageId { get; init; }
+
+    /// <summary>Every exchanger published, in the order this server would try them.</summary>
+    public required IReadOnlyList<MailExchangerDto> Candidates { get; init; }
+
+    /// <summary>One per exchanger tried, in order. Empty when none was reachable.</summary>
+    public required IReadOnlyList<DeliveryAttemptDto> Attempts { get; init; }
+
+    /// <summary>
+    /// How long the decisive conversation took. There is no queue latency: the test sends
+    /// directly, because the value is seeing the conversation now.
+    /// </summary>
+    public double? LatencyMilliseconds { get; init; }
+
+    public string? Diagnostic { get; init; }
+}

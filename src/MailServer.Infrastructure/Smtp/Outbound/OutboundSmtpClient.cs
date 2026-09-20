@@ -233,17 +233,19 @@ internal sealed class OutboundSmtpClient(
                 return Classify(remoteAddress, activeTls, dataReply, "DATA");
             }
 
-            byte[]? dkimSignatureLine = await ComputeDkimSignatureLineAsync(request.MessageId, cancellationToken)
+            DkimSigning signing = await ComputeDkimSignatureLineAsync(request.MessageId, cancellationToken)
                 .ConfigureAwait(false);
 
             long octets = await StreamMessageBodyAsync(
-                stream, request.MessageId, dkimSignatureLine, cancellationToken).ConfigureAwait(false);
+                stream, request.MessageId, signing.Line, cancellationToken).ConfigureAwait(false);
 
             request.Transcript?.Record(
                 DeliveryStage.Body,
                 clock.UtcNow,
-                detail: $"{octets.ToString(CultureInfo.InvariantCulture)} octets sent" +
-                    (dkimSignatureLine is { Length: > 0 } ? ", DKIM-signed" : ", unsigned"));
+                detail: $"{octets.ToString(CultureInfo.InvariantCulture)} octets sent, " +
+                    (signing.Selector is { } selector
+                        ? $"DKIM-signed with selector {selector.Value}"
+                        : "unsigned"));
 
             TimeSpan dataTimeout = TimeSpan.FromSeconds(Options.DataTimeoutSeconds);
             SmtpReply finalReply = await SmtpReplyParser.ReadAsync(reader, dataTimeout, cancellationToken)
@@ -395,13 +397,26 @@ internal sealed class OutboundSmtpClient(
         return octets + terminatorLength;
     }
 
+    /// <summary>What signing produced: the header line, and the selector that made it.</summary>
+    /// <remarks>
+    /// <c>default</c> means the message goes unsigned, which is a legitimate outcome rather than
+    /// a failure — see the method's own remarks for the four ways it happens.
+    /// </remarks>
+    private readonly record struct DkimSigning(byte[]? Line, DkimSelector? Selector);
+
     /// <summary>
     /// Computes a DKIM-Signature header line for the message, or null when it should be sent
     /// unsigned: the <c>From:</c> header does not parse, its domain is not one this server hosts,
     /// or that domain has no active DKIM key. Never throws — a DKIM subsystem failure must not
     /// block delivery of mail that would otherwise send successfully.
     /// </summary>
-    private async Task<byte[]?> ComputeDkimSignatureLineAsync(
+    /// <remarks>
+    /// The selector comes back with the line because it is the answer to "which key signed
+    /// this", and only this method knows it: the caller's own lookup of the domain's active
+    /// key would be a second source for one fact, and the two would disagree the moment a
+    /// rotation landed between them.
+    /// </remarks>
+    private async Task<DkimSigning> ComputeDkimSignatureLineAsync(
         StoredMessageId messageId, CancellationToken cancellationToken)
     {
         try
@@ -419,12 +434,12 @@ internal sealed class OutboundSmtpClient(
                     "preparing to sign it; sending unsigned.",
                     messageId.Value);
 
-                return null;
+                return default;
             }
 
             if (!FromHeaderDomain.TryExtract(headers, out DomainName? fromDomain))
             {
-                return null;
+                return default;
             }
 
             MailDomain? domain = await domainRepository.GetByNameAsync(fromDomain!, cancellationToken)
@@ -432,7 +447,7 @@ internal sealed class OutboundSmtpClient(
 
             if (domain is null)
             {
-                return null;
+                return default;
             }
 
             DkimKey? activeKey = await dkimKeyRepository
@@ -441,7 +456,7 @@ internal sealed class OutboundSmtpClient(
 
             if (activeKey is null)
             {
-                return null;
+                return default;
             }
 
             byte[]? privateKey = await dkimKeyRepository
@@ -457,7 +472,7 @@ internal sealed class OutboundSmtpClient(
                     fromDomain!.Value,
                     messageId.Value);
 
-                return null;
+                return default;
             }
 
             content.Seek(headers.HeaderBlockLength, SeekOrigin.Begin);
@@ -484,14 +499,16 @@ internal sealed class OutboundSmtpClient(
                 CryptographicOperations.ZeroMemory(privateKey);
             }
 
-            return Encoding.ASCII.GetBytes($"DKIM-Signature: {tags.Compose()}\r\n");
+            return new DkimSigning(
+                Encoding.ASCII.GetBytes($"DKIM-Signature: {tags.Compose()}\r\n"),
+                activeKey.Selector);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(
                 ex, "Failed to compute a DKIM signature for message {MessageId}; sending unsigned.", messageId.Value);
 
-            return null;
+            return default;
         }
     }
 

@@ -1,10 +1,12 @@
 using MailServer.Application.Abstractions.Deliverability;
+using MailServer.Application.Deliverability.Commands;
 using MailServer.Application.Deliverability.Dtos;
 using MailServer.Application.Deliverability.Queries;
 using MailServer.Application.Exceptions;
 using MailServer.Domain.Deliverability;
 using MailServer.Domain.Enums;
 using MailServer.Domain.Mail;
+using MailServer.Domain.Smtp;
 using MailServer.Domain.ValueObjects;
 using MediatR;
 
@@ -25,6 +27,20 @@ internal sealed class ScriptedReportService(DeliverabilityReport report) : IDeli
         Options = options;
 
         return Task.FromResult(report);
+    }
+}
+
+internal sealed class ScriptedDeliveryTestService(DeliveryTestOutcome outcome) : IDeliveryTestService
+{
+    public DeliveryTestRequest? Request { get; private set; }
+
+    public Task<DeliveryTestOutcome> RunAsync(
+        DeliveryTestRequest request,
+        CancellationToken cancellationToken)
+    {
+        Request = request;
+
+        return Task.FromResult(outcome);
     }
 }
 
@@ -520,6 +536,167 @@ public sealed class DnsPlanQueryTests
 
         dto.ZoneText.ShouldContain("mail.example.com. IN A 203.0.113.10");
         dto.ZoneText.ShouldContain("; 10.113.0.203.in-addr.arpa. IN PTR mail.example.com.");
+    }
+
+    [Fact]
+    public async Task The_handler_refuses_a_null_request()
+    {
+        await Should.ThrowAsync<ArgumentNullException>(() => RunAsync(null!));
+    }
+}
+
+/// <summary>
+/// The delivery test's IPC surface. The only command in this subsystem that sends mail to a
+/// third party, so what it asks for and what it passes through both matter more than usual.
+/// </summary>
+public sealed class DeliveryTestCommandTests
+{
+    private static readonly EmailAddress Sender = EmailAddress.Parse("postmaster@example.com");
+    private static readonly EmailAddress Recipient = EmailAddress.Parse("someone@example.net");
+
+    private static DeliveryTestOutcome Outcome()
+    {
+        DeliveryTranscript transcript = new();
+
+        transcript.Record(DeliveryStage.Connect, DateTimeOffset.UnixEpoch, detail: "mx.example.net:25");
+        transcript.Record(
+            DeliveryStage.Ehlo,
+            DateTimeOffset.UnixEpoch.AddMilliseconds(20),
+            "EHLO mail.example.com",
+            new SmtpReply(250, null, "mx.example.net") { ContinuationLines = ["SIZE 1024"] });
+        transcript.Record(
+            DeliveryStage.EndOfData,
+            DateTimeOffset.UnixEpoch.AddMilliseconds(500),
+            reply: new SmtpReply(250, "2.0.0", "Queued as ABC"));
+
+        MxHost host = new("mx.example.net", 10);
+
+        return new DeliveryTestOutcome(
+            DeliveryOutcome.Delivered,
+            Sender,
+            Recipient,
+            "<abc@mail.example.com>",
+            [host, new MxHost("backup.example.net", 20)],
+            [new DeliveryTestAttempt(host, DeliveryOutcome.Delivered, transcript, null)],
+            null);
+    }
+
+    private static async Task<DeliveryTestDto> RunAsync(
+        RunDeliveryTestCommand command,
+        ScriptedDeliveryTestService? tests = null)
+    {
+        IRequestHandler<RunDeliveryTestCommand, DeliveryTestDto> handler =
+            new RunDeliveryTestCommandHandler(tests ?? new ScriptedDeliveryTestService(Outcome()));
+
+        return await handler.Handle(command, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// <b>ManageQueue, not ViewServerState.</b> Its siblings only look; this one makes the server
+    /// send mail to a third party, and that is the power ManageQueue already governs — retrying a
+    /// queued item causes a send in the same way. Asking for the dashboard permission would let
+    /// anyone who can read a graph send mail from the operator's domain.
+    /// </summary>
+    [Fact]
+    public void The_command_asks_for_the_permission_that_governs_sending()
+    {
+        new RunDeliveryTestCommand { Sender = "a@example.com", Recipient = "b@example.net" }
+            .RequiredPermission.ShouldBe(AdminPermission.ManageQueue);
+    }
+
+    [Fact]
+    public async Task The_addresses_and_the_tls_policy_reach_the_service_unchanged()
+    {
+        ScriptedDeliveryTestService tests = new(Outcome());
+
+        await RunAsync(
+            new RunDeliveryTestCommand
+            {
+                Sender = "postmaster@example.com",
+                Recipient = "someone@example.net",
+                RequireTls = true,
+            },
+            tests);
+
+        tests.Request.ShouldNotBeNull();
+        tests.Request!.Sender.Value.ShouldBe("postmaster@example.com");
+        tests.Request.Recipient.Value.ShouldBe("someone@example.net");
+        tests.Request.RequireTls.ShouldBeTrue();
+    }
+
+    /// <summary>
+    /// Off unless asked for: the ordinary question is "does my mail arrive", and answering it
+    /// with a policy failure the operator did not ask for would hide the answer.
+    /// </summary>
+    [Fact]
+    public async Task Tls_is_not_required_unless_the_operator_asks()
+    {
+        ScriptedDeliveryTestService tests = new(Outcome());
+
+        await RunAsync(
+            new RunDeliveryTestCommand { Sender = "a@example.com", Recipient = "b@example.net" },
+            tests);
+
+        tests.Request.ShouldNotBeNull().RequireTls.ShouldBeFalse();
+    }
+
+    /// <summary>
+    /// Both addresses are checked before anything is sent, and both failures come back together
+    /// rather than one round of the loop at a time.
+    /// </summary>
+    [Fact]
+    public async Task Both_bad_addresses_are_reported_together_and_nothing_is_sent()
+    {
+        ScriptedDeliveryTestService tests = new(Outcome());
+
+        ValidationFailedException failure = await Should.ThrowAsync<ValidationFailedException>(
+            () => RunAsync(
+                new RunDeliveryTestCommand { Sender = "not an address", Recipient = "nor this" },
+                tests));
+
+        failure.Errors.Keys.ShouldBe(["Sender", "Recipient"], ignoreOrder: true);
+        tests.Request.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task The_dto_carries_the_candidates_and_the_attempt()
+    {
+        DeliveryTestDto dto = await RunAsync(
+            new RunDeliveryTestCommand { Sender = "a@example.com", Recipient = "b@example.net" });
+
+        dto.Outcome.ShouldBe("Delivered");
+        dto.MessageId.ShouldBe("<abc@mail.example.com>");
+        dto.Candidates.Select(c => c.Hostname).ShouldBe(["mx.example.net", "backup.example.net"]);
+        dto.LatencyMilliseconds.ShouldBe(500);
+
+        DeliveryAttemptDto attempt = dto.Attempts.ShouldHaveSingleItem();
+
+        attempt.Hostname.ShouldBe("mx.example.net");
+        attempt.Capabilities.ShouldBe(["SIZE 1024"]);
+        attempt.FinalReplyCode.ShouldBe(250);
+        attempt.LastStage.ShouldBe("EndOfData");
+    }
+
+    /// <summary>
+    /// The steps cross the wire structured as well as rendered: a UI wants to colour a failed
+    /// stage, and a support ticket wants the text. Rebuilding one from the other at every caller
+    /// would be two renderings that drift.
+    /// </summary>
+    [Fact]
+    public async Task The_dto_carries_both_the_steps_and_the_rendered_transcript()
+    {
+        DeliveryTestDto dto = await RunAsync(
+            new RunDeliveryTestCommand { Sender = "a@example.com", Recipient = "b@example.net" });
+
+        DeliveryAttemptDto attempt = dto.Attempts.ShouldHaveSingleItem();
+
+        attempt.Steps.Select(s => s.Stage).ShouldBe(["Connect", "Ehlo", "EndOfData"]);
+        attempt.Steps[1].Sent.ShouldBe("EHLO mail.example.com");
+        attempt.Steps[1].ReplyContinuations.ShouldBe(["SIZE 1024"]);
+        attempt.Steps[^1].ElapsedMilliseconds.ShouldBe(500);
+
+        attempt.Transcript.ShouldContain("> EHLO mail.example.com");
+        attempt.Transcript.ShouldContain("< 250 Queued as ABC");
     }
 
     [Fact]

@@ -1,7 +1,12 @@
 # Deliverability
 
-> **Status: in progress — Milestone 11.** The check model and the score are built and
-> tested; the checks that feed them are landing one group at a time.
+> **Status: built and tested — Milestone 11. The milestone's exit criterion is not met.**
+>
+> Every check, the score, the report, the header analyser, the DNS wizard and the delivery test
+> are implemented, covered by tests, and reachable over IPC. The criterion is "full readiness
+> report **renders** with evidence for every check", and nothing renders it yet: the
+> administration application has a view per subsystem and no deliverability view among them.
+> What is written down here is what the IPC layer will hand that view.
 
 ## What this product promises, and what it does not
 
@@ -299,19 +304,29 @@ RRset does.
 
 ## Reaching it
 
-Three IPC commands, all read-only:
+Four IPC commands, three of them read-only:
 
-| Command | Request | Returns |
-|---|---|---|
-| `Deliverability.Report` | domain, plus three run switches | `DeliverabilityReportDto` |
-| `Deliverability.AnalyseHeaders` | pasted headers, optional client address | `HeaderAnalysisDto` |
-| `Deliverability.DnsPlan` | domain, plus three operator choices | `DnsPlanDto` |
+| Command | Request | Returns | Permission |
+|---|---|---|---|
+| `Deliverability.Report` | domain, plus three run switches | `DeliverabilityReportDto` | `ViewServerState` |
+| `Deliverability.AnalyseHeaders` | pasted headers, optional client address | `HeaderAnalysisDto` | `ViewServerState` |
+| `Deliverability.DnsPlan` | domain, plus three operator choices | `DnsPlanDto` | `ViewServerState` |
+| `Deliverability.DeliveryTest` | sender, recipient, TLS policy | `DeliveryTestDto` | `ManageQueue` |
 
-All require `ViewServerState`, not `ReadMessageContent`. The report reads this server's own
-configuration and public DNS; the analyser reads headers the operator pasted into the request;
-the plan reads configuration and the DKIM key's **public** half. None opens a stored message,
-which is the boundary `ReadMessageContent` exists to guard — and the moment one did, it would
-need that permission instead.
+The first three ask for `ViewServerState`, not `ReadMessageContent`. The report reads this
+server's own configuration and public DNS; the analyser reads headers the operator pasted into
+the request; the plan reads configuration and the DKIM key's **public** half. None opens a
+stored message, which is the boundary `ReadMessageContent` exists to guard — and the moment one
+did, it would need that permission instead.
+
+**The delivery test asks for `ManageQueue`, and that difference is the point.** It is the only
+command here that makes this server send mail to a third party, and `ManageQueue` is the
+permission that already governs exactly that power — retrying a queued item causes a send in the
+same way. Asking for `ViewServerState` would let anyone who can read a graph send mail from the
+operator's domain; adding a permission of its own would claim this is a power the existing set
+does not already cover, and it is. It is also the only one of the four that is a *command*
+rather than a query: calling it a query would put an outward-facing side effect behind the word
+"read".
 
 **The run switches are on the request rather than in configuration** because they decide what
 this server does to other people: whether it opens an SMTP connection to itself, fetches a policy
@@ -467,6 +482,62 @@ capabilities the session had.
 **Elapsed is measured from the first step, not from the previous one.** What an operator is
 looking for is which single stage took the time, and a greylisting receiver that pauses before
 its `RCPT TO` reply shows up as a jump in the column.
+
+### What it sends, and to whom
+
+**One message, one recipient, no repeat count.** Anything that took a list would be a tool for
+sending unsolicited mail from an authenticated session, and the feature's value is one
+conversation an operator reads.
+
+**The sender is required, never defaulted.** It decides which domain's SPF, DKIM and DMARC the
+receiver is about to judge, so a default would test a domain nobody asked about.
+
+**The message is real and says what it is.** The receiver has to apply its ordinary rules to it,
+so anything malformed would be judged as malformed rather than as this server's configuration.
+It carries `Auto-Submitted: auto-generated` (RFC 3834), without which a receiver running an
+out-of-office responder answers it — and the answer goes to whatever address the test was sent
+from, which may be a mailbox nobody reads, or a loop. The body says who sent it, why, and that
+no reply is needed, because whoever receives it may be on a mailbox the operator does not
+control and an unexplained message is indistinguishable from a probe by a stranger.
+
+**`TLS required` is off unless asked for.** The ordinary question is "does my mail arrive", and
+answering it with a policy failure the operator did not ask for would hide the answer.
+
+### How it delivers
+
+**Every step is the one the queue takes**: the same resolver for MX, the same ordering policy,
+the same client, the same port from the same options. What differs is that this one carries a
+transcript and is not driven by a queue item.
+
+**It tries the exchangers in turn and stops at the first that accepts**, exactly as the queue
+does. Reporting only the primary would tell an operator whose primary is briefly down that their
+mail cannot be delivered, when the queue would have used the secondary without comment. Every
+attempt keeps its own transcript, because the conversation worth reading is usually the one that
+failed.
+
+**Nothing retries.** The queue's job is to keep trying; this one's is to say what happened once,
+so a temporary refusal is reported as one rather than hidden behind a backoff nobody is
+watching.
+
+**A failed MX lookup is classified the way the queue classifies it** — a `SERVFAIL` deferred, an
+`NXDOMAIN` or a null MX bounced. Conflating them is how a domain that does not exist earns an
+infinite retry loop, or a resolver blip bounces good mail. See `docs/DNS.md`'s failure-semantics
+table.
+
+**The test message is stored, sent and then removed**, in that order. The client streams the
+body from the store during `DATA`, so removing it any earlier would fail the send on a message
+this server composed itself; leaving it behind would grow the store by one message per run. The
+removal happens even when the send throws, and a store that cannot delete it logs a warning
+rather than replacing a good answer with an unrelated error.
+
+**There is no queue latency, because there is no queue.** The test connects and sends: the value
+is seeing the conversation now, and a queued test would answer "submitted" and leave the
+operator watching a queue.
+
+**The DKIM selector reported is the one that actually signed**, read from the transcript's body
+step. Only the signer knows which key it used, and a caller that looked the domain's active key
+up for itself would be a second source for one fact — disagreeing the moment a rotation landed
+between the two reads.
 
 ## Header analyser
 
