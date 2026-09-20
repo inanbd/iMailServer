@@ -281,6 +281,7 @@ public static class DependencyInjection
             provider.GetRequiredService<IOptions<MailServerOptions>>().Value.Storage.DataRoot));
         services.TryAddScoped<OperationsProbe>();
         services.TryAddScoped<IDeliverabilityReportService, DeliverabilityReportService>();
+        services.TryAddScoped<IHeaderAnalysisService, HeaderAnalysisService>();
         services.TryAddScoped<IOutboundDeliveryClient, OutboundSmtpClient>();
         services.TryAddScoped<IDsnComposer, PlainTextDsnComposer>();
 

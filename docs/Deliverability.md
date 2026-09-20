@@ -352,6 +352,44 @@ consumer.
 | `List-Unsubscribe` | Present, and whether it offers the one-click POST RFC 8058 defines |
 | `DKIM-Signature` | `DkimSignatureTags` — selector, `d=`, algorithm, signed headers, `t=`/`x=` |
 
+### What it establishes for itself
+
+`HeaderAnalysisService` takes what the block says and checks it against DNS.
+
+**SPF is checked for the `Return-Path` domain, never `From`.** RFC 7208 §2.2: "Without explicit
+approval of the publishing ADMD, checking other identities against SPF version 1 records is NOT
+RECOMMENDED because there are cases that are known to give incorrect results. For example, almost
+all mailing lists rewrite the 'MAIL FROM' identity […] but some do not change any other
+identities in the message." Checking `From` is that mistake, and it is the one that makes every
+forwarded message look forged.
+
+**The address SPF is checked against is the operator's if they supply one, and the topmost trace
+hop's otherwise — flagged either way.** An address from the message's own trace was written by a
+host the operator may not control. Using it beats refusing to evaluate; presenting the result
+without saying where it came from would let a forged trace header produce a confident pass.
+
+**DKIM is never reported as passing.** RFC 6376 §3.7 hashes the body and a paste has none, so a
+signature over a modified body looks identical here. What is established is whether the selector's
+key is published and usable and whether its `d=` aligns — whether the signature *could* have
+helped. The field is called `DkimCouldAlign` for that reason, and a signature whose key is not
+published cannot align however well its `d=` matches: alignment is about which domain is
+authenticated, and a signature nobody can verify authenticates none.
+
+**Alignment follows the record's own `adkim=`/`aspf=`.** RFC 7489 §3.1.1: "In relaxed mode, the
+Organizational Domains of both the [DKIM]-authenticated signing domain […] and that of the
+RFC5322.From domain must be equal[…] In strict mode, only an exact match between both of the
+Fully Qualified Domain Names (FQDNs) is considered to produce Identifier Alignment." The policy
+itself is discovered at the From domain, per §6.6.3 — looking it up at the Return-Path would
+find nothing for most bulk mail, and the analyser would then apply relaxed defaults to a domain
+that asked for strict.
+
+**When neither leg can align, the analyser says DMARC cannot pass.** That is the most useful
+sentence the tool produces for "why was my mail refused": both legs are ruled out, so no amount
+of receiver-side variation changes the answer.
+
+A temporary lookup failure is never reported as a missing record. Telling an operator to
+republish something that is already there wastes their time and leaves the real fault unfound.
+
 The `Received` chain's per-hop delays exist because RFC 5321 §4.4 asks for them: "As the Internet
 grows, comparability of Received header fields is important for detecting problems, especially
 slow relays." Every delay is a difference between two independent clocks, so a negative one is
