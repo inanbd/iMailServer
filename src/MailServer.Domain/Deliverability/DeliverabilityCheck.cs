@@ -209,4 +209,25 @@ public sealed record DeliverabilityCheck(
 
     /// <summary>Whether this check produced a fact about the configuration.</summary>
     public bool IsJudged => Outcome != DeliverabilityOutcome.Inconclusive;
+
+    /// <summary>
+    /// Whether this check is something the operator has to act on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b><see cref="DeliverabilityOutcome.Inconclusive"/> counts as needing attention, and that
+    /// is the whole reason this lives here rather than in whatever is drawing the list.</b> An
+    /// inconclusive check means the check could not be made — a resolver that did not answer, a
+    /// certificate that could not be fetched — so it is not evidence that anything is correct.
+    /// A reader that grouped it with the passes would be reporting a configuration as verified
+    /// that nobody verified, which is the one mistake a readiness report must not make.
+    /// </para>
+    /// <para>
+    /// Note it is deliberately <i>not</i> the inverse of <see cref="IsJudged"/>, and the two
+    /// answer different questions: <see cref="IsJudged"/> asks whether the score may count this
+    /// check, and this asks whether a human should look at it. An inconclusive check is excluded
+    /// from the first and included in the second.
+    /// </para>
+    /// </remarks>
+    public bool NeedsAttention => Outcome != DeliverabilityOutcome.Pass;
 }

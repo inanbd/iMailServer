@@ -113,6 +113,7 @@ public partial class App : System.Windows.Application
         builder.Services.AddTransient<AuditLogViewModel>();
         builder.Services.AddTransient<SecurityEventsViewModel>();
         builder.Services.AddTransient<SmtpViewModel>();
+        builder.Services.AddTransient<DeliverabilityViewModel>();
 
         return builder.Build();
     }

@@ -1,0 +1,336 @@
+<UserControl x:Class="MailServer.Admin.Views.Pages.DeliverabilityView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="clr-namespace:MailServer.Admin.ViewModels"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=vm:DeliverabilityViewModel}">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="16">
+        <StackPanel>
+
+            <TextBlock Text="Deliverability" Style="{StaticResource PageTitle}" />
+            <TextBlock Style="{StaticResource Caption}"
+                       Text="Whether this server is technically ready to have its mail accepted, with the evidence for every check." />
+
+            <Border Style="{StaticResource ErrorBanner}" Margin="0,12,0,0"
+                    Visibility="{Binding ErrorMessage, Converter={StaticResource StringToVisibility}}">
+                <TextBlock Text="{Binding ErrorMessage}" TextWrapping="Wrap" />
+            </Border>
+
+            <!--
+                Said on the page rather than only in the documentation, because it is the
+                question every operator asks of a number like this and the honest answer is
+                unpopular. docs/Deliverability.md: reputation is earned over weeks from a stable
+                IP, and no score shortcuts it.
+            -->
+            <Border Background="#FFF3F3F3" BorderBrush="#FFD0D0D0" BorderThickness="1"
+                    Padding="10" Margin="0,12,0,0">
+                <TextBlock TextWrapping="Wrap"
+                           Text="This reports readiness, never inbox placement. A perfect score means every technical prerequisite is in place; it does not mean Gmail or Microsoft 365 will trust a new IP address, because reputation is earned over weeks of well-behaved sending and no software can shortcut it." />
+            </Border>
+
+            <!-- ==== The readiness report ==================================================== -->
+
+            <TextBlock Text="Readiness report" Style="{StaticResource SectionHeader}" Margin="0,20,0,0" />
+
+            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                <TextBlock Text="Domain" VerticalAlignment="Center" Width="70" />
+                <TextBox Text="{Binding Domain, UpdateSourceTrigger=PropertyChanged}" Width="260" />
+                <Button Content="Run report" Command="{Binding RunReportCommand}"
+                        Margin="8,0,0,0" IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+            </StackPanel>
+
+            <!--
+                The verdict leads and the score follows it, deliberately. The readiness verdict
+                is the worst outcome present; the score is arithmetic over weights. A comfortable
+                number shown as the headline beside a failing check is the report that gets
+                skimmed, and then the operator wonders why their mail is refused.
+            -->
+            <Border BorderBrush="#FFD0D0D0" BorderThickness="1" Padding="12" Margin="0,12,0,0"
+                    Visibility="{Binding HasReport, Converter={StaticResource BoolToVisibility}}">
+                <StackPanel>
+                    <TextBlock Text="{Binding Report.Readiness}" FontSize="22" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding Report.Summary}" TextWrapping="Wrap" Margin="0,4,0,0" />
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,6,0,0">
+                        <Run Text="Produced" />
+                        <Run Text="{Binding Report.ProducedAt, Mode=OneWay}" />
+                    </TextBlock>
+
+                    <TextBlock Text="How the score was reached" FontWeight="SemiBold" Margin="0,12,0,4" />
+                    <DataGrid ItemsSource="{Binding Categories}" AutoGenerateColumns="False"
+                              IsReadOnly="True" HeadersVisibility="Column" MaxHeight="200">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="*" />
+                            <DataGridTextColumn Header="Weight" Binding="{Binding Weight}" Width="80" />
+                            <!--
+                                Judged is shown beside Earned because they are different
+                                questions: Earned out of Weight hides that a category may have
+                                been only half measurable, which is the difference between
+                                "scored badly" and "could not be checked".
+                            -->
+                            <DataGridTextColumn Header="Judged" Binding="{Binding Judged}" Width="80" />
+                            <DataGridTextColumn Header="Earned" Binding="{Binding Earned}" Width="80" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </StackPanel>
+            </Border>
+
+            <Border Background="#FFE8F5E9" BorderBrush="{StaticResource State.Healthy}"
+                    BorderThickness="1" Padding="10" Margin="0,12,0,0"
+                    Visibility="{Binding IsClean, Converter={StaticResource BoolToVisibility}}">
+                <TextBlock TextWrapping="Wrap"
+                           Text="Every check passed. That covers the technical prerequisites only - see the note above about reputation." />
+            </Border>
+
+            <!--
+                Problems first, with the full list below. Hiding the passes entirely would make
+                "checked and fine" indistinguishable from "never ran", so both grids exist.
+            -->
+            <TextBlock Text="Needs attention" Style="{StaticResource SectionHeader}" Margin="0,16,0,0"
+                       Visibility="{Binding HasProblems, Converter={StaticResource BoolToVisibility}}" />
+
+            <DataGrid ItemsSource="{Binding Problems}" SelectedItem="{Binding SelectedCheck}"
+                      AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column"
+                      MaxHeight="260" Margin="0,4,0,0"
+                      Visibility="{Binding HasProblems, Converter={StaticResource BoolToVisibility}}">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Outcome" Binding="{Binding Outcome}" Width="110" />
+                    <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="110" />
+                    <DataGridTextColumn Header="Check" Binding="{Binding Title}" Width="*" />
+                    <DataGridTextColumn Header="What to do" Binding="{Binding Remedy}" Width="2*" />
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <TextBlock Text="Every check" Style="{StaticResource SectionHeader}" Margin="0,16,0,0"
+                       Visibility="{Binding HasReport, Converter={StaticResource BoolToVisibility}}" />
+
+            <DataGrid ItemsSource="{Binding Checks}" SelectedItem="{Binding SelectedCheck}"
+                      AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column"
+                      MaxHeight="300" Margin="0,4,0,0"
+                      Visibility="{Binding HasReport, Converter={StaticResource BoolToVisibility}}">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Outcome" Binding="{Binding Outcome}" Width="110" />
+                    <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="110" />
+                    <DataGridTextColumn Header="Check" Binding="{Binding Title}" Width="*" />
+                    <DataGridTextColumn Header="Weight" Binding="{Binding Weight}" Width="70" />
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <!--
+                The evidence panel is the reason this page exists. docs/Deliverability.md: "A
+                bare 94/100 that cannot be explained is useless to an operator trying to fix the
+                missing six." So the record found, the value expected, the resolver that answered
+                and the TTL it gave are all shown for whichever check is selected.
+            -->
+            <Border BorderBrush="#FFD0D0D0" BorderThickness="1" Padding="12" Margin="0,12,0,0"
+                    Visibility="{Binding SelectedCheck, Converter={StaticResource NullToVisibility}}">
+                <StackPanel>
+                    <TextBlock Text="{Binding SelectedCheck.Title}" FontWeight="SemiBold" FontSize="15" />
+                    <TextBlock Text="{Binding SelectedCheck.Detail}" TextWrapping="Wrap" Margin="0,6,0,0" />
+
+                    <Grid Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="130" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Expected" Style="{StaticResource Caption}" />
+                        <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding SelectedCheck.Expected}"
+                                   TextWrapping="Wrap" />
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Found" Style="{StaticResource Caption}" />
+                        <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding SelectedCheck.Found}"
+                                   TextWrapping="Wrap" />
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Source" Style="{StaticResource Caption}" />
+                        <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding SelectedCheck.Source}"
+                                   TextWrapping="Wrap" />
+
+                        <TextBlock Grid.Row="3" Grid.Column="0" Text="TTL (seconds)" Style="{StaticResource Caption}" />
+                        <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding SelectedCheck.TtlSeconds}" />
+
+                        <TextBlock Grid.Row="4" Grid.Column="0" Text="What to do" Style="{StaticResource Caption}" />
+                        <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding SelectedCheck.Remedy}"
+                                   TextWrapping="Wrap" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- ==== The DNS plan =========================================================== -->
+
+            <TextBlock Text="DNS records" Style="{StaticResource SectionHeader}" Margin="0,24,0,0" />
+            <TextBlock Style="{StaticResource Caption}"
+                       Text="What to publish for the domain above. The two report addresses are choices rather than settings: somebody has to read the mailbox they name, so nothing is filled in by default." />
+
+            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                <TextBlock Text="DMARC reports to" VerticalAlignment="Center" Width="130" />
+                <TextBox Text="{Binding DmarcReportAddress, UpdateSourceTrigger=PropertyChanged}" Width="260" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                <TextBlock Text="TLS reports to" VerticalAlignment="Center" Width="130" />
+                <TextBox Text="{Binding TlsReportAddress, UpdateSourceTrigger=PropertyChanged}" Width="260" />
+                <Button Content="Build plan" Command="{Binding BuildPlanCommand}" Margin="8,0,0,0"
+                        IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+            </StackPanel>
+
+            <DataGrid ItemsSource="{Binding PlannedRecords}" AutoGenerateColumns="False"
+                      IsReadOnly="True" HeadersVisibility="Column" MaxHeight="280" Margin="0,10,0,0"
+                      Visibility="{Binding HasPlan, Converter={StaticResource BoolToVisibility}}">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="*" />
+                    <DataGridTextColumn Header="Type" Binding="{Binding Kind}" Width="70" />
+                    <DataGridTextColumn Header="Purpose" Binding="{Binding Purpose}" Width="2*" />
+                    <DataGridCheckBoxColumn Header="Optional" Binding="{Binding IsOptional}" Width="80" />
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <TextBlock Text="Before you publish" FontWeight="SemiBold" Margin="0,12,0,4"
+                       Visibility="{Binding HasPlan, Converter={StaticResource BoolToVisibility}}" />
+            <ItemsControl ItemsSource="{Binding PlanCaveats}"
+                          Visibility="{Binding HasPlan, Converter={StaticResource BoolToVisibility}}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <TextBlock TextWrapping="Wrap" Margin="0,0,0,6">
+                            <Run Text="{Binding Subject, Mode=OneWay}" FontWeight="SemiBold" />
+                            <Run Text="—" />
+                            <Run Text="{Binding Text, Mode=OneWay}" />
+                        </TextBlock>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <TextBlock Text="As zone file text" FontWeight="SemiBold" Margin="0,12,0,4"
+                       Visibility="{Binding HasPlan, Converter={StaticResource BoolToVisibility}}" />
+            <TextBox Text="{Binding PlanZoneText, Mode=OneWay}" IsReadOnly="True"
+                     FontFamily="Consolas" AcceptsReturn="True" TextWrapping="NoWrap"
+                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                     Height="160"
+                     Visibility="{Binding HasPlan, Converter={StaticResource BoolToVisibility}}" />
+
+            <!-- ==== The header analyser ==================================================== -->
+
+            <TextBlock Text="Header analyser" Style="{StaticResource SectionHeader}" Margin="0,24,0,0" />
+            <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
+                       Text="Paste a message's raw headers. SPF, DKIM and DMARC are re-evaluated here with this server's own lookups - never read from what the message claims about itself, because a header a sender wrote is a claim rather than a finding." />
+
+            <TextBox Text="{Binding PastedHeaders, UpdateSourceTrigger=PropertyChanged}"
+                     AcceptsReturn="True" TextWrapping="NoWrap" FontFamily="Consolas"
+                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                     Height="140" Margin="0,8,0,0" />
+
+            <Button Content="Analyse" Command="{Binding AnalyseHeadersCommand}"
+                    HorizontalAlignment="Left" Margin="0,8,0,0"
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}" />
+
+            <Border BorderBrush="#FFD0D0D0" BorderThickness="1" Padding="12" Margin="0,10,0,0"
+                    Visibility="{Binding HasAnalysis, Converter={StaticResource BoolToVisibility}}">
+                <StackPanel>
+                    <TextBlock Text="{Binding Analysis.Summary}" TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
+            <!-- ==== The delivery test ====================================================== -->
+
+            <TextBlock Text="Delivery test" Style="{StaticResource SectionHeader}" Margin="0,24,0,0" />
+
+            <!--
+                The one action on this page that leaves the building, and it is called out as
+                such. Everything above reads; this sends real mail from this server's IP, which
+                is why the service puts it behind the write-level mail-flow permission.
+            -->
+            <Border Background="#FFFFF4CE" BorderBrush="{StaticResource State.Warning}"
+                    BorderThickness="1" Padding="10" Margin="0,8,0,0">
+                <TextBlock TextWrapping="Wrap"
+                           Text="This sends a real message from this server to the address below. Send it to a mailbox you own - ideally at Gmail or Microsoft 365 - and then read the authentication results that provider recorded in the delivered message. That verdict is the receiver's own, and it is worth more than every check on this page." />
+            </Border>
+
+            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                <TextBlock Text="From" VerticalAlignment="Center" Width="70" />
+                <TextBox Text="{Binding DeliveryTestFrom, UpdateSourceTrigger=PropertyChanged}" Width="260" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                <TextBlock Text="To" VerticalAlignment="Center" Width="70" />
+                <TextBox Text="{Binding DeliveryTestTo, UpdateSourceTrigger=PropertyChanged}" Width="260" />
+                <Button Content="Send test message" Command="{Binding RunDeliveryTestCommand}"
+                        Margin="8,0,0,0" IsEnabled="{Binding CanRunDeliveryTest}" />
+            </StackPanel>
+
+            <Border BorderBrush="#FFD0D0D0" BorderThickness="1" Padding="12" Margin="0,10,0,0"
+                    Visibility="{Binding HasDeliveryTest, Converter={StaticResource BoolToVisibility}}">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="150" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Accepted" Style="{StaticResource Caption}" />
+                        <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding DeliveryTest.Succeeded}" />
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Exchanger" Style="{StaticResource Caption}" />
+                        <TextBlock Grid.Row="1" Grid.Column="1" TextWrapping="Wrap">
+                            <Run Text="{Binding DeliveryTest.MxHost, Mode=OneWay}" />
+                            <Run Text="at" />
+                            <Run Text="{Binding DeliveryTest.RemoteAddress, Mode=OneWay}" />
+                        </TextBlock>
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="TLS" Style="{StaticResource Caption}" />
+                        <TextBlock Grid.Row="2" Grid.Column="1" TextWrapping="Wrap">
+                            <Run Text="{Binding DeliveryTest.TlsProtocol, Mode=OneWay}" />
+                            <Run Text="{Binding DeliveryTest.TlsCipher, Mode=OneWay}" />
+                        </TextBlock>
+
+                        <TextBlock Grid.Row="3" Grid.Column="0" Text="Peer certificate" Style="{StaticResource Caption}" />
+                        <TextBlock Grid.Row="3" Grid.Column="1" TextWrapping="Wrap"
+                                   Text="{Binding DeliveryTest.PeerCertificateSubject}" />
+
+                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Signed with" Style="{StaticResource Caption}" />
+                        <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding DeliveryTest.DkimSelector}" />
+
+                        <TextBlock Grid.Row="5" Grid.Column="0" Text="Final reply" Style="{StaticResource Caption}" />
+                        <TextBlock Grid.Row="5" Grid.Column="1" TextWrapping="Wrap">
+                            <Run Text="{Binding DeliveryTest.ReplyCode, Mode=OneWay}" />
+                            <Run Text="{Binding DeliveryTest.ReplyText, Mode=OneWay}" />
+                        </TextBlock>
+
+                        <TextBlock Grid.Row="6" Grid.Column="0" Text="Message-ID" Style="{StaticResource Caption}" />
+                        <TextBlock Grid.Row="6" Grid.Column="1" TextWrapping="Wrap"
+                                   Text="{Binding DeliveryTest.MessageId}" />
+                    </Grid>
+
+                    <!--
+                        Commands and replies only - never the message. That is what makes a
+                        transcript safe to paste into a support ticket.
+                    -->
+                    <TextBlock Text="Conversation" FontWeight="SemiBold" Margin="0,12,0,4" />
+                    <ItemsControl ItemsSource="{Binding DeliveryTest.Transcript}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding}" FontFamily="Consolas" FontSize="12" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

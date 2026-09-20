@@ -173,14 +173,13 @@ public sealed partial class ShellViewModel : ObservableObject, IDisposable
         new("Rate Limits", "Security", typeof(DashboardViewModel), IsAvailable: false),
         new("Anti-Spam", "Security", typeof(DashboardViewModel), IsAvailable: false),
 
-        new("Overview", "Deliverability", typeof(DashboardViewModel), IsAvailable: false),
-        new("DNS", "Deliverability", typeof(DashboardViewModel), IsAvailable: false),
-        new("SPF", "Deliverability", typeof(DashboardViewModel), IsAvailable: false),
-        new("DKIM", "Deliverability", typeof(DashboardViewModel), IsAvailable: false),
-        new("DMARC", "Deliverability", typeof(DashboardViewModel), IsAvailable: false),
-        new("MTA-STS", "Deliverability", typeof(DashboardViewModel), IsAvailable: false),
-        new("TLS-RPT", "Deliverability", typeof(DashboardViewModel), IsAvailable: false),
-        new("Delivery Test", "Deliverability", typeof(DashboardViewModel), IsAvailable: false),
+        // One entry rather than the eight this group was sketched with. SPF, DKIM, DMARC,
+        // MTA-STS and TLS-RPT are checks inside the readiness report, not pages: giving each a
+        // nav entry that opened the same report would be five ways to reach one thing, and
+        // splitting the report five ways would scatter the evidence an operator is comparing.
+        // The report, the DNS plan, the header analyser and the delivery test share a page
+        // because they share a subject - the domain named at the top of it.
+        new("Readiness", "Deliverability", typeof(DeliverabilityViewModel)),
 
         new("Statistics", "Monitoring", typeof(DashboardViewModel), IsAvailable: false),
         new("SMTP Sessions", "Monitoring", typeof(DashboardViewModel), IsAvailable: false),

@@ -35,6 +35,19 @@ public sealed record DeliverabilityCheckDto
 
     /// <summary>What to do about it. Null only when the outcome is a pass or was not measured.</summary>
     public string? Remedy { get; init; }
+
+    /// <summary>
+    /// Whether an operator has to act on this check.
+    /// </summary>
+    /// <remarks>
+    /// Carried rather than derived from <see cref="Outcome"/> by whatever is drawing the list,
+    /// because the rule has one subtlety that a reader re-deriving it tends to get wrong:
+    /// <c>Inconclusive</c> needs attention. It means the check could not be made, so it is not
+    /// evidence that anything is correct, and grouping it with the passes would report a
+    /// configuration as verified that nobody verified. See
+    /// <c>DeliverabilityCheck.NeedsAttention</c>, which is where the rule lives.
+    /// </remarks>
+    public required bool NeedsAttention { get; init; }
 }
 
 /// <summary>One category's contribution to the score.</summary>

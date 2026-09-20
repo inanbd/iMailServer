@@ -64,10 +64,19 @@ public sealed partial class DeliverabilityViewModel(
     /// The checks that are not passing, which is what an operator actually came to see.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// A separate collection rather than a filter toggle, so the page can show the problems
     /// first without the operator having to discover a control. The full list stays available:
     /// hiding the passes entirely would make it impossible to tell "checked and fine" from
-    /// "never ran", and <c>Inconclusive</c> is a real outcome with its own meaning.
+    /// "never ran".
+    /// </para>
+    /// <para>
+    /// <b>Which checks belong here is the server's answer, not this page's.</b> The subtlety is
+    /// that <c>Inconclusive</c> needs attention — a check that could not be made is not evidence
+    /// that anything is correct — and a UI re-deriving that from the outcome string would be a
+    /// second copy of a rule that is easy to get wrong. <c>DeliverabilityCheck.NeedsAttention</c>
+    /// decides, and the DTO carries the answer.
+    /// </para>
     /// </remarks>
     public ObservableCollection<DeliverabilityCheckDto> Problems { get; } = [];
 
@@ -154,7 +163,7 @@ public sealed partial class DeliverabilityViewModel(
 
             Replace(Checks, report.Checks);
             Replace(Categories, report.Categories);
-            Replace(Problems, report.Checks.Where(IsProblem));
+            Replace(Problems, report.Checks.Where(c => c.NeedsAttention));
 
             SelectedCheck = Problems.FirstOrDefault() ?? Checks.FirstOrDefault();
 
@@ -206,19 +215,6 @@ public sealed partial class DeliverabilityViewModel(
             OnPropertyChanged(nameof(HasDeliveryTest));
         },
         reloadAfter: false);
-
-    /// <summary>
-    /// Whether a check is something the operator has to act on.
-    /// </summary>
-    /// <remarks>
-    /// <b><c>Inconclusive</c> counts.</b> It means the check could not reach an answer — a
-    /// resolver that did not respond, a certificate that could not be fetched — and treating it
-    /// as a pass would report a configuration as verified that nobody verified. It is shown
-    /// alongside the failures and warnings with its own outcome intact, so the difference stays
-    /// visible.
-    /// </remarks>
-    private static bool IsProblem(DeliverabilityCheckDto check) =>
-        !string.Equals(check.Outcome, "Pass", StringComparison.OrdinalIgnoreCase);
 
     private static string? Blank(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();

@@ -104,5 +104,6 @@ internal sealed class GetDeliverabilityReportQueryHandler(IDeliverabilityReportS
             ? (int)Math.Clamp(ttl.TotalSeconds, 0, int.MaxValue)
             : null,
         Remedy = check.Remedy,
+        NeedsAttention = check.NeedsAttention,
     };
 }

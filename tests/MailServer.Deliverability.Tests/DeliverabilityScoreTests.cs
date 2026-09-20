@@ -350,4 +350,50 @@ public sealed class DeliverabilityScoreTests
         report.Checks.Select(c => c.Id).ShouldBe(["first", "second"]);
         report.ProducedAt.ShouldBe(Now);
     }
+
+    // ---- What an operator has to look at ------------------------------------------------------
+
+    /// <summary>
+    /// The readiness report's list of problems is built from this, so the boundary matters: a
+    /// pass is the only outcome that does not need a human.
+    /// </summary>
+    [Theory]
+    [InlineData(DeliverabilityOutcome.Pass, false)]
+    [InlineData(DeliverabilityOutcome.Warn, true)]
+    [InlineData(DeliverabilityOutcome.Fail, true)]
+    [InlineData(DeliverabilityOutcome.Inconclusive, true)]
+    public void Only_a_pass_needs_no_attention(DeliverabilityOutcome outcome, bool expected) =>
+        Check(DeliverabilityCategory.Identity, outcome).NeedsAttention.ShouldBe(expected);
+
+    /// <summary>
+    /// The one that is easy to get wrong, and the reason this rule lives in the domain rather
+    /// than in whatever is drawing the list. An inconclusive check could not be made, so it is
+    /// not evidence that anything is correct: grouping it with the passes would report a
+    /// configuration as verified that nobody verified.
+    /// </summary>
+    [Fact]
+    public void An_inconclusive_check_needs_attention_although_it_is_not_scored()
+    {
+        DeliverabilityCheck check = Check(
+            DeliverabilityCategory.Identity,
+            DeliverabilityOutcome.Inconclusive);
+
+        check.NeedsAttention.ShouldBeTrue();
+
+        // Not the inverse of IsJudged - the two answer different questions. IsJudged asks
+        // whether the score may count this check; NeedsAttention asks whether a human should
+        // look at it. An inconclusive check is excluded from the first and included in the
+        // second, and a refactor that collapsed them would silently hide resolver failures.
+        check.IsJudged.ShouldBeFalse();
+    }
+
+    /// <summary>A passing check is both judged and not worth an operator's time.</summary>
+    [Fact]
+    public void A_passing_check_is_judged_and_needs_nothing()
+    {
+        DeliverabilityCheck check = Check(DeliverabilityCategory.Identity, DeliverabilityOutcome.Pass);
+
+        check.IsJudged.ShouldBeTrue();
+        check.NeedsAttention.ShouldBeFalse();
+    }
 }
