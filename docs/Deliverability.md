@@ -297,6 +297,32 @@ the record was published, when nobody connects the two. The probe walks up the t
 case that catches people. Absence of CAA is a pass: §4 makes a restriction exist only where an
 RRset does.
 
+## Reaching it
+
+Two IPC commands, both read-only:
+
+| Command | Request | Returns |
+|---|---|---|
+| `Deliverability.Report` | domain, plus three run switches | `DeliverabilityReportDto` |
+| `Deliverability.AnalyseHeaders` | pasted headers, optional client address | `HeaderAnalysisDto` |
+
+Both require `ViewServerState`, not `ReadMessageContent`. The report reads this server's own
+configuration and public DNS; the analyser reads headers the operator pasted into the request.
+Neither opens a stored message, which is the boundary `ReadMessageContent` exists to guard — and
+the moment either did, it would need that permission instead.
+
+**The run switches are on the request rather than in configuration** because they decide what
+this server does to other people: whether it opens an SMTP connection to itself, fetches a policy
+from a host the domain under test names, and queries third-party blocklists. An operator who
+wants none of that can ask for none of it.
+
+`HeaderAnalysisDto` has no DKIM pass or fail field, only `DkimCouldAlign`, and a test asserts the
+shape rather than a value — a property called anything like `DkimPass` would be a promise a
+header block cannot keep, and the name is the safeguard. Each signature is paired with its own
+selector's lookup by name, never by position: a signature that fails to parse is never looked up,
+so a positional join would attribute the next signature's key state to it and report a published
+key for a selector that has none.
+
 ## Delivery test
 
 Sends a real message to an address you nominate and records the whole conversation:

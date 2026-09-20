@@ -6,6 +6,8 @@ using MailServer.Application.Domains.Dtos;
 using MailServer.Application.Acme.Commands;
 using MailServer.Application.Acme.Dtos;
 using MailServer.Application.Acme.Queries;
+using MailServer.Application.Deliverability.Dtos;
+using MailServer.Application.Deliverability.Queries;
 using MailServer.Application.Certificates.Commands;
 using MailServer.Application.Certificates.Dtos;
 using MailServer.Application.Certificates.Queries;
@@ -241,5 +243,15 @@ public sealed class IpcCommandRegistry
 
         // ---- Monitoring ---------------------------------------------------------------------
         new("Monitoring.Dashboard", typeof(GetDashboardQuery), typeof(DashboardDto)),
+
+        // ---- Deliverability -------------------------------------------------------------------
+        //
+        // Both read-only, and both ViewServerState rather than ReadMessageContent: the report
+        // reads this server's own configuration and public DNS, and the analyser reads headers
+        // the operator pasted into the request. Neither opens a stored message, which is the
+        // boundary ReadMessageContent exists to guard - and the moment either did, it would need
+        // that permission instead.
+        new("Deliverability.Report", typeof(GetDeliverabilityReportQuery), typeof(DeliverabilityReportDto)),
+        new("Deliverability.AnalyseHeaders", typeof(AnalyseHeadersQuery), typeof(HeaderAnalysisDto)),
     ];
 }
