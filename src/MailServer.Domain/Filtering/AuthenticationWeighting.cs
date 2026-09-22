@@ -2,7 +2,14 @@ using MailServer.Domain.Enums;
 
 namespace MailServer.Domain.Filtering;
 
-/// <summary>What the authentication mechanisms concluded about one message.</summary>
+/// <summary>
+/// What the authentication mechanisms concluded about one message.
+/// </summary>
+/// <remarks>
+/// Named for the message to keep it apart from <c>Deliverability.AuthenticationFacts</c>, which
+/// is about a domain's published records rather than a message's results — the readiness report
+/// asks "is this domain set up correctly", and this asks "did this message check out".
+/// </remarks>
 /// <param name="Spf">The SPF result, or null when SPF was not evaluated.</param>
 /// <param name="Dkim">The best result among the message's signatures, or null when it had none.</param>
 /// <param name="Dmarc">The DMARC result, or null when no policy applied.</param>
@@ -11,7 +18,7 @@ namespace MailServer.Domain.Filtering;
 /// did about it. A <c>p=quarantine</c> domain whose mail fails is the publisher telling us what
 /// they want; it is weighted because they are the authority on their own mail.
 /// </param>
-public sealed record AuthenticationFacts(
+public sealed record MessageAuthenticationFacts(
     SpfResult? Spf,
     DkimVerificationResult? Dkim,
     DmarcResult? Dmarc,
@@ -96,7 +103,7 @@ public static class AuthenticationWeighting
     public const double SpfSoftFailScore = 0.5;
 
     /// <summary>Weighs the results.</summary>
-    public static IReadOnlyList<FilterSignal> Evaluate(AuthenticationFacts facts)
+    public static IReadOnlyList<FilterSignal> Evaluate(MessageAuthenticationFacts facts)
     {
         ArgumentNullException.ThrowIfNull(facts);
 

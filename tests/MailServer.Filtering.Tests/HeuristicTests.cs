@@ -195,7 +195,7 @@ public sealed class AuthenticationWeightingTests
         DkimVerificationResult? dkim = null,
         DmarcResult? dmarc = null,
         DmarcPolicy? disposition = null) =>
-        AuthenticationWeighting.Evaluate(new AuthenticationFacts(spf, dkim, dmarc, disposition));
+        AuthenticationWeighting.Evaluate(new MessageAuthenticationFacts(spf, dkim, dmarc, disposition));
 
     [Fact]
     public void Says_nothing_when_nothing_was_evaluated() => Weigh().ShouldBeEmpty();
