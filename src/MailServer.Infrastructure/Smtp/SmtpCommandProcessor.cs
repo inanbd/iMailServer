@@ -89,6 +89,7 @@ public sealed class SmtpCommandProcessor
     private readonly SubmissionPolicy _submissionPolicy;
     private readonly ISubmissionRateLimiter? _rateLimiter;
     private readonly SpfEvaluator? _spfEvaluator;
+    private readonly SmtpAbusePolicy _abusePolicy;
 
     /// <summary>The mechanism mid-exchange, or null when no AUTH is in flight.</summary>
     /// <remarks>
@@ -106,7 +107,8 @@ public sealed class SmtpCommandProcessor
         IMailboxAuthenticator? authenticator = null,
         SubmissionPolicy? submissionPolicy = null,
         ISubmissionRateLimiter? rateLimiter = null,
-        SpfEvaluator? spfEvaluator = null)
+        SpfEvaluator? spfEvaluator = null,
+        SmtpAbusePolicy? abusePolicy = null)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(options);
@@ -119,6 +121,7 @@ public sealed class SmtpCommandProcessor
         _directory = directory;
         _relayPolicy = relayPolicy;
         _logger = logger;
+        _abusePolicy = abusePolicy ?? SmtpAbusePolicy.Default;
 
         // Optional so a test can build a processor for the many paths that never authenticate.
         // A session that reaches AUTH without one is refused, not crashed - see Authenticate.
@@ -155,15 +158,17 @@ public sealed class SmtpCommandProcessor
         // sequencing bug that is not there.
         if (command.Verb == SmtpVerb.Unknown)
         {
-            return new SmtpCommandResult(SmtpReplies.CommandNotRecognised(Describe(command)));
+            return Account(
+                command, new SmtpCommandResult(SmtpReplies.CommandNotRecognised(Describe(command))));
         }
 
         if (!SmtpStateMachine.IsInSequence(_session.State, command.Verb))
         {
-            return new SmtpCommandResult(SmtpReplies.BadSequence(OutOfSequenceReason(command.Verb)));
+            return Account(
+                command, new SmtpCommandResult(SmtpReplies.BadSequence(OutOfSequenceReason(command.Verb))));
         }
 
-        return command.Verb switch
+        SmtpCommandResult result = command.Verb switch
         {
             SmtpVerb.Ehlo => Greet(command.Argument, extended: true),
             SmtpVerb.Helo => Greet(command.Argument, extended: false),
@@ -180,6 +185,65 @@ public sealed class SmtpCommandProcessor
             SmtpVerb.Help => new SmtpCommandResult(Help()),
             _ => new SmtpCommandResult(SmtpReplies.CommandNotRecognised(Describe(command))),
         };
+
+        return Account(command, result);
+    }
+
+    /// <summary>
+    /// Counts what this server refused, and closes the connection when a session stops being a
+    /// mail delivery and becomes something else.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>In one place, on the way out, rather than at each refusal.</b> Every path that returns
+    /// a 4xx or 5xx is counted without anybody remembering to count it, so a refusal added to
+    /// this processor later is bounded from the day it is written. A counter sprinkled across
+    /// twenty return statements is a counter that is missing from the twenty-first.
+    /// </para>
+    /// <para>
+    /// <b>It only ever escalates.</b> A result that already asked to close — the AUTH limit's
+    /// own, or <c>QUIT</c> — keeps its action. Overwriting it with <c>Continue</c> would turn
+    /// this accounting into a way to stay connected past a limit that had already fired.
+    /// </para>
+    /// </remarks>
+    private SmtpCommandResult Account(SmtpCommand command, SmtpCommandResult result)
+    {
+        // 2xx accepted it and 3xx asked for more; neither is a refusal. QUIT's 221 is a 2xx.
+        if (result.Reply.Code < 400)
+        {
+            return result;
+        }
+
+        if (command.Verb == SmtpVerb.RcptTo)
+        {
+            // Counted as a recipient refusal rather than a command one, because that is the
+            // number a directory harvest drives up. Counting it as both would let a harvester
+            // trip the (higher) command limit first and be told a different story.
+            _session.RecordRejectedRecipient();
+        }
+        else
+        {
+            _session.RecordRejectedCommand();
+        }
+
+        SmtpAbuseVerdict verdict = _abusePolicy.Evaluate(
+            new SmtpSessionConduct(_session.RejectedCommands, _session.RejectedRecipients));
+
+        if (verdict == SmtpAbuseVerdict.Continue || result.Action != SmtpSessionAction.Continue)
+        {
+            return result;
+        }
+
+        _logger.LogWarning(
+            "Closing the SMTP session from {RemoteAddress}: {Verdict} ({Commands} refused commands, {Recipients} refused recipients).",
+            _session.RemoteAddress.Value,
+            verdict,
+            _session.RejectedCommands,
+            _session.RejectedRecipients);
+
+        return new SmtpCommandResult(
+            new SmtpReply(421, "4.7.0", SmtpAbusePolicy.DiagnosticFor(verdict)),
+            SmtpSessionAction.CloseAfterReply);
     }
 
     // ---- Greeting ---------------------------------------------------------------------------

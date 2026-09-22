@@ -725,6 +725,27 @@ public sealed class LimitsOptions
     [Range(1, 100_000)]
     public int MaxConcurrentConnectionsTotal { get; set; } = 500;
 
+    /// <summary>
+    /// Connections one address may open in an hour, across every SMTP listener.
+    /// </summary>
+    /// <remarks>
+    /// The complement to <see cref="MaxConcurrentConnectionsPerIp"/>, which a peer that
+    /// connects, delivers and disconnects never reaches however fast it repeats. Set from what
+    /// a real exchanger does: a large provider working through a backlog opens connections in
+    /// bursts, so this sits well above that and far below a delivery run of junk.
+    /// </remarks>
+    public int MaxInboundConnectionsPerHour { get; set; } = 120;
+
+    /// <summary>
+    /// Messages one address may deliver in an hour, across every SMTP listener.
+    /// </summary>
+    /// <remarks>
+    /// Higher than the connection allowance because a well-behaved exchanger reuses one
+    /// connection for several messages, and penalising it for that would push senders towards
+    /// the more expensive pattern.
+    /// </remarks>
+    public int MaxInboundMessagesPerHour { get; set; } = 600;
+
     [Range(10, 3_600)]
     public int SmtpCommandTimeoutSeconds { get; set; } = 300;
 

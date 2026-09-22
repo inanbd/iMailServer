@@ -100,6 +100,31 @@ public sealed class SmtpSessionContext
     /// </remarks>
     public int FailedAuthenticationAttempts { get; private set; }
 
+    /// <summary>
+    /// Commands this server refused on this connection - bad syntax, bad sequence, unknown verb.
+    /// </summary>
+    /// <remarks>
+    /// <b>Not cleared by any reset</b>, for the same reason as
+    /// <see cref="FailedAuthenticationAttempts"/>: it is this server's own accounting rather
+    /// than knowledge obtained from the client, and clearing it would make <c>RSET</c> a way to
+    /// buy another round of whatever the client was doing.
+    /// </remarks>
+    public int RejectedCommands { get; private set; }
+
+    /// <summary>
+    /// Recipients this server refused on this connection.
+    /// </summary>
+    /// <remarks>
+    /// The directory-harvest counter. A peer that tries a thousand addresses to learn which
+    /// three exist is not sending mail, and the shape of that is a great many <c>RCPT TO</c>
+    /// refusals on one connection. Counted across transactions, because a harvester issuing
+    /// <c>RSET</c> between guesses is still harvesting.
+    /// </remarks>
+    public int RejectedRecipients { get; private set; }
+
+    /// <summary>Messages accepted to completion on this connection.</summary>
+    public int MessagesAccepted { get; private set; }
+
     // ---- Protocol position -----------------------------------------------------------------
 
     /// <summary>Where the session has got to.</summary>
@@ -229,6 +254,12 @@ public sealed class SmtpSessionContext
     /// <summary>Records a failed authentication attempt.</summary>
     public int RecordFailedAuthentication() => ++FailedAuthenticationAttempts;
 
+    /// <summary>Records a command this server refused, and returns the running total.</summary>
+    public int RecordRejectedCommand() => ++RejectedCommands;
+
+    /// <summary>Records a recipient this server refused, and returns the running total.</summary>
+    public int RecordRejectedRecipient() => ++RejectedRecipients;
+
     /// <summary>Opens a transaction with an accepted sender.</summary>
     /// <param name="reversePath">The sender, or null for the null reverse path.</param>
     /// <param name="declaredSize">The sender's <c>SIZE=</c> claim, if any.</param>
@@ -299,6 +330,8 @@ public sealed class SmtpSessionContext
     /// <summary>Ends a message and clears the envelope, ready for another on the same connection.</summary>
     public void CompleteMessage()
     {
+        MessagesAccepted++;
+
         ResetTransaction();
         State = SmtpStateMachine.AfterMessage();
     }

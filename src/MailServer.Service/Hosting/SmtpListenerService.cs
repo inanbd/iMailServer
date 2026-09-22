@@ -1,8 +1,10 @@
 using System.Net.Sockets;
 using System.Net;
 using MailServer.Application.Abstractions.Monitoring;
+using MailServer.Application.Abstractions.Time;
 using MailServer.Domain.Enums;
 using MailServer.Infrastructure.Configuration;
+using MailServer.Infrastructure.Filtering;
 using MailServer.Infrastructure.Smtp;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -65,9 +67,41 @@ public sealed class SmtpListenerService : ResilientBackgroundService
             options.Limits.MaxConcurrentConnectionsTotal,
             options.Limits.MaxConcurrentConnectionsPerIp);
 
+        // One limiter across every SMTP listener, because an address past its allowance is past
+        // it whichever port it knocks on. A limiter per listener would give a flood one
+        // allowance per port this server happens to have enabled.
+        InboundRateLimiter rateLimiter = new(
+            _services.GetRequiredService<IClock>(),
+            new InboundRateLimits(
+                options.Limits.MaxInboundConnectionsPerHour,
+                options.Limits.MaxInboundMessagesPerHour,
+                TimeSpan.FromHours(1)));
+
         try
         {
-            StartListeners(options, limiter, stoppingToken);
+            StartListeners(options, limiter, rateLimiter, stoppingToken);
+
+            using PeriodicTimer sweep = new(SweepInterval);
+
+            _ = Task.Run(
+                async () =>
+                {
+                    // Swept on a timer rather than inline, so a connection never pays for every
+                    // address the server has heard from. Failing to sweep costs memory that the
+                    // limiter's own cap already bounds, so this loop swallows and carries on.
+                    while (await sweep.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
+                    {
+                        try
+                        {
+                            rateLimiter.Sweep();
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            Logger.LogWarning(ex, "Sweeping the inbound rate limiter failed.");
+                        }
+                    }
+                },
+                stoppingToken);
 
             if (_listeners.Count == 0)
             {
@@ -95,9 +129,17 @@ public sealed class SmtpListenerService : ResilientBackgroundService
         }
     }
 
+    /// <summary>How often expired rate-limit counters are dropped.</summary>
+    /// <remarks>
+    /// Comfortably inside the one-hour window, so a counter is not kept for long after it stops
+    /// mattering, and far apart enough that the sweep's cost is irrelevant.
+    /// </remarks>
+    private static TimeSpan SweepInterval => TimeSpan.FromMinutes(10);
+
     private void StartListeners(
         MailServerOptions options,
         SmtpConnectionLimiter limiter,
+        InboundRateLimiter rateLimiter,
         CancellationToken stoppingToken)
     {
         foreach ((SmtpListenerRole role, SmtpListenerOptions listener, CertificatePurpose purpose) in
@@ -120,7 +162,8 @@ public sealed class SmtpListenerService : ResilientBackgroundService
                     BuildConnectionOptions(options, role, purpose),
                     limiter,
                     _services.GetRequiredService<IServiceScopeFactory>(),
-                    _services.GetRequiredService<ILogger<SmtpListener>>());
+                    _services.GetRequiredService<ILogger<SmtpListener>>(),
+                    rateLimiter);
 
                 // Start before adding: a listener that throws on bind must not end up in the
                 // list, where shutdown would then try to stop something that never started.

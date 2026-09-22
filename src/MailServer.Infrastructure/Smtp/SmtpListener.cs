@@ -5,6 +5,7 @@ using MailServer.Application.Abstractions.Security;
 using MailServer.Domain.Enums;
 using MailServer.Domain.Smtp;
 using MailServer.Domain.ValueObjects;
+using MailServer.Infrastructure.Filtering;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -30,7 +31,8 @@ public sealed class SmtpListener(
     SmtpConnectionOptions options,
     SmtpConnectionLimiter limiter,
     IServiceScopeFactory scopeFactory,
-    ILogger<SmtpListener> logger) : IAsyncDisposable
+    ILogger<SmtpListener> logger,
+    InboundRateLimiter? rateLimiter = null) : IAsyncDisposable
 {
     private readonly TcpListener _listener = new(endpoint);
     private readonly CancellationTokenSource _stopping = new();
@@ -150,6 +152,15 @@ public sealed class SmtpListener(
             return;
         }
 
+        // The rate limit is checked before a slot is taken, so a peer past its allowance never
+        // occupies one. Checking after would let a flood hold the concurrency cap's worth of
+        // slots while being refused, which is the denial of service the limit exists to stop.
+        if (rateLimiter?.RecordConnection(remoteAddress) is InboundRateOutcome.TooManyConnections)
+        {
+            _ = RefuseAsync(client, SmtpAdmission.AddressBusy, remoteAddress, rateLimited: true);
+            return;
+        }
+
         SmtpAdmission admission = limiter.TryAdmit(remoteAddress, out ISmtpConnectionSlot? slot);
 
         if (admission != SmtpAdmission.Admitted)
@@ -263,18 +274,34 @@ public sealed class SmtpListener(
         }
     }
 
-    private async Task RefuseAsync(TcpClient client, SmtpAdmission admission, IpAddressValue remoteAddress)
+    private async Task RefuseAsync(
+        TcpClient client,
+        SmtpAdmission admission,
+        IpAddressValue remoteAddress,
+        bool rateLimited = false)
     {
+        // The same 421 either way. The peer is told to come back later and not which limit it
+        // reached — a sender that learns it is rate-limited rather than merely finding the
+        // server busy learns how to pace itself around the limit.
         SmtpReply reply = SmtpReplies.TooManyConnections();
 
-        logger.LogWarning(
-            "Refusing SMTP connection from {RemoteAddress}: {Reason} (total {Total}/{MaxTotal}, this address {ForAddress}/{MaxPerAddress}).",
-            remoteAddress.Value,
-            admission,
-            limiter.CurrentTotal,
-            limiter.MaxTotal,
-            limiter.CurrentFor(remoteAddress),
-            limiter.MaxPerAddress);
+        if (rateLimited)
+        {
+            logger.LogWarning(
+                "Refusing SMTP connection from {RemoteAddress}: it is past its connection rate allowance.",
+                remoteAddress.Value);
+        }
+        else
+        {
+            logger.LogWarning(
+                "Refusing SMTP connection from {RemoteAddress}: {Reason} (total {Total}/{MaxTotal}, this address {ForAddress}/{MaxPerAddress}).",
+                remoteAddress.Value,
+                admission,
+                limiter.CurrentTotal,
+                limiter.MaxTotal,
+                limiter.CurrentFor(remoteAddress),
+                limiter.MaxPerAddress);
+        }
 
         try
         {

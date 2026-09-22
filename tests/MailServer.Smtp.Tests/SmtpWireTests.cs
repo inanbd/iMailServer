@@ -672,4 +672,126 @@ public sealed class SmtpWireTests : IAsyncLifetime
         (await peer.ReadReplyAsync()).ShouldStartWith("250");
         (await peer.ReadReplyAsync()).ShouldStartWith("221");
     }
+
+    // ---------------------------------------------------------------------------------------
+    // Session-level abuse limits. Milestone 12's resource-exhaustion half, on the wire: a peer
+    // that legitimately holds one connection can still do unbounded work inside it, and the
+    // concurrency cap says nothing about that.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// A dictionary walk is a great many refused RCPT TOs on one connection. RFC 5321 §4.3.2
+    /// permits closing for it, and closing is the whole defence: it costs the peer a
+    /// reconnection and costs this server nothing.
+    /// </summary>
+    [Fact]
+    public async Task A_session_walking_the_directory_is_closed()
+    {
+        await using Peer peer = await ConnectAsync();
+
+        await peer.ReadReplyAsync();
+        await peer.SendAsync("EHLO relay.example.net");
+        await peer.SendAsync("MAIL FROM:<sender@example.net>");
+
+        string last = string.Empty;
+
+        for (int i = 0; i < SmtpAbusePolicy.Default.MaxRejectedRecipients; i++)
+        {
+            last = await peer.SendAsync($"RCPT TO:<nobody{i}@elsewhere.example>");
+        }
+
+        last.ShouldStartWith("421");
+        last.ShouldContain("Too many errors");
+    }
+
+    /// <summary>
+    /// And the message must not say which limit was reached: a harvester who learns how many
+    /// guesses they get per connection knows exactly how to pace around the limit.
+    /// </summary>
+    [Fact]
+    public async Task The_refusal_does_not_say_which_limit_was_reached()
+    {
+        await using Peer peer = await ConnectAsync();
+
+        await peer.ReadReplyAsync();
+        await peer.SendAsync("EHLO relay.example.net");
+        await peer.SendAsync("MAIL FROM:<sender@example.net>");
+
+        string last = string.Empty;
+
+        for (int i = 0; i < SmtpAbusePolicy.Default.MaxRejectedRecipients; i++)
+        {
+            last = await peer.SendAsync($"RCPT TO:<nobody{i}@elsewhere.example>");
+        }
+
+        last.ShouldNotContain("recipient");
+        last.ShouldNotContain(SmtpAbusePolicy.Default.MaxRejectedRecipients.ToString());
+    }
+
+    [Fact]
+    public async Task A_session_issuing_bad_commands_is_closed()
+    {
+        await using Peer peer = await ConnectAsync();
+
+        await peer.ReadReplyAsync();
+        await peer.SendAsync("EHLO relay.example.net");
+
+        string last = string.Empty;
+
+        for (int i = 0; i < SmtpAbusePolicy.Default.MaxRejectedCommands; i++)
+        {
+            last = await peer.SendAsync("NONSENSE");
+        }
+
+        last.ShouldStartWith("421");
+    }
+
+    /// <summary>
+    /// RSET must not buy another round. The counters are this server's own accounting rather
+    /// than knowledge obtained from the client, so nothing the client can ask for clears them.
+    /// </summary>
+    [Fact]
+    public async Task Resetting_does_not_clear_the_abuse_counters()
+    {
+        await using Peer peer = await ConnectAsync();
+
+        await peer.ReadReplyAsync();
+        await peer.SendAsync("EHLO relay.example.net");
+
+        string last = string.Empty;
+
+        for (int i = 0; i < SmtpAbusePolicy.Default.MaxRejectedCommands; i++)
+        {
+            last = await peer.SendAsync("NONSENSE");
+            await peer.SendAsync("RSET");
+        }
+
+        last.ShouldStartWith("421");
+    }
+
+    /// <summary>
+    /// A working conversation must be nowhere near any of these limits, or the limits would
+    /// drop real senders — and a limit that does that is a limit an operator turns off.
+    /// </summary>
+    [Fact]
+    public async Task An_ordinary_conversation_never_approaches_the_limits()
+    {
+        await using Peer peer = await ConnectAsync();
+
+        await peer.ReadReplyAsync();
+        await peer.SendAsync("EHLO relay.example.net");
+
+        for (int i = 0; i < 5; i++)
+        {
+            (await peer.SendAsync("MAIL FROM:<sender@example.net>")).ShouldStartWith("250");
+            (await peer.SendAsync("RCPT TO:<user@example.com>")).ShouldStartWith("250");
+            (await peer.SendAsync("DATA")).ShouldStartWith("354");
+
+            await peer.WriteRawAsync("Subject: one\r\n\r\nBody.\r\n.\r\n");
+
+            (await peer.ReadReplyAsync()).ShouldStartWith("250");
+        }
+
+        (await peer.SendAsync("QUIT")).ShouldStartWith("221");
+    }
 }
