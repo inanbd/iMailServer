@@ -58,6 +58,8 @@ public sealed class MailServerOptions
     public DeliverabilityOptions Deliverability { get; set; } = new();
 
     public OutboundOptions Outbound { get; set; } = new();
+
+    public FilteringOptions Filtering { get; set; } = new();
 }
 
 /// <summary>The IMAP listeners.</summary>
@@ -138,6 +140,65 @@ public sealed class Pop3Options
 /// a diagnostic tool that had its own idea of any of those would be diagnosing a server nobody
 /// is running.
 /// </remarks>
+/// <summary>
+/// The anti-spam filter, the malware seam and the quarantine.
+/// </summary>
+/// <remarks>
+/// <b>On by default, and refusing mail by default is not.</b> The checks that run without an
+/// operator configuring anything — authentication weighting, the structural heuristics, the
+/// attachment names — are cheap, need no network and no corpus, and their worst outcome is a
+/// message in a junk folder. Rejection is the one action that leaves nothing behind, and
+/// <c>FilterPolicy.RejectThreshold</c> defaults to infinity so no score reaches it.
+/// </remarks>
+public sealed class FilteringOptions
+{
+    /// <summary>Whether the filter runs at all.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>At or above this score, a message goes to the recipient's <c>\Junk</c> folder.</summary>
+    public double JunkThreshold { get; set; } = 5.0;
+
+    /// <summary>At or above this score, a message is held for an operator.</summary>
+    public double QuarantineThreshold { get; set; } = 10.0;
+
+    /// <summary>
+    /// At or above this score, a message is refused at SMTP time. Zero or negative means never.
+    /// </summary>
+    /// <remarks>
+    /// <b>Never, by default.</b> Heuristic scoring is wrong often enough that a server which
+    /// discards mail on it will eventually discard something that mattered, and nobody will
+    /// know, because a rejection leaves nothing to find. An operator who wants that trade can
+    /// have it; they should have to ask.
+    /// </remarks>
+    public double RejectThreshold { get; set; }
+
+    /// <summary>How long a held message is kept before a sweep may remove it.</summary>
+    /// <remarks>
+    /// Fixed onto each row at hold time, so shortening this does not retroactively expire what
+    /// is already held.
+    /// </remarks>
+    public int QuarantineRetentionDays { get; set; } = 30;
+
+    /// <summary>Whether to consult the configured block lists about the sending host.</summary>
+    /// <remarks>
+    /// Separate from <c>Deliverability:BlockLists</c> being populated, because the readiness
+    /// report's use of those lists is a handful of queries an operator asked for, and this one
+    /// is a query per inbound message. An operator should be able to have the first without the
+    /// second.
+    /// </remarks>
+    public bool UseBlockLists { get; set; }
+
+    /// <summary>
+    /// Whether a message a malware scanner could not examine is held rather than delivered.
+    /// </summary>
+    /// <remarks>
+    /// Off, because a mail server that stops delivering when an optional component dies is the
+    /// worse surprise. An operator who requires scanning can turn it on, and should expect a
+    /// scanner outage to fill the quarantine.
+    /// </remarks>
+    public bool FailClosedOnScannerError { get; set; }
+}
+
 public sealed class DeliverabilityOptions
 {
     /// <summary>

@@ -19,7 +19,11 @@ using MailServer.Infrastructure.Certificates;
 using MailServer.Infrastructure.Configuration;
 using MailServer.Infrastructure.Dkim;
 using MailServer.Infrastructure.Dmarc;
+using MailServer.Application.Abstractions.Filtering;
+using MailServer.Domain.Filtering;
 using MailServer.Infrastructure.Deliverability;
+using MailServer.Infrastructure.Filtering;
+using MailServer.Infrastructure.Filtering.Checks;
 using MailServer.Infrastructure.Dns;
 using MailServer.Infrastructure.Monitoring;
 using MailServer.Infrastructure.Smtp.Outbound;
@@ -298,6 +302,9 @@ public static class DependencyInjection
             provider.GetRequiredService<IOptions<MailServerOptions>>().Value.Storage.DataRoot));
         services.TryAddScoped<OperationsProbe>();
         services.TryAddScoped<IDeliverabilityReportService, DeliverabilityReportService>();
+
+        AddFiltering(services);
+
         services.TryAddScoped<IHeaderAnalysisService, HeaderAnalysisService>();
         services.TryAddScoped<IDnsPlanService, DnsPlanService>();
         services.TryAddScoped<IDeliveryTestService, DeliveryTestService>();
@@ -326,6 +333,89 @@ public static class DependencyInjection
         services.TryAddScoped<DmarcEvaluator>();
 
         return services;
+    }
+
+    /// <summary>
+    /// Registers milestone 12's filter, its checks and the quarantine.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The checks are registered as an ordered set and resolved as one.</b> The pipeline
+    /// takes <c>IEnumerable&lt;ISpamCheck&gt;</c>, so adding a check is a registration rather
+    /// than an edit to the pipeline — and the order they are registered in is the order the
+    /// signals appear in a verdict an operator reads.
+    /// </para>
+    /// <para>
+    /// <b>The block-list check is registered only when asked for.</b> Its cost is a DNS query
+    /// per inbound message against volunteer-run infrastructure, which is a different
+    /// proposition from the readiness report's handful of queries an operator asked for by
+    /// name. <c>FilteringOptions.UseBlockLists</c> is that ask.
+    /// </para>
+    /// </remarks>
+    private static void AddFiltering(IServiceCollection services)
+    {
+        // No engine ships with this product; the seam does. See IMalwareScanner on why a
+        // bundled scanner would be a signature database this project could not keep current.
+        services.TryAddSingleton<IMalwareScanner, DisabledMalwareScanner>();
+
+        // The default blocked set, which is not configurable from appsettings: an operator who
+        // shortened it would be turning off the cheapest real protection in the product, and
+        // the one who needs to is better served by editing the list in source than by a
+        // setting that invites it.
+        services.TryAddSingleton(AttachmentPolicy.Default);
+
+        services.TryAddSingleton(provider =>
+        {
+            FilteringOptions filtering = provider
+                .GetRequiredService<IOptions<MailServerOptions>>().Value.Filtering;
+
+            return new FilterPolicy
+            {
+                JunkThreshold = filtering.JunkThreshold,
+                QuarantineThreshold = filtering.QuarantineThreshold,
+
+                // Zero or negative means never, and becomes the infinity that no score reaches.
+                // Treating zero as "reject everything" would turn an unset option into the most
+                // destructive setting the product has.
+                RejectThreshold = filtering.RejectThreshold > 0
+                    ? filtering.RejectThreshold
+                    : double.PositiveInfinity,
+            };
+        });
+
+        services.TryAddScoped<IQuarantineRepository, QuarantineRepository>();
+
+        // Scoped, because the block-list check's provider and the malware check's scanner may
+        // both hold per-request state, and because the pipeline is resolved per delivery.
+        services.TryAddScoped<IMessageFilter>(provider =>
+        {
+            MailServerOptions options = provider.GetRequiredService<IOptions<MailServerOptions>>().Value;
+
+            List<ISpamCheck> checks =
+            [
+                new AuthenticationSpamCheck(),
+                new HeaderHeuristicSpamCheck(),
+                new AttachmentSpamCheck(provider.GetRequiredService<AttachmentPolicy>()),
+                new MalwareSpamCheck(
+                    provider.GetRequiredService<IMalwareScanner>(),
+                    provider.GetRequiredService<ILogger<MalwareSpamCheck>>(),
+                    options.Filtering.FailClosedOnScannerError),
+            ];
+
+            if (options.Filtering.UseBlockLists)
+            {
+                checks.Add(new BlockListSpamCheck(
+                    provider.GetRequiredService<IReputationProvider>(),
+                    provider.GetRequiredService<ILogger<BlockListSpamCheck>>()));
+            }
+
+            return new MessageFilterPipeline(
+                checks,
+                provider.GetRequiredService<IMessageStore>(),
+                provider.GetRequiredService<FilterPolicy>(),
+                provider.GetRequiredService<ILogger<MessageFilterPipeline>>(),
+                options.Filtering.Enabled);
+        });
     }
 
     /// <summary>

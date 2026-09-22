@@ -40,13 +40,27 @@ public sealed record RecipientOutcome(
     string? Diagnostic = null);
 
 /// <summary>
-/// A message's DMARC policy requested outright rejection, and no recipient was delivered to or
-/// queued. RFC 7489's <c>p=reject</c>, after <c>pct=</c> sampling selected this message for
-/// enforcement.
+/// The message was refused outright, and no recipient was delivered to or queued.
 /// </summary>
-/// <param name="PolicyDomain">The domain the enforced DMARC policy was published at.</param>
+/// <remarks>
+/// <para>
+/// Two things reach this. RFC 7489's <c>p=reject</c>, once <c>pct=</c> sampling has selected
+/// the message — the publishing domain's own instruction. And the filter, when an operator has
+/// deliberately given it a finite reject threshold, which is off by default (see
+/// <c>FilterPolicy.RejectThreshold</c> on why).
+/// </para>
+/// <para>
+/// <b>Rejecting is the only outcome that leaves nothing behind.</b> That is its value — a
+/// legitimate sender this server got wrong finds out immediately, which junking and
+/// quarantining cannot offer — and its cost, which is why so little reaches it.
+/// </para>
+/// </remarks>
 /// <param name="Diagnostic">Human-readable detail, for the SMTP reply and for logs.</param>
-public sealed record DmarcRejection(DomainName PolicyDomain, string Diagnostic);
+/// <param name="PolicyDomain">
+/// The domain whose published DMARC policy asked for this, when that is what refused it. Null
+/// when the filter did: a score is this server's own conclusion and names no publisher.
+/// </param>
+public sealed record DeliveryRejection(string Diagnostic, DomainName? PolicyDomain = null);
 
 /// <summary>The result of delivering one message.</summary>
 /// <param name="MessageId">The stored message.</param>
@@ -54,9 +68,9 @@ public sealed record DmarcRejection(DomainName PolicyDomain, string Diagnostic);
 /// One entry per envelope recipient, in the order they were accepted. Empty when
 /// <paramref name="Rejection"/> is set — a DMARC-rejected message is delivered to nobody.
 /// </param>
-/// <param name="Rejection">Set when the message was refused outright; see <see cref="DmarcRejection"/>.</param>
+/// <param name="Rejection">Set when the message was refused outright; see <see cref="DeliveryRejection"/>.</param>
 public sealed record DeliveryResult(
-    StoredMessageId MessageId, IReadOnlyList<RecipientOutcome> Outcomes, DmarcRejection? Rejection = null)
+    StoredMessageId MessageId, IReadOnlyList<RecipientOutcome> Outcomes, DeliveryRejection? Rejection = null)
 {
     /// <summary>Total mailboxes the message reached.</summary>
     public int TotalDeliveries => Outcomes.Sum(o => o.MailboxesDelivered);

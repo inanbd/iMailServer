@@ -1557,7 +1557,7 @@ message.
 | 9 | Mail Authentication | DKIM signing/verification, SPF, DMARC, alignment, ARC groundwork | Google/Microsoft report SPF+DKIM+DMARC pass |
 | 10 | IMAP (+ optional POP3) | Full mailbox access, UID correctness, IDLE, SPECIAL-USE | Thunderbird/Outlook/Apple Mail interoperate without mail loss |
 | 11 | Deliverability | DNS wizard, PTR/FCrDNS testing, MTA-STS, TLS-RPT, certificate health, delivery test, header analyzer, reputation interfaces, scoring | Full readiness report renders with evidence for every check |
-| 12 | Filtering | Rate limits, anti-spam pipeline, quarantine, malware interface, attachment policy | Quarantine round-trip; resource-exhaustion tests green |
+| 12 | Filtering | Rate limits, anti-spam pipeline, quarantine, malware interface, attachment policy | Quarantine round-trip; resource-exhaustion tests green — **met in code**: the round trip passes against a real database and a real delivery, and the resource-exhaustion tests cover the filter's concurrency cap, the rate limiter's address table, a 400-deep MIME nest and a directory harvest on the wire. Never run against live mail; see `docs/Filtering.md` |
 | 13 | Production Hardening | WiX installer, firewall automation, service recovery, backup/restore, SQLite→SQL Server migration, monitoring, full docs | Clean install → first-run wizard → sending and receiving production mail |
 
 Milestone 1 is the subject of the accompanying implementation.

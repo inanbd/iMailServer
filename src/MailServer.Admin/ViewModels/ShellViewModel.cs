@@ -156,7 +156,7 @@ public sealed partial class ShellViewModel : ObservableObject, IDisposable
         // operator chasing a delivery needs both at once.
         new("SMTP", "Mail", typeof(SmtpViewModel)),
         new("Queue", "Mail", typeof(DomainsViewModel), IsAvailable: false),
-        new("Quarantine", "Mail", typeof(DomainsViewModel), IsAvailable: false),
+        new("Quarantine", "Mail", typeof(QuarantineViewModel)),
         new("Message Trace", "Mail", typeof(DomainsViewModel), IsAvailable: false),
 
         new("Services", "Server", typeof(DashboardViewModel), IsAvailable: false),
@@ -171,7 +171,11 @@ public sealed partial class ShellViewModel : ObservableObject, IDisposable
         new("Audit Log", "Security", typeof(AuditLogViewModel)),
         new("IP Rules", "Security", typeof(DashboardViewModel), IsAvailable: false),
         new("Rate Limits", "Security", typeof(DashboardViewModel), IsAvailable: false),
-        new("Anti-Spam", "Security", typeof(DashboardViewModel), IsAvailable: false),
+        // Anti-spam has no page of its own: the filter is configured in appsettings and
+        // what an operator actually does with it — reading verdicts, releasing what it got
+        // wrong — happens on the Quarantine page under Mail. A second page that only restated
+        // the configuration would be a place to look that never had the answer.
+        new("Anti-Spam", "Security", typeof(QuarantineViewModel)),
 
         // One entry rather than the eight this group was sketched with. SPF, DKIM, DMARC,
         // MTA-STS and TLS-RPT are checks inside the readiness report, not pages: giving each a

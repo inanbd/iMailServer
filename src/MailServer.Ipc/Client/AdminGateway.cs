@@ -8,6 +8,9 @@ using MailServer.Application.Certificates.Dtos;
 using MailServer.Application.Deliverability.Commands;
 using MailServer.Application.Deliverability.Dtos;
 using MailServer.Application.Deliverability.Queries;
+using MailServer.Application.Filtering.Commands;
+using MailServer.Application.Filtering.Dtos;
+using MailServer.Application.Filtering.Queries;
 using MailServer.Application.Certificates.Queries;
 using MailServer.Application.Domains.Commands;
 using MailServer.Application.Mailboxes.Commands;
@@ -308,6 +311,26 @@ public interface IAdminGateway
     /// <summary>Reads an RFC 8460 TLS report and says what it means.</summary>
     Task<TlsReportDto> AnalyseTlsReportAsync(
         string report,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Lists the messages the filter is holding.</summary>
+    /// <remarks>
+    /// Verdicts and reasons only — never message content, which is what lets this be read by
+    /// whoever watches the server without also letting them read everybody's mail.
+    /// </remarks>
+    Task<IReadOnlyList<QuarantinedMessageDto>> GetQuarantineAsync(
+        bool includeResolved = false,
+        int limit = 100,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Delivers a held message to the recipients it was originally addressed to.</summary>
+    Task<QuarantineReleaseDto> ReleaseQuarantinedMessageAsync(
+        Guid id,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Discards a held message and removes its content.</summary>
+    Task DiscardQuarantinedMessageAsync(
+        Guid id,
         CancellationToken cancellationToken = default);
 }
 
@@ -1098,4 +1121,35 @@ public sealed class AdminGateway(IpcClient client) : IAdminGateway
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false)
         ?? throw new InvalidOperationException("The service returned an empty TLS report analysis.");
+
+    public async Task<IReadOnlyList<QuarantinedMessageDto>> GetQuarantineAsync(
+        bool includeResolved = false,
+        int limit = 100,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetQuarantineQuery, IReadOnlyList<QuarantinedMessageDto>>(
+                "Quarantine.List",
+                new GetQuarantineQuery { IncludeResolved = includeResolved, Limit = limit },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? [];
+
+    public async Task<QuarantineReleaseDto> ReleaseQuarantinedMessageAsync(
+        Guid id,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<ReleaseQuarantinedMessageCommand, QuarantineReleaseDto>(
+                "Quarantine.Release",
+                new ReleaseQuarantinedMessageCommand { Id = id },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? throw new InvalidOperationException("The service returned an empty release result.");
+
+    public Task DiscardQuarantinedMessageAsync(
+        Guid id,
+        CancellationToken cancellationToken = default) =>
+        client.SendAsync<DiscardQuarantinedMessageCommand, Unit>(
+            "Quarantine.Discard",
+            new DiscardQuarantinedMessageCommand { Id = id },
+            cancellationToken: cancellationToken);
 }

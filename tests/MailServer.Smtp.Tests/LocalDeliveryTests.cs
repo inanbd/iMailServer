@@ -704,4 +704,189 @@ public sealed class LocalDeliveryTests : IAsyncLifetime
         result.Outcomes.ShouldBeEmpty();
         (await ScalarAsync<int>("SELECT COUNT(*) FROM Deliveries")).ShouldBe(0);
     }
+
+    // ---------------------------------------------------------------------------------------
+    // The filter, on the real delivery path. Milestone 12.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>Creates a mailbox with both an INBOX and a \Junk folder.</summary>
+    private async Task<MailboxId> CreateMailboxWithJunkAsync(string localPart)
+    {
+        MailboxId mailboxId = await CreateMailboxAsync(localPart);
+
+        await using DbConnection connection = await OpenAsync();
+
+        await connection.ExecuteAsync(
+            """
+            INSERT INTO MailboxFolders (Id, MailboxId, Path, SpecialUse, UidValidity, NextUid, CreatedUtc)
+            VALUES (@Id, @MailboxId, 'Junk', 5, 1, 1, @Now)
+            """,
+            new { Id = Guid.NewGuid(), MailboxId = mailboxId.Value, Now });
+
+        return mailboxId;
+    }
+
+    /// <summary>
+    /// A message carrying an executable attachment, which the policy holds outright.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The From: domain is under RFC 2606's <c>.invalid</c>, and has to be.</b> These tests
+    /// run against the real resolver, and <c>example.net</c> now publishes
+    /// <c>v=DMARC1; p=reject</c> — a message from there is refused by DMARC enforcement before
+    /// the filter is ever consulted, which would test the step above this one.
+    /// </para>
+    /// <para>
+    /// <b>The line endings are normalised rather than written.</b> A raw string literal in a
+    /// file saved with LF endings carries LF endings, and RFC 5322's header block terminates on
+    /// CRLF CRLF — which the filter correctly reports as an unparseable message, and which is
+    /// not what this is meant to be testing.
+    /// </para>
+    /// </remarks>
+    private static string WithExecutable { get; } = """
+        From: Alice <alice@sender.invalid>
+        To: Bob <alice@example.com>
+        Subject: Invoice
+        Date: Tue, 22 Sep 2026 11:58:00 +0000
+        Message-ID: <abc@sender.invalid>
+        Content-Type: multipart/mixed; boundary="b"
+        
+        --b
+        Content-Type: text/plain
+        
+        See attached.
+        --b
+        Content-Type: application/octet-stream
+        Content-Disposition: attachment; filename="invoice.exe"
+        
+        AAAA
+        --b--
+
+        """.ReplaceLineEndings("\r\n");
+
+    /// <summary>
+    /// The whole point of the milestone, on the real path: an executable attachment is held,
+    /// nobody receives it, and an operator can find it.
+    /// </summary>
+    [Fact]
+    public async Task A_message_with_an_executable_attachment_is_held()
+    {
+        await CreateMailboxAsync("alice");
+
+        DeliveryResult result = await DeliverAsync(
+            WithExecutable, ("alice@example.com", RelayDecision.AcceptLocal));
+
+        result.TotalDeliveries.ShouldBe(0);
+        result.Rejection.ShouldBeNull();
+
+        (await ScalarAsync<int>("SELECT COUNT(*) FROM Deliveries")).ShouldBe(0);
+        (await ScalarAsync<int>("SELECT COUNT(*) FROM QuarantinedMessages")).ShouldBe(1);
+    }
+
+    /// <summary>
+    /// A held message keeps its recipient rows: they are the record of who it was for, and the
+    /// only thing a release has to deliver against.
+    /// </summary>
+    [Fact]
+    public async Task A_held_message_keeps_its_recipient_rows()
+    {
+        await CreateMailboxAsync("alice");
+
+        await DeliverAsync(WithExecutable, ("alice@example.com", RelayDecision.AcceptLocal));
+
+        (await ScalarAsync<int>("SELECT COUNT(*) FROM MessageRecipients")).ShouldBe(1);
+    }
+
+    /// <summary>And the reasons, so an operator releasing it is not guessing.</summary>
+    [Fact]
+    public async Task A_held_message_records_why()
+    {
+        await CreateMailboxAsync("alice");
+
+        await DeliverAsync(WithExecutable, ("alice@example.com", RelayDecision.AcceptLocal));
+
+        (await ScalarAsync<string>("SELECT Name FROM QuarantineSignals LIMIT 1"))
+            .ShouldBe("BLOCKED_ATTACHMENT");
+    }
+
+    /// <summary>
+    /// The sender is told the message was accepted. Telling them it was held would confirm the
+    /// address exists and tell them exactly which of their attachments to rename.
+    /// </summary>
+    [Fact]
+    public async Task Holding_a_message_is_not_reported_to_the_sender()
+    {
+        await CreateMailboxAsync("alice");
+
+        DeliveryResult result = await DeliverAsync(
+            WithExecutable, ("alice@example.com", RelayDecision.AcceptLocal));
+
+        result.Rejection.ShouldBeNull();
+    }
+
+    /// <summary>An ordinary message is unaffected by any of this.</summary>
+    [Fact]
+    public async Task An_ordinary_message_is_delivered_to_the_inbox()
+    {
+        await CreateMailboxWithJunkAsync("alice");
+
+        DeliveryResult result = await DeliverAsync(
+            "From: a@sender.invalid\r\nTo: alice@example.com\r\nSubject: Lunch\r\nDate: Tue, 22 Sep 2026 11:58:00 +0000\r\nMessage-ID: <x@sender.invalid>\r\n\r\nBody.\r\n",
+            ("alice@example.com", RelayDecision.AcceptLocal));
+
+        result.TotalDeliveries.ShouldBe(1);
+
+        (await ScalarAsync<int>("SELECT COUNT(*) FROM QuarantinedMessages")).ShouldBe(0);
+
+        (await ScalarAsync<int>(
+            """
+            SELECT COUNT(*) FROM Deliveries d
+            JOIN MailboxFolders f ON f.Id = d.FolderId
+            WHERE f.SpecialUse = 1
+            """)).ShouldBe(1);
+    }
+
+    /// <summary>
+    /// A held message is released into the INBOX, never into Junk. An operator has looked at it
+    /// and decided it is legitimate; putting it where the recipient may never look would make
+    /// the release a gesture rather than a delivery.
+    /// </summary>
+    [Fact]
+    public async Task Releasing_a_held_message_puts_it_in_the_inbox()
+    {
+        await CreateMailboxWithJunkAsync("alice");
+
+        await DeliverAsync(WithExecutable, ("alice@example.com", RelayDecision.AcceptLocal));
+
+        Guid messageId = await ScalarAsync<Guid>("SELECT MessageId FROM QuarantinedMessages");
+
+        await using (AsyncServiceScope scope = _services.CreateAsyncScope())
+        {
+            IMessageStore store = scope.ServiceProvider.GetRequiredService<IMessageStore>();
+            StoredMessageId id = new(messageId);
+
+            await using Stream content = await store.OpenReadAsync(id, default);
+
+            StoredMessage stored = new(
+                id,
+                content.Length,
+                Sha256Hash.FromBytes(
+                    await System.Security.Cryptography.SHA256.HashDataAsync(content, default)),
+                Now);
+
+            DeliveryResult released = await scope.ServiceProvider
+                .GetRequiredService<ILocalDeliveryService>()
+                .DeliverReleasedAsync(
+                    new ReleaseRequest(stored, EmailAddress.Parse("alice@sender.invalid")), default);
+
+            released.TotalDeliveries.ShouldBe(1);
+        }
+
+        (await ScalarAsync<int>(
+            """
+            SELECT COUNT(*) FROM Deliveries d
+            JOIN MailboxFolders f ON f.Id = d.FolderId
+            WHERE f.SpecialUse = 1
+            """)).ShouldBe(1);
+    }
 }

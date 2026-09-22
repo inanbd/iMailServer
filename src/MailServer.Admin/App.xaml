@@ -67,6 +67,10 @@
                 <pages:SmtpView />
             </DataTemplate>
 
+            <DataTemplate DataType="{x:Type vm:QuarantineViewModel}">
+                <pages:QuarantineView />
+            </DataTemplate>
+
             <DataTemplate DataType="{x:Type vm:DeliverabilityViewModel}">
                 <pages:DeliverabilityView />
             </DataTemplate>

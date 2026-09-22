@@ -208,7 +208,11 @@ public sealed class LocalDeliveryDmarcVerificationTests : IAsyncLifetime
             messageId, content, new SpfEvaluationOutcome(SpfResult.Fail, DomainName.Parse("example.com"), null));
 
         result.Rejection.ShouldNotBeNull();
-        result.Rejection.PolicyDomain.Value.ShouldBe("example.com");
+
+        // A DMARC rejection names the publisher; a filter rejection would not. The distinction
+        // is what tells an operator whose decision refused the message.
+        result.Rejection.PolicyDomain.ShouldNotBeNull();
+        result.Rejection.PolicyDomain!.Value.ShouldBe("example.com");
         result.Outcomes.ShouldBeEmpty();
 
         (int? dbResult, int disposition, string? policyDomain) = (await QueryDmarcResultAsync(messageId))!.Value;

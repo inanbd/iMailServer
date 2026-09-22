@@ -200,3 +200,32 @@ Whatever happens, write it down here rather than in a commit message. `docs/Stan
 is that nothing is marked Implemented without evidence, and "we tried it and it seemed fine" is
 not evidence a later reader can check. For each client: version, date, and either *passed* or
 the specific step that failed with the client's protocol log attached.
+
+---
+
+## Milestone 12 — the filter, against live mail
+
+Everything below needs a server taking real inbound mail. None of it can be done from this
+repository's CI, and none of it is claimed in `docs/Filtering.md`.
+
+1. **The Quarantine page renders.** Open Mail → Quarantine on Windows. It is a WPF binary and
+   has never been run. Check that a held message lists its reasons, that Release and Discard are
+   enabled only for a held one, and that the grid survives an empty quarantine.
+
+2. **A held message releases into a real mailbox.** Send yourself a message with a `.exe`
+   attachment from an outside account. It should be held, the sender should see a 250, and
+   nobody should receive it. Release it and confirm it lands in the INBOX rather than Junk.
+
+3. **The thresholds are not junking real mail.** Run for a week with `RejectThreshold` at its
+   default and read what lands in `\Junk`. The numbers in `FilteringOptions` are conventional,
+   not tuned — this is the exercise that would tune them.
+
+4. **A malware scanner is wired in.** `IMalwareScanner` has one implementation and it reports
+   `NotScanned`. Point it at ClamAV and confirm an EICAR test file is held, and that stopping
+   the daemon does not stop mail (with `FailClosedOnScannerError` off) and does hold mail (with
+   it on).
+
+5. **The rate limits do not trip a real exchanger.** Watch for 421s in the log against Gmail or
+   Microsoft 365 delivering a backlog. `MaxInboundConnectionsPerHour` is set from what those
+   providers are believed to do, not from what they were observed doing here.
+

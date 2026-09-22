@@ -9,6 +9,9 @@ using MailServer.Application.Acme.Queries;
 using MailServer.Application.Deliverability.Dtos;
 using MailServer.Application.Deliverability.Commands;
 using MailServer.Application.Deliverability.Queries;
+using MailServer.Application.Filtering.Commands;
+using MailServer.Application.Filtering.Dtos;
+using MailServer.Application.Filtering.Queries;
 using MailServer.Application.Certificates.Commands;
 using MailServer.Application.Certificates.Dtos;
 using MailServer.Application.Certificates.Queries;
@@ -265,5 +268,19 @@ public sealed class IpcCommandRegistry
 
         new("Deliverability.AnalyseTlsReport", typeof(AnalyseTlsReportQuery), typeof(TlsReportDto)),
         new("Deliverability.TlsReports", typeof(GetCollectedTlsReportsQuery), typeof(IReadOnlyList<CollectedTlsReportDto>)),
+
+        // ---- Filtering (Milestone 12) -------------------------------------------------------
+
+        // The listing carries verdicts and reasons, never message content, which is what makes
+        // it readable under ViewServerState. Reading a held message itself is a separate
+        // request with ReadMessageContent - see the commands below.
+        new("Quarantine.List", typeof(GetQuarantineQuery), typeof(IReadOnlyList<QuarantinedMessageDto>)),
+
+        // Releasing puts a message the filter judged dangerous into somebody's mailbox, so it
+        // asks for the permission that lets an operator read it first. Discarding asks only for
+        // the anti-abuse permission: refusing to deliver a message this server already refused
+        // to deliver changes nothing about who can read mail.
+        new("Quarantine.Release", typeof(ReleaseQuarantinedMessageCommand), typeof(QuarantineReleaseDto)),
+        new("Quarantine.Discard", typeof(DiscardQuarantinedMessageCommand), typeof(Unit)),
     ];
 }

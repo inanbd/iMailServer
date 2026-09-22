@@ -17,11 +17,15 @@ normal workload, and holds every message the organisation has ever received.
 | Resource exhaustion | Bounded reads, timeouts, per-command limits, streaming, MIME depth caps | **1** (framing), 6 |
 | IPC privilege escalation | ACL-restricted pipe; explicit command allow-list; per-command permissions | **1** |
 | Secret disclosure | DPAPI-protected store; ACLs; hand-written audit descriptors | **1** |
-| Malicious content | Layered pipeline; quarantine; `IMalwareScanner` delegating to a real engine | 12 |
-| Becoming a spam source | Per-mailbox limits; outbound anomaly detection; no evasion features | 12 |
+| Malicious content | Layered pipeline; quarantine; `IMalwareScanner` delegating to a real engine | **12** |
+| Becoming a spam source | Per-mailbox limits; per-address inbound rate limits; no evasion features | **12** |
 | Supply chain | Central package management, pinned versions, nuget.org only | **1** |
 
-Items marked **1** are implemented and tested now.
+Items marked **1** are implemented and tested now. Items marked **12** are implemented and
+tested as of Milestone 12, with the caveat `docs/Filtering.md` records: the filter has never
+been run against live mail, and `IMalwareScanner` ships no engine — only the seam for one.
+Outbound anomaly detection is **not** built; what bounds this server as a spam source is the
+per-mailbox submission rate limit from Milestone 7.
 
 ---
 

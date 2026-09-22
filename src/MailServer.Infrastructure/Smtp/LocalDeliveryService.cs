@@ -1,8 +1,10 @@
+using MailServer.Application.Abstractions.Filtering;
 using MailServer.Application.Abstractions.Repositories;
 using MailServer.Application.Abstractions.Smtp;
 using MailServer.Application.Abstractions.Time;
 using MailServer.Domain.Entities;
 using MailServer.Domain.Enums;
+using MailServer.Domain.Filtering;
 using MailServer.Domain.Mail;
 using MailServer.Domain.Policies;
 using MailServer.Domain.Smtp;
@@ -47,6 +49,8 @@ public sealed class LocalDeliveryService(
     DkimMessageVerifier dkimVerifier,
     DmarcEvaluator dmarcEvaluator,
     AliasExpansionPolicy expansionPolicy,
+    IMessageFilter filter,
+    IQuarantineRepository quarantine,
     IOptions<MailServerOptions> options,
     IClock clock,
     ILogger<LocalDeliveryService> logger) : ILocalDeliveryService
@@ -74,6 +78,8 @@ public sealed class LocalDeliveryService(
 
         await deliveries.AddMessageAsync(record, cancellationToken).ConfigureAwait(false);
 
+        MessageAuthenticationFacts authentication = new(request.SpfOutcome?.Result, null, null, null);
+
         // SPF's premise - does the sending IP match the domain's published record - is
         // meaningless for an authenticated client's IP, which can legitimately be anywhere. DKIM
         // and DMARC have no such caveat, but are still scoped to InboundMta here to keep every
@@ -81,10 +87,12 @@ public sealed class LocalDeliveryService(
         // outbound signing's concern (OutboundSmtpClient), not something to re-verify on the way in.
         if (request.ListenerRole == SmtpListenerRole.InboundMta)
         {
-            DmarcEvaluationOutcome? dmarcOutcome = await VerifyAuthenticationAsync(
+            VerifiedAuthentication verified = await VerifyAuthenticationAsync(
                 request.Message.Id, request.SpfOutcome, now, cancellationToken).ConfigureAwait(false);
 
-            if (dmarcOutcome is { Disposition: DmarcPolicy.Reject })
+            authentication = verified.Facts;
+
+            if (verified.Dmarc is { Disposition: DmarcPolicy.Reject } dmarcOutcome)
             {
                 logger.LogInformation(
                     "Message {MessageId} rejected: DMARC policy published at {PolicyDomain} requests reject for From: domain {FromDomain}.",
@@ -95,15 +103,44 @@ public sealed class LocalDeliveryService(
                 return new DeliveryResult(
                     request.Message.Id,
                     [],
-                    new DmarcRejection(
-                        dmarcOutcome.PolicyDomain,
+                    new DeliveryRejection(
                         $"it fails DMARC alignment against {dmarcOutcome.FromDomain.Value} " +
-                        $"(policy published at {dmarcOutcome.PolicyDomain.Value})"));
+                        $"(policy published at {dmarcOutcome.PolicyDomain.Value})",
+                        dmarcOutcome.PolicyDomain));
             }
+        }
+
+        // The filter runs after DMARC enforcement and before anything is placed. After, because
+        // a message the publishing domain asked to have rejected is gone already and filtering
+        // it would be work for a verdict nobody reads. Before, because every action it can
+        // return - a different folder, a hold, a refusal - has to be decided while there is
+        // still nothing in a mailbox to undo.
+        FilterVerdict verdict = request.ListenerRole == SmtpListenerRole.InboundMta
+            ? await FilterAsync(request, authentication, now, cancellationToken).ConfigureAwait(false)
+            : FilterVerdict.Clean;
+
+        if (verdict.Action == FilterAction.Reject)
+        {
+            logger.LogInformation(
+                "Message {MessageId} refused by the filter: {Summary}",
+                request.Message.Id.Value,
+                verdict.Summarise());
+
+            await RemoveRejectedContentAsync(request.Message.Id, now, cancellationToken).ConfigureAwait(false);
+
+            return new DeliveryResult(
+                request.Message.Id, [], new DeliveryRejection("it was refused by this server's filter"));
         }
 
         Dictionary<string, IReadOnlyList<EmailAddress>> aliasMap =
             await ReadAliasMapAsync(cancellationToken).ConfigureAwait(false);
+
+        // A held message still gets its recipient rows: they are the record of who it was for,
+        // and they are what a release delivers against. Writing them only on delivery would
+        // leave a quarantine full of messages nobody could release.
+        FolderSpecialUse folder = verdict.Action == FilterAction.Junk
+            ? FolderSpecialUse.Junk
+            : FolderSpecialUse.Inbox;
 
         List<RecipientOutcome> outcomes = [];
 
@@ -113,11 +150,101 @@ public sealed class LocalDeliveryService(
                 request,
                 accepted,
                 aliasMap,
+                folder,
+                place: verdict.Action != FilterAction.Quarantine,
                 now,
                 cancellationToken).ConfigureAwait(false));
         }
 
+        if (verdict.Action == FilterAction.Quarantine)
+        {
+            await HoldAsync(request, verdict, now, cancellationToken).ConfigureAwait(false);
+        }
+
         return new DeliveryResult(request.Message.Id, outcomes);
+    }
+
+    /// <summary>
+    /// Asks the filter what to do with this message.
+    /// </summary>
+    /// <remarks>
+    /// <b>Fails open, like the authentication step above it.</b> A filter that threw would
+    /// otherwise stop mail flowing, and a message delivered unfiltered is a far smaller problem
+    /// than a mail server that stopped delivering. The pipeline catches its own exceptions too;
+    /// this is the backstop for the ones it cannot.
+    /// </remarks>
+    private async Task<FilterVerdict> FilterAsync(
+        DeliveryRequest request,
+        MessageAuthenticationFacts authentication,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (!filter.IsEnabled)
+        {
+            return FilterVerdict.Clean;
+        }
+
+        try
+        {
+            return await filter
+                .EvaluateAsync(
+                    new MessageFilterRequest(
+                        request.Message,
+                        request.ReversePath,
+                        request.RemoteAddress,
+                        request.Recipients.Count,
+                        authentication,
+                        now),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(
+                ex, "Filtering message {MessageId} failed; it was delivered unfiltered.", request.Message.Id.Value);
+
+            return FilterVerdict.Clean;
+        }
+    }
+
+    /// <summary>
+    /// Records a held message.
+    /// </summary>
+    /// <remarks>
+    /// <b>A failure to record the hold is not a failure to hold.</b> Nothing was placed in a
+    /// mailbox, so the message is already where the verdict wanted it; what is lost is an
+    /// operator's ability to find and release it. That is worth a loud warning and not worth
+    /// turning into a delivery error the sending server would retry — a retry would re-deliver
+    /// the same message, and hold it again, for as long as the quarantine stayed broken.
+    /// </remarks>
+    private async Task HoldAsync(
+        DeliveryRequest request,
+        FilterVerdict verdict,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await quarantine.AddAsync(
+                QuarantinedMessage.Create(
+                    request.Message.Id,
+                    request.ReversePath,
+                    request.RemoteAddress,
+                    verdict,
+                    now,
+                    TimeSpan.FromDays(options.Value.Filtering.QuarantineRetentionDays)),
+                cancellationToken).ConfigureAwait(false);
+
+            logger.LogInformation(
+                "Message {MessageId} held: {Summary}", request.Message.Id.Value, verdict.Summarise());
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(
+                ex,
+                "Message {MessageId} was held but could not be recorded in the quarantine; it was delivered to nobody and cannot be released.",
+                request.Message.Id.Value);
+        }
     }
 
     /// <inheritdoc />
@@ -148,7 +275,11 @@ public sealed class LocalDeliveryService(
         Dictionary<string, IReadOnlyList<EmailAddress>> aliasMap =
             await ReadAliasMapAsync(cancellationToken).ConfigureAwait(false);
 
-        Placement placement = new(request.Message.Id, request.Message.SizeBytes, request.ReversePath);
+        // Released mail goes to the INBOX, never to Junk. An operator has looked at it and
+        // decided it is legitimate; putting it where the recipient may never look would make
+        // the release a gesture rather than a delivery.
+        Placement placement = new(
+            request.Message.Id, request.Message.SizeBytes, request.ReversePath, FolderSpecialUse.Inbox);
 
         List<RecipientOutcome> outcomes = [];
 
@@ -195,6 +326,8 @@ public sealed class LocalDeliveryService(
         DeliveryRequest request,
         AcceptedRecipient accepted,
         Dictionary<string, IReadOnlyList<EmailAddress>> aliasMap,
+        FolderSpecialUse folder,
+        bool place,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
@@ -205,8 +338,15 @@ public sealed class LocalDeliveryService(
 
         await deliveries.AddRecipientAsync(recipient, cancellationToken).ConfigureAwait(false);
 
+        if (!place)
+        {
+            // A held message. The row above is written and nothing else is: it is the record of
+            // who the message was for, and the only thing a release has to go on.
+            return new RecipientOutcome(accepted.Address, MailboxesDelivered: 0, QueuedForRelay: false);
+        }
+
         return await PlaceRecipientAsync(
-            new Placement(request.Message.Id, request.Message.SizeBytes, request.ReversePath),
+            new Placement(request.Message.Id, request.Message.SizeBytes, request.ReversePath, folder),
             recipient,
             aliasMap,
             now,
@@ -219,7 +359,17 @@ public sealed class LocalDeliveryService(
     /// session, no greeting and no SPF result, because the conversation ended days ago — can
     /// take exactly the same path as an ordinary delivery.
     /// </remarks>
-    private sealed record Placement(StoredMessageId MessageId, long SizeBytes, EmailAddress? ReversePath);
+    /// <param name="Folder">
+    /// Which special-use folder the message belongs in. <c>Junk</c> when the filter said so,
+    /// <c>Inbox</c> otherwise — carried here rather than decided at the mailbox, so that one
+    /// verdict decides one message's destination for every recipient rather than being
+    /// re-derived per mailbox.
+    /// </param>
+    private sealed record Placement(
+        StoredMessageId MessageId,
+        long SizeBytes,
+        EmailAddress? ReversePath,
+        FolderSpecialUse Folder = FolderSpecialUse.Inbox);
 
     /// <summary>
     /// Expands one accepted recipient and puts the message wherever it belongs.
@@ -345,8 +495,25 @@ public sealed class LocalDeliveryService(
         }
 
         MailboxFolder? inbox = await deliveries
-            .GetFolderAsync(mailbox.Id, FolderSpecialUse.Inbox, cancellationToken)
+            .GetFolderAsync(mailbox.Id, placement.Folder, cancellationToken)
             .ConfigureAwait(false);
+
+        if (inbox is null && placement.Folder != FolderSpecialUse.Inbox)
+        {
+            // Junk is optional: RFC 6154's \Junk is a folder a client may never have created.
+            // Delivering to the INBOX instead is right - the message arrives, marked by its
+            // verdict rather than by where it landed - and refusing to deliver because a folder
+            // is missing would lose mail over a client's choice of layout.
+            logger.LogDebug(
+                "Mailbox {Mailbox} has no {Folder} folder; message {MessageId} went to the INBOX.",
+                target.Value,
+                placement.Folder,
+                placement.MessageId.Value);
+
+            inbox = await deliveries
+                .GetFolderAsync(mailbox.Id, FolderSpecialUse.Inbox, cancellationToken)
+                .ConfigureAwait(false);
+        }
 
         if (inbox is null)
         {
@@ -423,9 +590,11 @@ public sealed class LocalDeliveryService(
     /// Accepting a message a broken evaluator could not judge is safer than rejecting mail this
     /// server never actually found to violate anything.
     /// </remarks>
-    private async Task<DmarcEvaluationOutcome?> VerifyAuthenticationAsync(
+    private async Task<VerifiedAuthentication> VerifyAuthenticationAsync(
         StoredMessageId messageId, SpfEvaluationOutcome? spfOutcome, DateTimeOffset now, CancellationToken cancellationToken)
     {
+        MessageAuthenticationFacts unverified = new(spfOutcome?.Result, null, null, null);
+
         try
         {
             await using Stream content = await messageStore.OpenReadAsync(messageId, cancellationToken)
@@ -440,7 +609,7 @@ public sealed class LocalDeliveryService(
                     "Could not locate the header/body boundary for message {MessageId}; DKIM/DMARC were not verified.",
                     messageId.Value);
 
-                return null;
+                return new VerifiedAuthentication(null, unverified);
             }
 
             content.Seek(headers.HeaderBlockLength, SeekOrigin.Begin);
@@ -476,12 +645,49 @@ public sealed class LocalDeliveryService(
 
             await deliveries.AddDmarcVerificationAsync(dmarcRecord, cancellationToken).ConfigureAwait(false);
 
-            return dmarcOutcome;
+            return new VerifiedAuthentication(
+                dmarcOutcome,
+                new MessageAuthenticationFacts(
+                    spfOutcome?.Result,
+                    BestOf(dkimResults),
+                    dmarcOutcome.Result,
+                    dmarcOutcome.Disposition));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(ex, "Failed to verify DKIM/DMARC for message {MessageId}.", messageId.Value);
+            return new VerifiedAuthentication(null, unverified);
+        }
+    }
+
+    /// <summary>What the authentication step concluded, for the caller and for the filter.</summary>
+    private sealed record VerifiedAuthentication(
+        DmarcEvaluationOutcome? Dmarc,
+        MessageAuthenticationFacts Facts);
+
+    /// <summary>
+    /// The most favourable DKIM result among a message's signatures.
+    /// </summary>
+    /// <remarks>
+    /// <b>One passing signature is a pass, however many others failed.</b> A message may carry
+    /// several — a mailing list's alongside the author's — and a broken one usually means an
+    /// intermediary rewrote a header the signer covered, not that anything is wrong with the
+    /// message. Weighing the worst of them would score ordinary list traffic as forged.
+    /// </remarks>
+    private static DkimVerificationResult? BestOf(IReadOnlyList<DkimVerifiedSignature> results)
+    {
+        if (results.Count == 0)
+        {
             return null;
         }
+
+        if (results.Any(r => r.Result == DkimVerificationResult.Pass))
+        {
+            return DkimVerificationResult.Pass;
+        }
+
+        return results.Any(r => r.Result == DkimVerificationResult.Fail)
+            ? DkimVerificationResult.Fail
+            : results[0].Result;
     }
 }

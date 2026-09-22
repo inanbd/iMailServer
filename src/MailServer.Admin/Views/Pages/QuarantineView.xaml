@@ -1,0 +1,128 @@
+<UserControl x:Class="MailServer.Admin.Views.Pages.QuarantineView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="clr-namespace:MailServer.Admin.ViewModels"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=vm:QuarantineViewModel}">
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="Quarantine" Style="{StaticResource PageTitle}" />
+            <TextBlock Style="{StaticResource Caption}"
+                       Text="Messages the filter held and delivered to nobody. Release one to deliver it to the recipients it was addressed to; discard one to remove it." />
+
+            <Border Style="{StaticResource ErrorBanner}" Margin="0,12,0,0"
+                    Visibility="{Binding ErrorMessage, Converter={StaticResource StringToVisibility}}">
+                <TextBlock Text="{Binding ErrorMessage}" TextWrapping="Wrap" />
+            </Border>
+
+            <!--
+                Said on the page because it is what makes a hold safe to act on. A quarantine
+                an operator will not touch is a deletion with extra steps, and the reason they
+                hesitate is usually not knowing whether the recipient was told.
+            -->
+            <Border Background="#FFF3F3F3" BorderBrush="#FFD0D0D0" BorderThickness="1"
+                    Padding="10" Margin="0,12,0,0">
+                <TextBlock TextWrapping="Wrap"
+                           Text="Nobody has received these messages and nobody has been notified about them. The sender was told the message was accepted, because telling them it was held confirms the address exists and says which attachment to rename." />
+            </Border>
+
+            <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                <Button Content="Refresh" Command="{Binding RefreshCommand}" />
+                <CheckBox Content="Include released and discarded" IsChecked="{Binding IncludeResolved}"
+                          VerticalAlignment="Center" Margin="12,0,0,0" />
+            </StackPanel>
+
+            <TextBlock Text="{Binding LastOutcome}" TextWrapping="Wrap" Margin="0,8,0,0"
+                       Visibility="{Binding LastOutcome, Converter={StaticResource StringToVisibility}}" />
+        </StackPanel>
+
+        <TextBlock Grid.Row="1" Text="Held messages" Style="{StaticResource SectionHeader}" Margin="0,20,0,4" />
+
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="360" />
+            </Grid.ColumnDefinitions>
+
+            <DataGrid Grid.Column="0" ItemsSource="{Binding Messages}"
+                      SelectedItem="{Binding Selected}"
+                      AutoGenerateColumns="False" IsReadOnly="True"
+                      HeadersVisibility="Column" GridLinesVisibility="Horizontal">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Held" Width="150"
+                                        Binding="{Binding QuarantinedUtc, StringFormat=yyyy-MM-dd HH:mm}" />
+                    <DataGridTextColumn Header="From" Width="*" Binding="{Binding Sender}" />
+                    <DataGridTextColumn Header="Host" Width="140" Binding="{Binding RemoteAddress}" />
+                    <DataGridTextColumn Header="Score" Width="60"
+                                        Binding="{Binding Score, StringFormat={}{0:0.0}}" />
+                    <DataGridTextColumn Header="Status" Width="90" Binding="{Binding Status}" />
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <Border Grid.Column="1" BorderBrush="#FFD0D0D0" BorderThickness="1,0,0,0" Padding="12,0,0,0"
+                    Margin="12,0,0,0">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel>
+                        <TextBlock Text="Why it was held" FontWeight="SemiBold" />
+
+                        <TextBlock Text="{Binding Selected.Summary}" TextWrapping="Wrap"
+                                   Margin="0,6,0,0" />
+
+                        <!--
+                            One line per reason, heaviest first: an operator deciding whether to
+                            release needs the reason that decided it, not the alphabetical list.
+                            These describe and never quote - no subject, no body, no address out
+                            of the message.
+                        -->
+                        <ItemsControl ItemsSource="{Binding SelectedReasons}" Margin="0,10,0,0">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Margin="0,0,0,8">
+                                        <TextBlock FontWeight="SemiBold" FontSize="12">
+                                            <Run Text="{Binding Name, Mode=OneWay}" />
+                                            <Run Text="(" /><Run Text="{Binding Score, Mode=OneWay, StringFormat={}{0:+0.0;-0.0}}" /><Run Text=")" />
+                                        </TextBlock>
+                                        <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" FontSize="12" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+
+                        <TextBlock Text="Expires" Style="{StaticResource Caption}" Margin="0,12,0,0" />
+                        <TextBlock Text="{Binding Selected.ExpiresUtc, StringFormat=yyyy-MM-dd HH:mm}" />
+
+                        <TextBlock Text="Resolved by" Style="{StaticResource Caption}" Margin="0,8,0,0"
+                                   Visibility="{Binding Selected.ResolvedBy, Converter={StaticResource StringToVisibility}}" />
+                        <TextBlock Text="{Binding Selected.ResolvedBy}"
+                                   Visibility="{Binding Selected.ResolvedBy, Converter={StaticResource StringToVisibility}}" />
+
+                        <!--
+                            Release is the primary action and discard the secondary one, which
+                            is the opposite of how a page built around "get rid of the spam"
+                            would order them. A hold an operator cannot undo is a deletion with
+                            extra steps, and undoing it is what this page is for.
+                        -->
+                        <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+                            <Button Content="Release" Command="{Binding ReleaseCommand}"
+                                    IsEnabled="{Binding CanResolve}" MinWidth="90" />
+                            <Button Content="Discard" Command="{Binding DiscardCommand}"
+                                    IsEnabled="{Binding CanResolve}" MinWidth="90" Margin="8,0,0,0" />
+                        </StackPanel>
+
+                        <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,8,0,0"
+                                   Text="Releasing delivers to the recipients the message was originally accepted for, never to the addresses in its headers." />
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>
