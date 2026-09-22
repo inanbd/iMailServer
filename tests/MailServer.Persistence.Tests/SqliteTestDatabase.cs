@@ -167,6 +167,11 @@ public sealed class SqliteTestDatabase : IAsyncDisposable
                 AmbientSession,
                 database.Dialect);
 
+            Quarantine = new QuarantineRepository(
+                database.ConnectionFactory,
+                AmbientSession,
+                database.Dialect);
+
             ImapMailboxes = new ImapMailboxReader(
                 database.ConnectionFactory,
                 AmbientSession,
@@ -198,6 +203,8 @@ public sealed class SqliteTestDatabase : IAsyncDisposable
         public IOutboundQueueRepository Outbound { get; }
 
         public IDeliveryRepository Deliveries { get; }
+
+        public IQuarantineRepository Quarantine { get; }
 
         public IImapMailboxReader ImapMailboxes { get; }
 

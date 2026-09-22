@@ -102,20 +102,8 @@ public sealed class LocalDeliveryService(
             }
         }
 
-        // The alias graph is read once per message rather than once per recipient. A message to
-        // twenty recipients in the same domain would otherwise re-read the same aliases twenty
-        // times, on the delivery path, per message.
-        IReadOnlyList<Alias> enabledAliases = await aliases
-            .GetAllEnabledAsync(cancellationToken)
-            .ConfigureAwait(false);
-
         Dictionary<string, IReadOnlyList<EmailAddress>> aliasMap =
-            new(StringComparer.OrdinalIgnoreCase);
-
-        foreach (Alias alias in enabledAliases)
-        {
-            aliasMap[alias.Address.NormalizedValue] = alias.Targets;
-        }
+            await ReadAliasMapAsync(cancellationToken).ConfigureAwait(false);
 
         List<RecipientOutcome> outcomes = [];
 
@@ -132,6 +120,77 @@ public sealed class LocalDeliveryService(
         return new DeliveryResult(request.Message.Id, outcomes);
     }
 
+    /// <inheritdoc />
+    public async Task<DeliveryResult> DeliverReleasedAsync(
+        ReleaseRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        DateTimeOffset now = clock.UtcNow;
+
+        // The recipients come from the rows the original delivery wrote, never from the
+        // message's own headers. A released message's To: line is whatever the sender chose to
+        // put there, and delivering to it would let a held message name its own audience.
+        IReadOnlyList<MessageRecipient> recipients = await deliveries
+            .ListRecipientsAsync(request.Message.Id, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (recipients.Count == 0)
+        {
+            logger.LogWarning(
+                "Message {MessageId} was released but has no recipient rows; it was delivered to nobody.",
+                request.Message.Id.Value);
+
+            return new DeliveryResult(request.Message.Id, []);
+        }
+
+        Dictionary<string, IReadOnlyList<EmailAddress>> aliasMap =
+            await ReadAliasMapAsync(cancellationToken).ConfigureAwait(false);
+
+        Placement placement = new(request.Message.Id, request.Message.SizeBytes, request.ReversePath);
+
+        List<RecipientOutcome> outcomes = [];
+
+        foreach (MessageRecipient recipient in recipients)
+        {
+            outcomes.Add(await PlaceRecipientAsync(
+                placement, recipient, aliasMap, now, cancellationToken).ConfigureAwait(false));
+        }
+
+        logger.LogInformation(
+            "Released message {MessageId} reached {Count} mailboxes.",
+            request.Message.Id.Value,
+            outcomes.Sum(o => o.MailboxesDelivered));
+
+        return new DeliveryResult(request.Message.Id, outcomes);
+    }
+
+    /// <summary>
+    /// Reads the alias graph once.
+    /// </summary>
+    /// <remarks>
+    /// Once per message rather than once per recipient: a message to twenty recipients in the
+    /// same domain would otherwise re-read the same aliases twenty times, on the delivery path.
+    /// </remarks>
+    private async Task<Dictionary<string, IReadOnlyList<EmailAddress>>> ReadAliasMapAsync(
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<Alias> enabledAliases = await aliases
+            .GetAllEnabledAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        Dictionary<string, IReadOnlyList<EmailAddress>> aliasMap =
+            new(StringComparer.OrdinalIgnoreCase);
+
+        foreach (Alias alias in enabledAliases)
+        {
+            aliasMap[alias.Address.NormalizedValue] = alias.Targets;
+        }
+
+        return aliasMap;
+    }
+
     private async Task<RecipientOutcome> DeliverRecipientAsync(
         DeliveryRequest request,
         AcceptedRecipient accepted,
@@ -146,6 +205,40 @@ public sealed class LocalDeliveryService(
 
         await deliveries.AddRecipientAsync(recipient, cancellationToken).ConfigureAwait(false);
 
+        return await PlaceRecipientAsync(
+            new Placement(request.Message.Id, request.Message.SizeBytes, request.ReversePath),
+            recipient,
+            aliasMap,
+            now,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The message-level facts placing one recipient needs.</summary>
+    /// <remarks>
+    /// Passed instead of the <see cref="DeliveryRequest"/> so that a release — which has no
+    /// session, no greeting and no SPF result, because the conversation ended days ago — can
+    /// take exactly the same path as an ordinary delivery.
+    /// </remarks>
+    private sealed record Placement(StoredMessageId MessageId, long SizeBytes, EmailAddress? ReversePath);
+
+    /// <summary>
+    /// Expands one accepted recipient and puts the message wherever it belongs.
+    /// </summary>
+    /// <remarks>
+    /// <b>The <c>MessageRecipients</c> row is the caller's business, not this method's.</b> An
+    /// ordinary delivery writes one; a release is delivering against rows that already exist,
+    /// and writing them again would double the recipient list every time an operator released
+    /// a message.
+    /// </remarks>
+    private async Task<RecipientOutcome> PlaceRecipientAsync(
+        Placement placement,
+        MessageRecipient recipient,
+        Dictionary<string, IReadOnlyList<EmailAddress>> aliasMap,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        AcceptedRecipient accepted = new(recipient.Address, recipient.Decision);
+
         if (accepted.Decision == RelayDecision.AcceptRelay)
         {
             // RequireTlsForOutbound is a property of the SENDING domain - the hosted domain
@@ -153,20 +246,20 @@ public sealed class LocalDeliveryService(
             // from the envelope reverse path, snapshotted onto the queue item at enqueue time.
             bool requireTls = false;
 
-            if (request.ReversePath is not null)
+            if (placement.ReversePath is not null)
             {
                 MailDomain? originDomain = await domains
-                    .GetByNameAsync(request.ReversePath.Domain, cancellationToken)
+                    .GetByNameAsync(placement.ReversePath.Domain, cancellationToken)
                     .ConfigureAwait(false);
 
                 requireTls = originDomain?.RequireTlsForOutbound ?? false;
             }
 
             OutboundQueueItem queueItem = OutboundQueueItem.Create(
-                request.Message.Id,
+                placement.MessageId,
                 recipient.Id,
                 accepted.Address,
-                request.ReversePath,
+                placement.ReversePath,
                 requireTls,
                 isDsn: false,
                 now);
@@ -176,7 +269,7 @@ public sealed class LocalDeliveryService(
             logger.LogInformation(
                 "Recipient {Recipient} of message {MessageId} queued for onward relay.",
                 accepted.Address.Value,
-                request.Message.Id.Value);
+                placement.MessageId.Value);
 
             return new RecipientOutcome(
                 accepted.Address,
@@ -202,7 +295,7 @@ public sealed class LocalDeliveryService(
 
         foreach (EmailAddress target in expansion.Recipients)
         {
-            if (await DeliverToMailboxAsync(request, recipient, target, now, cancellationToken)
+            if (await DeliverToMailboxAsync(placement, recipient, target, now, cancellationToken)
                 .ConfigureAwait(false))
             {
                 delivered++;
@@ -217,7 +310,7 @@ public sealed class LocalDeliveryService(
     }
 
     private async Task<bool> DeliverToMailboxAsync(
-        DeliveryRequest request,
+        Placement placement,
         MessageRecipient recipient,
         EmailAddress target,
         DateTimeOffset now,
@@ -236,7 +329,7 @@ public sealed class LocalDeliveryService(
             logger.LogWarning(
                 "Alias target {Target} of message {MessageId} is not a local mailbox; not delivered.",
                 target.Value,
-                request.Message.Id.Value);
+                placement.MessageId.Value);
 
             return false;
         }
@@ -246,7 +339,7 @@ public sealed class LocalDeliveryService(
             logger.LogInformation(
                 "Mailbox {Mailbox} does not accept mail; message {MessageId} not delivered to it.",
                 target.Value,
-                request.Message.Id.Value);
+                placement.MessageId.Value);
 
             return false;
         }
@@ -263,7 +356,7 @@ public sealed class LocalDeliveryService(
             logger.LogError(
                 "Mailbox {Mailbox} has no INBOX; message {MessageId} could not be delivered to it.",
                 target.Value,
-                request.Message.Id.Value);
+                placement.MessageId.Value);
 
             return false;
         }
@@ -273,7 +366,7 @@ public sealed class LocalDeliveryService(
             .ConfigureAwait(false);
 
         Delivery delivery = Delivery.Create(
-            request.Message.Id,
+            placement.MessageId,
             mailbox.Id,
             inbox.Id,
             uid,
@@ -286,7 +379,7 @@ public sealed class LocalDeliveryService(
         // mail they are holding, not how many bytes are on this server's disk. Two mailboxes
         // sharing one file are each charged for it.
         await deliveries
-            .AddStorageUsedAsync(mailbox.Id, request.Message.SizeBytes, cancellationToken)
+            .AddStorageUsedAsync(mailbox.Id, placement.SizeBytes, cancellationToken)
             .ConfigureAwait(false);
 
         return true;

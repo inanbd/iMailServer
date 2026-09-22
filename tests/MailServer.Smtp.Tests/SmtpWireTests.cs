@@ -145,6 +145,11 @@ internal sealed class RecordingDeliveryService : ILocalDeliveryService
             request.Message.Id,
             [.. request.Recipients.Select(r => new RecipientOutcome(r.Address, 1, false))]));
     }
+
+    /// <summary>Nothing on the SMTP wire releases a held message; these tests never reach it.</summary>
+    public Task<DeliveryResult> DeliverReleasedAsync(
+        ReleaseRequest request, CancellationToken cancellationToken) =>
+        throw new NotSupportedException("The wire tests do not release quarantined mail.");
 }
 
 /// <summary>

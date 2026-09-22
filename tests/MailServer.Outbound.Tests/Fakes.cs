@@ -291,6 +291,12 @@ internal sealed class FakeDeliveryRepository : IDeliveryRepository
         return Task.CompletedTask;
     }
 
+    public Task<IReadOnlyList<MessageRecipient>> ListRecipientsAsync(
+        StoredMessageId messageId,
+        CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<MessageRecipient>>(
+            [.. Recipients.Where(r => r.MessageId == messageId)]);
+
     public Task<long> AllocateUidAsync(MailboxFolderId folderId, CancellationToken cancellationToken) =>
         Task.FromResult(1L);
 

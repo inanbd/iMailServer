@@ -119,6 +119,18 @@ public readonly record struct StoredMessageId(Guid Value) : IEntityId
     public override string ToString() => Value.ToString("D");
 }
 
+/// <summary>Identifies one message the filter held.</summary>
+public readonly record struct QuarantinedMessageId(Guid Value) : IEntityId
+{
+    public static QuarantinedMessageId New() => new(Guid.CreateVersion7());
+
+    public static QuarantinedMessageId Empty => new(Guid.Empty);
+
+    public bool IsEmpty => Value == Guid.Empty;
+
+    public override string ToString() => Value.ToString("D");
+}
+
 /// <summary>Identifies a DKIM key pair.</summary>
 public readonly record struct DkimKeyId(Guid Value) : IEntityId
 {

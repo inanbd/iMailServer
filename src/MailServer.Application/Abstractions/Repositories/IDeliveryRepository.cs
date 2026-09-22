@@ -22,6 +22,19 @@ public interface IDeliveryRepository
     Task AddRecipientAsync(MessageRecipient recipient, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Every recipient a message was accepted for, in the order they were accepted.
+    /// </summary>
+    /// <remarks>
+    /// Read when a held message is released: the envelope is long gone by then, and these rows
+    /// are the record of who it was for. Re-deriving them from the headers would deliver to
+    /// whoever the <c>To:</c> line names, which is not the same list and is chosen by the
+    /// sender.
+    /// </remarks>
+    Task<IReadOnlyList<MessageRecipient>> ListRecipientsAsync(
+        StoredMessageId messageId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Takes the next UID for a folder and advances the folder's counter.
     /// </summary>
     /// <remarks>

@@ -8,6 +8,18 @@ using MailServer.Domain.ValueObjects;
 namespace MailServer.Infrastructure.Persistence.Repositories;
 
 /// <summary>Flat shape of a <c>Messages</c> row.</summary>
+/// <summary>Flat shape of a <c>MessageRecipients</c> row.</summary>
+internal sealed class MessageRecipientRow
+{
+    public Guid Id { get; set; }
+
+    public Guid MessageId { get; set; }
+
+    public string Address { get; set; } = string.Empty;
+
+    public int RelayDecision { get; set; }
+}
+
 internal sealed class MessageRow
 {
     public Guid Id { get; set; }
@@ -131,6 +143,44 @@ internal sealed class DeliveryRepository(
             return true;
         }, cancellationToken);
     }
+
+    public Task<IReadOnlyList<MessageRecipient>> ListRecipientsAsync(
+        StoredMessageId messageId,
+        CancellationToken cancellationToken) =>
+        ExecuteAsync(async (session, ct) =>
+        {
+            IEnumerable<MessageRecipientRow> rows = await session.Connection
+                .QueryAsync<MessageRecipientRow>(Command(
+                    session,
+                    """
+                    SELECT   Id, MessageId, Address, RelayDecision
+                    FROM     MessageRecipients
+                    WHERE    MessageId = @MessageId
+                    ORDER BY CreatedUtc, Id
+                    """,
+                    new { MessageId = messageId.Value },
+                    ct))
+                .ConfigureAwait(false);
+
+            List<MessageRecipient> recipients = [];
+
+            foreach (MessageRecipientRow row in rows)
+            {
+                if (!EmailAddress.TryParse(row.Address, out EmailAddress? address))
+                {
+                    // A row this server wrote from an address it had already parsed. Reaching
+                    // here means the stored text no longer parses, which is a repair problem
+                    // rather than a delivery one — skipped rather than thrown, so one damaged
+                    // row does not make a held message unreleasable.
+                    continue;
+                }
+
+                recipients.Add(MessageRecipient.Rehydrate(
+                    row.Id, new StoredMessageId(row.MessageId), address, (RelayDecision)row.RelayDecision));
+            }
+
+            return (IReadOnlyList<MessageRecipient>)recipients;
+        }, cancellationToken);
 
     /// <remarks>
     /// <para>

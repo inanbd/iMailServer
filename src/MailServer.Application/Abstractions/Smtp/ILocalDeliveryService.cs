@@ -66,9 +66,32 @@ public sealed record DeliveryResult(
         Outcomes.All(o => o.MailboxesDelivered > 0 || o.QueuedForRelay);
 }
 
+/// <summary>What a release needs to deliver a message that was held.</summary>
+/// <param name="Message">The held message, still in the store.</param>
+/// <param name="ReversePath">The envelope sender, as it was recorded at hold time.</param>
+/// <remarks>
+/// <b>There is no recipient list here, deliberately.</b> The recipients come from the
+/// <c>MessageRecipients</c> rows the original delivery wrote, read inside the implementation.
+/// Passing them in would let a caller release a message to somebody it was never addressed to
+/// — the caller is an administrator, and this is one of the few places where "the operator
+/// asked for it" is not a sufficient reason.
+/// </remarks>
+public sealed record ReleaseRequest(StoredMessage Message, EmailAddress? ReversePath);
+
 /// <summary>Places an accepted message into local mailboxes.</summary>
 public interface ILocalDeliveryService
 {
     /// <summary>Delivers one message to its accepted recipients.</summary>
     Task<DeliveryResult> DeliverAsync(DeliveryRequest request, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Delivers a message that was held, to the recipients it was originally accepted for.
+    /// </summary>
+    /// <remarks>
+    /// <b>The same code path an ordinary delivery takes</b> — the same alias expansion, the
+    /// same quota accounting, the same UID allocation. A release that wrote its own delivery
+    /// rows would be a second implementation of the thing that puts mail in mailboxes, and the
+    /// bug it eventually grew would only ever show up in released mail.
+    /// </remarks>
+    Task<DeliveryResult> DeliverReleasedAsync(ReleaseRequest request, CancellationToken cancellationToken);
 }

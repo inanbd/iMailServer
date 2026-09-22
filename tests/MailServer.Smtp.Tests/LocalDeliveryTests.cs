@@ -522,4 +522,186 @@ public sealed class LocalDeliveryTests : IAsyncLifetime
             .ShouldBe(Convert.ToHexStringLower(
                 System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(path))));
     }
+
+    // ---------------------------------------------------------------------------------------
+    // Releasing a held message. Milestone 12's exit criterion is a quarantine round trip, and
+    // this is the half of it that has to actually put mail in a mailbox.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>Stores a message and records its recipients without delivering it, as a hold does.</summary>
+    private async Task<StoredMessage> HoldAsync(
+        string body,
+        params (string Address, RelayDecision Decision)[] recipients)
+    {
+        await using AsyncServiceScope scope = _services.CreateAsyncScope();
+
+        IMessageStore store = scope.ServiceProvider.GetRequiredService<IMessageStore>();
+        IDeliveryRepository deliveries = scope.ServiceProvider.GetRequiredService<IDeliveryRepository>();
+
+        StoredMessage stored;
+
+        await using (IMessageWriter writer = await store.BeginWriteAsync(1_000_000, default))
+        {
+            await writer.WriteAsync(System.Text.Encoding.UTF8.GetBytes(body), default);
+            stored = await writer.CommitAsync(default);
+        }
+
+        await deliveries.AddMessageAsync(
+            MessageRecord.Create(
+                stored.Id,
+                stored.SizeBytes,
+                stored.ContentHash,
+                EmailAddress.Parse("sender@example.net"),
+                IpAddressValue.Parse("198.51.100.20"),
+                "relay.example.net",
+                SmtpListenerRole.InboundMta,
+                tlsActive: true,
+                authenticatedAs: null,
+                Now),
+            default);
+
+        foreach ((string address, RelayDecision decision) in recipients)
+        {
+            await deliveries.AddRecipientAsync(
+                MessageRecipient.Create(stored.Id, EmailAddress.Parse(address), decision),
+                default);
+        }
+
+        return stored;
+    }
+
+    private async Task<DeliveryResult> ReleaseAsync(StoredMessage stored)
+    {
+        await using AsyncServiceScope scope = _services.CreateAsyncScope();
+
+        return await scope.ServiceProvider
+            .GetRequiredService<ILocalDeliveryService>()
+            .DeliverReleasedAsync(
+                new ReleaseRequest(stored, EmailAddress.Parse("sender@example.net")), default);
+    }
+
+    [Fact]
+    public async Task A_released_message_reaches_the_mailbox_it_was_held_for()
+    {
+        await CreateMailboxAsync("alice");
+
+        StoredMessage stored = await HoldAsync(
+            "Subject: held\r\n\r\nBody.\r\n",
+            ("alice@example.com", RelayDecision.AcceptLocal));
+
+        // Held means held: nothing is in any mailbox yet.
+        (await ScalarAsync<int>("SELECT COUNT(*) FROM Deliveries")).ShouldBe(0);
+
+        DeliveryResult result = await ReleaseAsync(stored);
+
+        result.TotalDeliveries.ShouldBe(1);
+        (await ScalarAsync<int>("SELECT COUNT(*) FROM Deliveries")).ShouldBe(1);
+    }
+
+    /// <summary>
+    /// The recipients come from the rows the original delivery wrote, never from the message's
+    /// own headers — a released message must not be able to name its own audience.
+    /// </summary>
+    [Fact]
+    public async Task A_release_ignores_the_addresses_in_the_message_body()
+    {
+        await CreateMailboxAsync("alice");
+        await CreateMailboxAsync("victim");
+
+        StoredMessage stored = await HoldAsync(
+            "From: x@lies.example\r\nTo: victim@example.com\r\n\r\nBody.\r\n",
+            ("alice@example.com", RelayDecision.AcceptLocal));
+
+        await ReleaseAsync(stored);
+
+        MailboxId victim = new(await ScalarAsync<Guid>(
+            "SELECT Id FROM Mailboxes WHERE LocalPart = 'victim'"));
+
+        (await ScalarAsync<int>(
+            "SELECT COUNT(*) FROM Deliveries WHERE MailboxId = @Id", new { Id = victim.Value }))
+            .ShouldBe(0);
+    }
+
+    /// <summary>A release must not write the recipient rows again, or every release doubles them.</summary>
+    [Fact]
+    public async Task A_release_does_not_duplicate_the_recipient_rows()
+    {
+        await CreateMailboxAsync("alice");
+
+        StoredMessage stored = await HoldAsync(
+            "Subject: held\r\n\r\nBody.\r\n",
+            ("alice@example.com", RelayDecision.AcceptLocal));
+
+        await ReleaseAsync(stored);
+
+        (await ScalarAsync<int>("SELECT COUNT(*) FROM MessageRecipients")).ShouldBe(1);
+    }
+
+    /// <summary>A release takes the same alias expansion an ordinary delivery does.</summary>
+    [Fact]
+    public async Task A_released_message_expands_an_alias()
+    {
+        await CreateMailboxAsync("alice");
+        await CreateMailboxAsync("bob");
+        await CreateAliasAsync("team", "alice@example.com", "bob@example.com");
+
+        StoredMessage stored = await HoldAsync(
+            "Subject: held\r\n\r\nBody.\r\n",
+            ("team@example.com", RelayDecision.AcceptLocal));
+
+        DeliveryResult result = await ReleaseAsync(stored);
+
+        result.TotalDeliveries.ShouldBe(2);
+        (await ScalarAsync<int>("SELECT COUNT(*) FROM Deliveries")).ShouldBe(2);
+    }
+
+    /// <summary>And charges the quota the same way, per mailbox.</summary>
+    [Fact]
+    public async Task A_released_message_is_charged_against_the_quota()
+    {
+        await CreateMailboxAsync("alice", quotaBytes: 1_000_000);
+
+        StoredMessage stored = await HoldAsync(
+            "Subject: held\r\n\r\nBody.\r\n",
+            ("alice@example.com", RelayDecision.AcceptLocal));
+
+        (await ScalarAsync<long>("SELECT StorageUsedBytes FROM Mailboxes WHERE LocalPart = 'alice'"))
+            .ShouldBe(0);
+
+        await ReleaseAsync(stored);
+
+        (await ScalarAsync<long>("SELECT StorageUsedBytes FROM Mailboxes WHERE LocalPart = 'alice'"))
+            .ShouldBe(stored.SizeBytes);
+    }
+
+    /// <summary>
+    /// A release whose recipients no longer exist reaches nobody, and says so rather than
+    /// reporting a success the operator would believe.
+    /// </summary>
+    [Fact]
+    public async Task A_release_to_a_mailbox_that_is_gone_delivers_nothing()
+    {
+        StoredMessage stored = await HoldAsync(
+            "Subject: held\r\n\r\nBody.\r\n",
+            ("nobody@example.com", RelayDecision.AcceptLocal));
+
+        DeliveryResult result = await ReleaseAsync(stored);
+
+        result.TotalDeliveries.ShouldBe(0);
+        result.Outcomes.ShouldHaveSingleItem().MailboxesDelivered.ShouldBe(0);
+    }
+
+    /// <summary>A message held with no recipient rows at all is a repair problem, not a crash.</summary>
+    [Fact]
+    public async Task A_release_with_no_recipient_rows_delivers_nothing()
+    {
+        await CreateMailboxAsync("alice");
+
+        StoredMessage stored = await HoldAsync("Subject: held\r\n\r\nBody.\r\n");
+
+        DeliveryResult result = await ReleaseAsync(stored);
+
+        result.Outcomes.ShouldBeEmpty();
+        (await ScalarAsync<int>("SELECT COUNT(*) FROM Deliveries")).ShouldBe(0);
+    }
 }
