@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Filtering tests: the verdict model and its policy, the attachment name check, the
+    heuristics, the spam pipeline, quarantine and the inbound rate limits — milestone 12's
+    subsystem, in the same per-subsystem split the other test projects make.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>MailServer.Filtering.Tests</RootNamespace>
+    <AssemblyName>MailServer.Filtering.Tests</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MailServer.Domain\MailServer.Domain.csproj" />
+    <ProjectReference Include="..\..\src\MailServer.Application\MailServer.Application.csproj" />
+    <ProjectReference Include="..\..\src\MailServer.Infrastructure\MailServer.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\MailServer.Persistence.Sqlite\MailServer.Persistence.Sqlite.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Shouldly" />
+    <PackageReference Include="Microsoft.Extensions.Logging" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Using Include="Shouldly" />
+  </ItemGroup>
+
+</Project>
