@@ -7,6 +7,7 @@ using MailServer.Application.Abstractions.Time;
 using MailServer.Domain.Entities;
 using MailServer.Domain.Enums;
 using MailServer.Domain.Policies;
+using MailServer.Domain.Smtp;
 using MailServer.Domain.ValueObjects;
 using MailServer.Infrastructure.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -432,6 +433,21 @@ public sealed class OutboundDeliveryHostedService(
         await writer.WriteAsync(dsn.Content, cancellationToken).ConfigureAwait(false);
         StoredMessage stored = await writer.CommitAsync(cancellationToken).ConfigureAwait(false);
 
+        // A bounce for a sender this server hosts is delivered here, not relayed. It used to be
+        // queued for outbound delivery like any other message, which sent it on a trip through
+        // public DNS to reach a mailbox on this very machine - and when that trip failed, because
+        // the domain's MX did not yet point here, or pointed at an address this host cannot reach
+        // from inside its own NAT, the bounce failed permanently with a null reverse path and was
+        // dropped without trace. Submission only accepts a hosted sender, so that was every
+        // bounce of every message a user of this server sent.
+        ISmtpDirectory directory = scope.ServiceProvider.GetRequiredService<ISmtpDirectory>();
+
+        if (await directory.IsLocalDomainAsync(item.ReversePath.Domain, cancellationToken).ConfigureAwait(false))
+        {
+            await DeliverDsnLocallyAsync(scope, item, stored, isDelayWarning, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         // A DSN is a message this server wrote, not one it received - SmtpListenerRole.Generated
         // and the loopback address say so honestly rather than fabricating a peer.
         MessageRecord record = MessageRecord.Create(
@@ -468,6 +484,65 @@ public sealed class OutboundDeliveryHostedService(
             "Generated a {Kind} DSN for {Recipient} regarding message {MessageId}.",
             isDelayWarning ? "delay-warning" : "failure",
             item.ReversePath.Value,
+            item.MessageId.Value);
+    }
+
+    /// <summary>
+    /// Hands a DSN for a hosted sender to local delivery.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Through <see cref="ILocalDeliveryService"/> rather than by writing delivery rows here, so a
+    /// bounce takes the same alias expansion, quota accounting and UID allocation as any other
+    /// message a mailbox receives. It arrives with a null reverse path, as RFC 3464 requires,
+    /// and as <c>Generated</c> — so it is neither re-verified nor filtered, being this server's
+    /// own composition rather than a stranger's.
+    /// </para>
+    /// <para>
+    /// <b>A bounce that reaches no mailbox is logged and stops there.</b> The sender's mailbox
+    /// may have been deleted since the message went out; relaying the bounce elsewhere instead
+    /// would send a hosted domain's mail to the Internet to find a mailbox this server already
+    /// knows is not there, and a bounce cannot itself be bounced.
+    /// </para>
+    /// </remarks>
+    private async Task DeliverDsnLocallyAsync(
+        AsyncServiceScope scope,
+        OutboundQueueItem item,
+        StoredMessage stored,
+        bool isDelayWarning,
+        CancellationToken cancellationToken)
+    {
+        ILocalDeliveryService local = scope.ServiceProvider.GetRequiredService<ILocalDeliveryService>();
+
+        DeliveryResult result = await local
+            .DeliverAsync(
+                new DeliveryRequest(
+                    stored,
+                    ReversePath: null,
+                    [new AcceptedRecipient(item.ReversePath!, RelayDecision.AcceptLocal)],
+                    LoopbackAddress,
+                    GreetedName: null,
+                    SmtpListenerRole.Generated,
+                    TlsActive: false,
+                    AuthenticatedAs: null),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result.TotalDeliveries == 0)
+        {
+            Logger.LogWarning(
+                "A {Kind} DSN for {Recipient} regarding message {MessageId} reached no local mailbox; the mailbox may no longer exist.",
+                isDelayWarning ? "delay-warning" : "failure",
+                item.ReversePath!.Value,
+                item.MessageId.Value);
+
+            return;
+        }
+
+        Logger.LogInformation(
+            "Delivered a {Kind} DSN to local mailbox {Recipient} regarding message {MessageId}.",
+            isDelayWarning ? "delay-warning" : "failure",
+            item.ReversePath!.Value,
             item.MessageId.Value);
     }
 

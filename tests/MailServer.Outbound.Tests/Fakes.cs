@@ -401,3 +401,53 @@ internal sealed class FakeHealthRegistry : IHealthRegistry
     public HealthState GetOverallState() =>
         _readings.Values.Select(r => r.State).DefaultIfEmpty(HealthState.Unknown).Max();
 }
+
+/// <summary>A directory that knows which domains are hosted here, and nothing else.</summary>
+/// <remarks>
+/// The worker asks it one question — is a bounce's recipient one of ours — so the others refuse
+/// loudly rather than answering something a test did not arrange.
+/// </remarks>
+internal sealed class FakeHostedDomains : ISmtpDirectory
+{
+    public HashSet<string> Hosted { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public ValueTask<bool> IsLocalDomainAsync(DomainName domain, CancellationToken cancellationToken) =>
+        ValueTask.FromResult(Hosted.Contains(domain.Value));
+
+    public ValueTask<LocalRecipientStatus> InspectLocalRecipientAsync(
+        EmailAddress recipient, CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
+
+    public ValueTask<bool> IsAuthorizedRelayAddressAsync(
+        IpAddressValue address, CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
+
+    public ValueTask<bool> MayActAsAsync(
+        EmailAddress authenticatedMailbox, EmailAddress claimedSender, CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
+
+    public ValueTask<bool> MayRelayAsAsync(
+        EmailAddress authenticatedMailbox, EmailAddress recipient, CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
+}
+
+/// <summary>Local delivery that records what it was handed, and places it in one mailbox per recipient.</summary>
+internal sealed class RecordingLocalDelivery : ILocalDeliveryService
+{
+    public List<DeliveryRequest> Requests { get; } = [];
+
+    /// <summary>Set to zero to act out a recipient whose mailbox no longer exists.</summary>
+    public int MailboxesPerRecipient { get; set; } = 1;
+
+    public Task<DeliveryResult> DeliverAsync(DeliveryRequest request, CancellationToken cancellationToken)
+    {
+        Requests.Add(request);
+
+        return Task.FromResult(new DeliveryResult(
+            request.Message.Id,
+            [.. request.Recipients.Select(r => new RecipientOutcome(r.Address, MailboxesPerRecipient, false))]));
+    }
+
+    public Task<DeliveryResult> DeliverReleasedAsync(ReleaseRequest request, CancellationToken cancellationToken) =>
+        throw new NotSupportedException("The outbound worker never releases quarantined mail.");
+}

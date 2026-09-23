@@ -4,6 +4,7 @@ using MailServer.Application.Abstractions.Smtp;
 using MailServer.Application.Abstractions.Time;
 using MailServer.Domain.Entities;
 using MailServer.Domain.Enums;
+using MailServer.Domain.Smtp;
 using MailServer.Domain.ValueObjects;
 using MailServer.Infrastructure.Configuration;
 using MailServer.Service.Hosting;
@@ -40,6 +41,10 @@ public sealed class OutboundDeliveryHostedServiceTests
 
         public FakeClock Clock { get; } = new(Now);
 
+        public FakeHostedDomains HostedDomains { get; } = new();
+
+        public RecordingLocalDelivery LocalDelivery { get; } = new();
+
         private readonly ServiceProvider _provider;
         private readonly OutboundDeliveryHostedService _service;
 
@@ -65,6 +70,8 @@ public sealed class OutboundDeliveryHostedServiceTests
             services.AddSingleton<IDsnComposer>(DsnComposer);
             services.AddSingleton<IMessageStore>(MessageStore);
             services.AddSingleton<IDeliveryRepository>(Deliveries);
+            services.AddSingleton<ISmtpDirectory>(HostedDomains);
+            services.AddSingleton<ILocalDeliveryService>(LocalDelivery);
 
             _provider = services.BuildServiceProvider();
 
@@ -204,6 +211,100 @@ public sealed class OutboundDeliveryHostedServiceTests
         OutboundQueueItem dsnItem = harness.Queue.AllItems.Single(i => i.IsDsn);
         dsnItem.DestinationAddress.Value.ShouldBe("sender@origin.example");
         dsnItem.ReversePath.ShouldBeNull();
+    }
+
+    /// <summary>
+    /// A bounce for a sender this server hosts is delivered here, not relayed back out.
+    /// </summary>
+    /// <remarks>
+    /// Found by running the server: the bounce was queued for outbound delivery to the hosted
+    /// domain, the worker looked up that domain's MX in public DNS, found none, failed the DSN
+    /// permanently — and, a DSN having a null reverse path, dropped it without trace. Since
+    /// submission only accepts hosted senders, that was every bounce any user ever received.
+    /// </remarks>
+    [Fact]
+    public async Task A_bounce_for_a_hosted_sender_is_delivered_locally()
+    {
+        await using Harness harness = new();
+        harness.HostedDomains.Hosted.Add("hosted.example");
+
+        (StoredMessageId messageId, Guid recipientId) = await SeedMessageAsync(
+            harness.Deliveries, harness.MessageStore, EmailAddress.Parse("alice@hosted.example"));
+
+        OutboundQueueItem item = OutboundQueueItem.Create(
+            messageId, recipientId, EmailAddress.Parse("nobody@destination.example"),
+            EmailAddress.Parse("alice@hosted.example"), requireTls: false, isDsn: false, Now);
+        await harness.Queue.AddAsync(item, CancellationToken.None);
+
+        harness.DeliveryClient.Enqueue(Bounced());
+
+        await harness.RunUntilAsync(() => harness.LocalDelivery.Requests.Count == 1);
+
+        DeliveryRequest bounce = harness.LocalDelivery.Requests.ShouldHaveSingleItem();
+
+        // Addressed to the original sender, from the null reverse path RFC 3464 requires, and
+        // marked as this server's own composition so it is neither re-verified nor filtered.
+        bounce.Recipients.ShouldHaveSingleItem().ShouldBe(
+            new AcceptedRecipient(EmailAddress.Parse("alice@hosted.example"), RelayDecision.AcceptLocal));
+        bounce.ReversePath.ShouldBeNull();
+        bounce.ListenerRole.ShouldBe(SmtpListenerRole.Generated);
+
+        // And it was not also queued for relay.
+        harness.Queue.AllItems.ShouldNotContain(i => i.IsDsn);
+    }
+
+    /// <summary>A delay warning for a hosted sender takes the same route as a failure notice.</summary>
+    [Fact]
+    public async Task A_delay_warning_for_a_hosted_sender_is_delivered_locally()
+    {
+        await using Harness harness = new(o => o.DelayWarningThresholdHours = 4);
+        harness.HostedDomains.Hosted.Add("hosted.example");
+
+        (StoredMessageId messageId, Guid recipientId) = await SeedMessageAsync(
+            harness.Deliveries, harness.MessageStore, EmailAddress.Parse("alice@hosted.example"));
+
+        OutboundQueueItem fresh = OutboundQueueItem.Create(
+            messageId, recipientId, EmailAddress.Parse("nobody@destination.example"),
+            EmailAddress.Parse("alice@hosted.example"), requireTls: false, isDsn: false, Now);
+
+        // Old enough that the next temporary failure crosses the delay-warning threshold.
+        OutboundQueueItem aged = OutboundQueueItem.Rehydrate(
+            fresh.Id, fresh.MessageId, fresh.RecipientId, fresh.DestinationAddress, fresh.ReversePath,
+            fresh.RequireTls, fresh.IsDsn, fresh.Priority, QueueStatus.Pending, 3,
+            Now.AddHours(-5), Now.AddHours(-5), null, null, delayWarningSentUtc: null, "previously deferred",
+            Now.AddHours(-5));
+        await harness.Queue.AddAsync(aged, CancellationToken.None);
+
+        harness.DeliveryClient.Enqueue(Deferred());
+
+        await harness.RunUntilAsync(() => harness.LocalDelivery.Requests.Count == 1);
+
+        harness.DsnComposer.Requests.ShouldHaveSingleItem().IsDelayWarning.ShouldBeTrue();
+        harness.Queue.AllItems.ShouldNotContain(i => i.IsDsn);
+    }
+
+    /// <summary>
+    /// A remote sender's bounce is still relayed. The routing change is about hosted senders only.
+    /// </summary>
+    [Fact]
+    public async Task A_bounce_for_a_remote_sender_is_still_queued_for_relay()
+    {
+        await using Harness harness = new();
+        harness.HostedDomains.Hosted.Add("hosted.example");
+
+        (StoredMessageId messageId, Guid recipientId) = await SeedMessageAsync(
+            harness.Deliveries, harness.MessageStore, EmailAddress.Parse("sender@origin.example"));
+
+        OutboundQueueItem item = OutboundQueueItem.Create(
+            messageId, recipientId, EmailAddress.Parse("nobody@destination.example"),
+            EmailAddress.Parse("sender@origin.example"), requireTls: false, isDsn: false, Now);
+        await harness.Queue.AddAsync(item, CancellationToken.None);
+
+        harness.DeliveryClient.Enqueue(Bounced());
+
+        await harness.RunUntilAsync(() => harness.Queue.AllItems.Any(i => i.IsDsn));
+
+        harness.LocalDelivery.Requests.ShouldBeEmpty();
     }
 
     [Fact]
