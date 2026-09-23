@@ -8,6 +8,7 @@ using MailServer.Domain.Enums;
 using MailServer.Domain.Policies;
 using MailServer.Domain.Smtp;
 using MailServer.Domain.ValueObjects;
+using MailServer.Infrastructure.Filtering;
 using MailServer.Infrastructure.Spf;
 using Microsoft.Extensions.Logging;
 
@@ -63,12 +64,17 @@ public sealed class SmtpConnectionHandler(
     /// <param name="remoteAddress">The peer, from the transport.</param>
     /// <param name="options">Listener configuration.</param>
     /// <param name="startedAt">When the connection was accepted.</param>
+    /// <param name="inboundRateLimiter">
+    /// The per-address allowance shared by every listener, or null for none. Passed in rather
+    /// than injected because it belongs to the listeners, not to this per-connection scope.
+    /// </param>
     /// <param name="cancellationToken">Host shutdown.</param>
     public async Task HandleAsync(
         Stream transport,
         IpAddressValue remoteAddress,
         SmtpConnectionOptions options,
         DateTimeOffset startedAt,
+        InboundRateLimiter? inboundRateLimiter,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(transport);
@@ -107,7 +113,8 @@ public sealed class SmtpConnectionHandler(
                 authenticator,
                 submissionPolicy,
                 rateLimiter,
-                spfEvaluator);
+                spfEvaluator,
+                inboundRateLimiter: inboundRateLimiter);
 
             SmtpLineReader reader = new(stream, options.MaxLineOctets);
 

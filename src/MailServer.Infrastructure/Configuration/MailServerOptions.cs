@@ -798,12 +798,19 @@ public sealed class LimitsOptions
     public int MaxInboundConnectionsPerHour { get; set; } = 120;
 
     /// <summary>
-    /// Messages one address may deliver in an hour, across every SMTP listener.
+    /// Mail transactions one address may start in an hour without signing in, across every SMTP
+    /// listener. Counted at <c>MAIL FROM</c>, whether or not a message is then accepted.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Higher than the connection allowance because a well-behaved exchanger reuses one
     /// connection for several messages, and penalising it for that would push senders towards
     /// the more expensive pattern.
+    /// </para>
+    /// <para>
+    /// A signed-in session is charged to <see cref="MaxMessagesPerMailboxPerHour"/> instead, and
+    /// never to this: every transaction draws on exactly one allowance.
+    /// </para>
     /// </remarks>
     public int MaxInboundMessagesPerHour { get; set; } = 600;
 

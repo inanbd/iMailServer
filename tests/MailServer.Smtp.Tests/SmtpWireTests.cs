@@ -11,6 +11,7 @@ using MailServer.Domain.Enums;
 using MailServer.Domain.Policies;
 using MailServer.Domain.Smtp;
 using MailServer.Domain.ValueObjects;
+using MailServer.Infrastructure.Filtering;
 using MailServer.Infrastructure.Smtp;
 using MailServer.Infrastructure.Spf;
 using Microsoft.Extensions.DependencyInjection;
@@ -794,5 +795,152 @@ public sealed class SmtpWireTests : IAsyncLifetime
         }
 
         (await peer.SendAsync("QUIT")).ShouldStartWith("221");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The per-address message allowance. InboundRateLimiter counted messages for a whole
+    // milestone while nothing on the SMTP path asked it to: MaxInboundMessagesPerHour was
+    // configurable, documented and unit-tested, and limited nothing. These go through a real
+    // listener because the limiter was never the broken part - the wiring to it was.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>Starts a second port-25 listener on these services, sharing the given limiter.</summary>
+    private SmtpListener StartRateLimitedListener(InboundRateLimiter rateLimiter)
+    {
+        SmtpListener listener = new(
+            new IPEndPoint(IPAddress.Loopback, 0),
+            new SmtpConnectionOptions(
+                SmtpListenerRole.InboundMta,
+                new SmtpProcessorOptions("mail.example.com", "AetherMail", 100, 1_000_000),
+                MaxLineOctets: 4096,
+                CommandTimeout: TimeSpan.FromSeconds(10),
+                SessionTimeout: TimeSpan.FromSeconds(30),
+                CertificatePurpose.SmtpInbound),
+            new SmtpConnectionLimiter(maxTotal: 10, maxPerAddress: 5),
+            _services.GetRequiredService<IServiceScopeFactory>(),
+            NullLogger<SmtpListener>.Instance,
+            rateLimiter);
+
+        _ = listener.StartAsync(CancellationToken.None);
+
+        return listener;
+    }
+
+    private static InboundRateLimiter MessageAllowance(int messages) =>
+        new(new TestClock(), new InboundRateLimits(MaxConnections: 100, MaxMessages: messages, TimeSpan.FromHours(1)));
+
+    private static async Task<Peer> ConnectAsync(SmtpListener listener)
+    {
+        TcpClient client = new();
+
+        await client.ConnectAsync(IPAddress.Loopback, listener.BoundPort);
+
+        return new Peer(client);
+    }
+
+    private static async Task SendMessageAsync(Peer peer)
+    {
+        (await peer.SendAsync("MAIL FROM:<sender@example.net>")).ShouldStartWith("250");
+        (await peer.SendAsync("RCPT TO:<user@example.com>")).ShouldStartWith("250");
+        (await peer.SendAsync("DATA")).ShouldStartWith("354");
+
+        await peer.WriteRawAsync("Subject: one\r\n\r\nBody.\r\n.\r\n");
+
+        (await peer.ReadReplyAsync()).ShouldStartWith("250");
+    }
+
+    [Fact]
+    public async Task An_address_past_its_message_allowance_is_refused_at_MAIL_FROM_and_closed()
+    {
+        SmtpListener listener = StartRateLimitedListener(MessageAllowance(2));
+
+        try
+        {
+            await using Peer peer = await ConnectAsync(listener);
+
+            await peer.ReadReplyAsync();
+            await peer.SendAsync("EHLO relay.example.net");
+
+            await SendMessageAsync(peer);
+            await SendMessageAsync(peer);
+
+            // Refused before a recipient is named, never mind a body.
+            string refusal = await peer.SendAsync("MAIL FROM:<sender@example.net>");
+
+            refusal.ShouldStartWith("421 4.7.0");
+
+            // Closed, because every further transaction in the window would be refused too.
+            (await peer.ReadReplyAsync()).ShouldBeEmpty();
+            _delivery.Requests.Count.ShouldBe(2);
+        }
+        finally
+        {
+            await listener.StopAsync(TimeSpan.FromSeconds(2));
+            await listener.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// The whole point of counting per address rather than per connection: a sender that
+    /// reconnects for every message is the shape of a junk run, and a limit that a reconnection
+    /// resets is not a limit.
+    /// </summary>
+    [Fact]
+    public async Task The_message_allowance_is_not_reset_by_reconnecting()
+    {
+        SmtpListener listener = StartRateLimitedListener(MessageAllowance(1));
+
+        try
+        {
+            await using (Peer first = await ConnectAsync(listener))
+            {
+                await first.ReadReplyAsync();
+                await first.SendAsync("EHLO relay.example.net");
+                await SendMessageAsync(first);
+                (await first.SendAsync("QUIT")).ShouldStartWith("221");
+            }
+
+            await using Peer second = await ConnectAsync(listener);
+
+            await second.ReadReplyAsync();
+            await second.SendAsync("EHLO relay.example.net");
+
+            (await second.SendAsync("MAIL FROM:<sender@example.net>")).ShouldStartWith("421");
+            _delivery.Requests.Count.ShouldBe(1);
+        }
+        finally
+        {
+            await listener.StopAsync(TimeSpan.FromSeconds(2));
+            await listener.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// Like the other abuse refusals, it says to come back later and nothing about the size of
+    /// the allowance: a sender that learns the rate it is held to paces itself just under it.
+    /// </summary>
+    [Fact]
+    public async Task The_message_allowance_refusal_does_not_reveal_the_allowance()
+    {
+        SmtpListener listener = StartRateLimitedListener(MessageAllowance(1));
+
+        try
+        {
+            await using Peer peer = await ConnectAsync(listener);
+
+            await peer.ReadReplyAsync();
+            await peer.SendAsync("EHLO relay.example.net");
+            await SendMessageAsync(peer);
+
+            string refusal = await peer.SendAsync("MAIL FROM:<sender@example.net>");
+
+            refusal.ShouldStartWith("421 4.7.0 ");
+            refusal["421 4.7.0 ".Length..].Any(char.IsDigit).ShouldBeFalse(refusal);
+        }
+        finally
+        {
+            await listener.StopAsync(TimeSpan.FromSeconds(2));
+            await listener.DisposeAsync();
+        }
     }
 }

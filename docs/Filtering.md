@@ -226,6 +226,25 @@ Both are free to the sender and expensive here.
 delivers, disconnects and repeats never exceeds a concurrency cap however fast it goes — the
 shape of most junk delivery and of the cheapest denial of service against a mail server.
 
+**What is counted, and against whom:**
+
+- **Connections** are counted on every SMTP listener, submission included, because an address
+  past its allowance is past it whichever port it knocks on. An office whose staff all submit
+  through one NAT address shares one `MaxInboundConnectionsPerHour`; raise it for such a site.
+  A refused connection gets a 421 before any command is read.
+- **Messages** are counted when a transaction starts, at `MAIL FROM`, whether or not a message
+  is then accepted — Postfix's convention, and the only point at which the refusal arrives
+  before the body has crossed the wire. Only sessions that have **not** signed in are counted.
+  A signed-in session is charged to its mailbox's `MaxMessagesPerMailboxPerHour` instead, so
+  every transaction draws on exactly one allowance and colleagues behind one address do not
+  spend each other's. Past the allowance, `MAIL FROM` is answered
+  `421 4.7.0 Not accepting more mail from this address for now; try again later` and the
+  connection is closed: every further transaction in the window would be refused the same way.
+
+Until the testing pass after Milestone 12, the message allowance was configurable, documented and
+unit-tested, and nothing on the SMTP path consulted it. `SmtpWireTests` now drives it through a
+real listener, because the limiter was never the broken part — the wiring to it was.
+
 **Counted in memory, not in the database.** A row written per inbound connection would make the
 limiter an amplifier for the attack it exists to stop. The counts are per process and reset on
 restart, which is the right trade: the limit exists to make a flood expensive, not to keep a
@@ -280,8 +299,8 @@ anybody able to spoof a source address.
   "FailClosedOnScannerError": false
 },
 "Limits": {
-  "MaxInboundConnectionsPerHour": 120,
-  "MaxInboundMessagesPerHour": 600
+  "MaxInboundConnectionsPerHour": 120,   // per address, across every SMTP listener
+  "MaxInboundMessagesPerHour": 600       // per address, transactions not signed in
 }
 ```
 

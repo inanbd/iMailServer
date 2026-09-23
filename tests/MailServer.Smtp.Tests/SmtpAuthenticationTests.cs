@@ -4,6 +4,7 @@ using MailServer.Domain.Enums;
 using MailServer.Domain.Policies;
 using MailServer.Domain.Smtp;
 using MailServer.Domain.ValueObjects;
+using MailServer.Infrastructure.Filtering;
 using MailServer.Infrastructure.Smtp;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -575,11 +576,15 @@ public sealed class SmtpSubmissionPolicyTests
     private readonly ScriptedAuthenticator _authenticator = new();
     private readonly ScriptedRateLimiter _rateLimiter = new();
 
-    private SmtpCommandProcessor Processor(SmtpListenerRole role = SmtpListenerRole.Submission)
+    private static readonly IpAddressValue Peer = IpAddressValue.Parse("198.51.100.20");
+
+    private SmtpCommandProcessor Processor(
+        SmtpListenerRole role = SmtpListenerRole.Submission,
+        InboundRateLimiter? inboundRateLimiter = null)
     {
         SmtpSessionContext session = new(
             role,
-            IpAddressValue.Parse("198.51.100.20"),
+            Peer,
             new DateTimeOffset(2026, 3, 1, 9, 0, 0, TimeSpan.Zero),
             isTlsActive: true);
 
@@ -591,8 +596,12 @@ public sealed class SmtpSubmissionPolicyTests
             NullLogger.Instance,
             _authenticator,
             new SubmissionPolicy(),
-            _rateLimiter);
+            _rateLimiter,
+            inboundRateLimiter: inboundRateLimiter);
     }
+
+    private static InboundRateLimiter OneMessageAllowance() =>
+        new(new TestClock(), new InboundRateLimits(MaxConnections: 100, MaxMessages: 1, TimeSpan.FromHours(1)));
 
     private static async Task<SmtpReply> SendAsync(SmtpCommandProcessor processor, string line) =>
         (await processor.ExecuteAsync(SmtpCommand.Parse(line), default)).Reply;
@@ -766,5 +775,67 @@ public sealed class SmtpSubmissionPolicyTests
         await SendAsync(processor, "MAIL FROM:<ceo@example.com>");
 
         _rateLimiter.Checked.ShouldBeEmpty();
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The per-address allowance, and who is charged to it.
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task An_unauthenticated_transaction_is_charged_to_the_address()
+    {
+        InboundRateLimiter inbound = OneMessageAllowance();
+
+        SmtpCommandProcessor processor = Processor(SmtpListenerRole.InboundMta, inbound);
+
+        await SendAsync(processor, "EHLO relay.example.net");
+        (await SendAsync(processor, "MAIL FROM:<anyone@elsewhere.example>")).Code.ShouldBe(250);
+        await SendAsync(processor, "RSET");
+
+        SmtpCommandResult refused = await processor.ExecuteAsync(
+            SmtpCommand.Parse("MAIL FROM:<anyone@elsewhere.example>"),
+            default);
+
+        refused.Reply.Code.ShouldBe(421);
+        refused.Action.ShouldBe(SmtpSessionAction.CloseAfterReply);
+        processor.Session.HasTransaction.ShouldBeFalse();
+    }
+
+    /// <summary>
+    /// One allowance per transaction, never two. A signed-in session already answers to its
+    /// mailbox's limit; charging its address as well would let one busy office behind one NAT
+    /// address spend the allowance of every colleague who shares it.
+    /// </summary>
+    [Fact]
+    public async Task A_signed_in_session_is_charged_to_its_mailbox_and_not_its_address()
+    {
+        InboundRateLimiter inbound = OneMessageAllowance();
+
+        SmtpCommandProcessor processor = Processor(SmtpListenerRole.Submission, inbound);
+
+        await AuthenticateAsync(processor);
+
+        (await SendAsync(processor, "MAIL FROM:<alice@example.com>")).Code.ShouldBe(250);
+        await SendAsync(processor, "RSET");
+        (await SendAsync(processor, "MAIL FROM:<alice@example.com>")).Code.ShouldBe(250);
+
+        _rateLimiter.Checked.Count.ShouldBe(2);
+
+        // Still the whole allowance left for an unauthenticated transaction from the address.
+        inbound.RecordMessage(Peer).ShouldBe(InboundRateOutcome.Allowed);
+    }
+
+    [Fact]
+    public async Task A_malformed_MAIL_FROM_does_not_spend_the_allowance()
+    {
+        // No transaction started, so nothing to count: the syntax refusal comes first.
+        InboundRateLimiter inbound = OneMessageAllowance();
+
+        SmtpCommandProcessor processor = Processor(SmtpListenerRole.InboundMta, inbound);
+
+        await SendAsync(processor, "EHLO relay.example.net");
+        (await SendAsync(processor, "MAIL FROM:no-angle-brackets")).Code.ShouldBe(501);
+
+        (await SendAsync(processor, "MAIL FROM:<anyone@elsewhere.example>")).Code.ShouldBe(250);
     }
 }

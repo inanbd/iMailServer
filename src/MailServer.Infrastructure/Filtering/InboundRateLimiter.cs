@@ -6,7 +6,10 @@ namespace MailServer.Infrastructure.Filtering;
 
 /// <summary>What an address is allowed, per window.</summary>
 /// <param name="MaxConnections">Connections one address may open in a window.</param>
-/// <param name="MaxMessages">Messages one address may deliver in a window.</param>
+/// <param name="MaxMessages">
+/// Mail transactions one unauthenticated address may start in a window — counted at
+/// <c>MAIL FROM</c>, whether or not a message is then accepted.
+/// </param>
 /// <param name="Window">How long the counts cover.</param>
 public sealed record InboundRateLimits(int MaxConnections, int MaxMessages, TimeSpan Window)
 {

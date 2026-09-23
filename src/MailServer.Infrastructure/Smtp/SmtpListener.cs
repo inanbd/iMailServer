@@ -221,6 +221,7 @@ public sealed class SmtpListener(
                         remoteAddress,
                         options,
                         DateTimeOffset.UtcNow,
+                        rateLimiter,
                         cancellationToken).ConfigureAwait(false);
                 }
                 finally

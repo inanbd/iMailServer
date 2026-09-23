@@ -347,6 +347,17 @@ public static class SmtpReplies
     public static SmtpReply TooManyConnections() =>
         new(421, "4.3.2", "Too many concurrent connections; try again later");
 
+    /// <summary>
+    /// 421 4.7.0 — this address has sent as much as it may for now, and the channel is closing.
+    /// </summary>
+    /// <remarks>
+    /// Names neither the allowance nor its size. A sender that learns the rate it is held to
+    /// learns how to pace itself just under it; a legitimate exchanger needs only to know the
+    /// refusal is temporary, and queues the message and retries.
+    /// </remarks>
+    public static SmtpReply NotAcceptingMoreMail() =>
+        new(421, "4.7.0", "Not accepting more mail from this address for now; try again later");
+
     public static SmtpReply ShuttingDown(string hostname) =>
         new(421, "4.3.2", $"{hostname} is shutting down; try again later");
 

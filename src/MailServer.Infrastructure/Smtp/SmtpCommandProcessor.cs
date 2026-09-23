@@ -3,6 +3,7 @@ using MailServer.Domain.Enums;
 using MailServer.Domain.Policies;
 using MailServer.Domain.Smtp;
 using MailServer.Domain.ValueObjects;
+using MailServer.Infrastructure.Filtering;
 using MailServer.Infrastructure.Spf;
 using Microsoft.Extensions.Logging;
 
@@ -90,6 +91,7 @@ public sealed class SmtpCommandProcessor
     private readonly ISubmissionRateLimiter? _rateLimiter;
     private readonly SpfEvaluator? _spfEvaluator;
     private readonly SmtpAbusePolicy _abusePolicy;
+    private readonly InboundRateLimiter? _inboundRateLimiter;
 
     /// <summary>The mechanism mid-exchange, or null when no AUTH is in flight.</summary>
     /// <remarks>
@@ -108,7 +110,8 @@ public sealed class SmtpCommandProcessor
         SubmissionPolicy? submissionPolicy = null,
         ISubmissionRateLimiter? rateLimiter = null,
         SpfEvaluator? spfEvaluator = null,
-        SmtpAbusePolicy? abusePolicy = null)
+        SmtpAbusePolicy? abusePolicy = null,
+        InboundRateLimiter? inboundRateLimiter = null)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(options);
@@ -138,6 +141,10 @@ public sealed class SmtpCommandProcessor
         // evaluated for SmtpListenerRole.InboundMta (see MailFromAsync), so a processor built for
         // Submission never needs one.
         _spfEvaluator = spfEvaluator;
+
+        // Null means no per-address message allowance. The listener that owns the limiter passes
+        // it in; one limiter serves every listener, so it cannot be a per-connection service.
+        _inboundRateLimiter = inboundRateLimiter;
     }
 
     /// <summary>The session this processor drives.</summary>
@@ -553,6 +560,27 @@ public sealed class SmtpCommandProcessor
             // message to find out. Advisory or not, a claim over the limit is a refusal the
             // sender asked for.
             return new SmtpCommandResult(SmtpReplies.MessageTooLarge(_options.MaxMessageSizeBytes));
+        }
+
+        // Every transaction is charged to exactly one allowance: the mailbox's when the session
+        // has signed in (CheckSubmissionAsync, below), the address's when it has not. Charging a
+        // signed-in session to its address as well would let one busy office behind one NAT
+        // address spend the allowance of every colleague who shares it.
+        //
+        // Counted when the transaction starts, whether or not a message is then accepted, which
+        // is Postfix's convention too: it is the only point at which the refusal arrives before
+        // the body has crossed the wire. Before SPF, because SPF costs DNS lookups and this costs
+        // a counter.
+        if (!_session.IsAuthenticated &&
+            _inboundRateLimiter?.RecordMessage(_session.RemoteAddress) is InboundRateOutcome.TooManyMessages)
+        {
+            _logger.LogWarning(
+                "Closing the SMTP session from {RemoteAddress}: it is past its message allowance.",
+                _session.RemoteAddress.Value);
+
+            // Closed rather than refused and kept: every further transaction in this window would
+            // be refused the same way, so holding the connection only holds a slot.
+            return new SmtpCommandResult(SmtpReplies.NotAcceptingMoreMail(), SmtpSessionAction.CloseAfterReply);
         }
 
         if (_session.IsAuthenticated && _session.AuthenticatedMailbox is { } mailbox)
