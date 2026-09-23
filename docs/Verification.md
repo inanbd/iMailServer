@@ -164,7 +164,11 @@ UI before treating it as a report about the server.
    `MailServer:Deliverability:TlsRpt:ReportMailbox` at the address in that record and enable
    collection. Reports are daily and aggregate, so this is the one step with a wait in it.
    - [ ] A day or two after publishing, a report from Google or Microsoft appears in that mailbox
-   - [ ] It is collected, and appears in the reports listing rather than sitting unread
+   - [ ] It is collected, and appears on **Deliverability → TLS Reports** for that domain, with
+         the selected report's failures and remedies beside the grid
+   - [ ] Before anything is collected, that page explains why the list is empty rather than
+         showing a bare grid
+   - [ ] Pasting a report's JSON into *Analyse a report* shows the same analysis
    - [ ] The mailbox is **unchanged** — nothing marked, moved or deleted by the collector
    - [ ] A non-report in the same mailbox (a bounce, a note) is not re-opened on the next pass
 
@@ -210,7 +214,9 @@ repository's CI, and none of it is claimed in `docs/Filtering.md`.
 
 1. **The Quarantine page renders.** Open Mail → Quarantine on Windows. It is a WPF binary and
    has never been run. Check that a held message lists its reasons, that Release and Discard are
-   enabled only for a held one, and that the grid survives an empty quarantine.
+   enabled only for a held one, that **Refresh** reloads the list (it was bound to a command that
+   did not exist until the post-Milestone-12 testing pass), and that the grid survives an empty
+   quarantine.
 
 2. **A held message releases into a real mailbox.** Send yourself a message with a `.exe`
    attachment from an outside account. It should be held, the sender should see a 250, and
@@ -227,5 +233,14 @@ repository's CI, and none of it is claimed in `docs/Filtering.md`.
 
 5. **The rate limits do not trip a real exchanger.** Watch for 421s in the log against Gmail or
    Microsoft 365 delivering a backlog. `MaxInboundConnectionsPerHour` is set from what those
-   providers are believed to do, not from what they were observed doing here.
+   providers are believed to do, not from what they were observed doing here. Mail clients that
+   sign in are given their connection back, so an office behind one address should never see
+   one; if it does, that is a bug, not a limit to raise.
+
+6. **A domain's first day, in the console.** On the Domains page, create a domain **without** a
+   mail hostname.
+   - [ ] Enable is refused, and the error says the hostname is missing
+   - [ ] The **Mail hostname** box sets it, and the domain's quota and message size are unchanged
+   - [ ] Mail sent to the domain while it is Pending gets `450 4.3.2` and arrives once it is
+         enabled, rather than bouncing
 
