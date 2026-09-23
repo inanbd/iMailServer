@@ -214,7 +214,6 @@ public sealed class MailboxAuthenticator(
             mailbox.Id);
     }
 
-    /// <summary>Refuses, having first spent a verification's worth of work.</summary>
     /// <summary>How a protocol is named in the audit trail and the log.</summary>
     private static string Describe(MailboxAccess protocol) => protocol switch
     {
@@ -223,6 +222,7 @@ public sealed class MailboxAuthenticator(
         _ => "mail submission",
     };
 
+    /// <summary>Refuses, having first spent a verification's worth of work.</summary>
     private async Task<MailboxAuthenticationResult> RefuseAsync(
         SaslCredential credential,
         string? subject,
@@ -247,7 +247,7 @@ public sealed class MailboxAuthenticator(
             cancellationToken).ConfigureAwait(false);
 
         logger.LogDebug(
-            "{Protocol} authentication refused from {RemoteAddress}: {Reason}",
+            "Authentication refused ({Protocol}) from {RemoteAddress}: {Reason}",
             Describe(protocol),
             remoteAddress.Value,
             diagnostic);
@@ -273,7 +273,7 @@ public sealed class MailboxAuthenticator(
             cancellationToken).ConfigureAwait(false);
 
         logger.LogInformation(
-            "{Protocol} sign-in refused for {Mailbox} from {RemoteAddress}: {Reason}",
+            "Sign-in refused for {Mailbox} ({Protocol}) from {RemoteAddress}: {Reason}",
             Describe(protocol),
             address.Value,
             remoteAddress.Value,
