@@ -80,6 +80,17 @@ public sealed class UnhandledExceptionBehavior<TRequest, TResponse>(
                 ex.Code);
             throw;
         }
+        catch (ApplicationLayerException ex) when (ex.IsRefusal)
+        {
+            // Answered as designed - a wrong password, a lockout, a maintenance window. Logged
+            // without the exception, because a stack trace says "look here" about code that
+            // did exactly what it should. The security event log keeps the detail that matters.
+            logger.LogWarning(
+                "{RequestName} refused: {ErrorCode}.",
+                requestName,
+                ex.Code);
+            throw;
+        }
         catch (ApplicationLayerException ex)
         {
             logger.LogError(

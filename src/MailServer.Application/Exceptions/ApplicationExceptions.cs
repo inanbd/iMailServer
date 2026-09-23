@@ -18,6 +18,23 @@ public abstract class ApplicationLayerException : Exception
         : base(message, inner) => Code = code;
 
     public string Code { get; }
+
+    /// <summary>
+    /// Whether this is the server refusing a request as designed, rather than failing to serve it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A wrong password, a lockout, a maintenance window: the caller was answered correctly and
+    /// there is nothing for an operator to fix. <c>UnhandledExceptionBehavior</c> logs these as
+    /// warnings without a stack trace, so the error log stays a list of things that went wrong
+    /// rather than a list of mistyped passwords with the server's call stack attached.
+    /// </para>
+    /// <para>
+    /// <b>False unless a type says otherwise.</b> A new kind of failure is an error until
+    /// somebody decides it is not, which is the safe direction to be wrong in.
+    /// </para>
+    /// </remarks>
+    public virtual bool IsRefusal => false;
 }
 
 /// <summary>One or more validation rules rejected the request.</summary>
@@ -64,6 +81,9 @@ public sealed class MaintenanceModeException : ApplicationLayerException
         => Mode = mode;
 
     public MaintenanceMode Mode { get; }
+
+    /// <inheritdoc />
+    public override bool IsRefusal => true;
 }
 
 /// <summary>
@@ -136,6 +156,10 @@ public sealed class AuthenticationFailedException : ApplicationLayerException
         : base("security.authentication.failed", message)
     {
     }
+
+    /// <inheritdoc />
+    /// <remarks>The security event log is the record of it, with the reason; this is not.</remarks>
+    public override bool IsRefusal => true;
 }
 
 /// <summary>
@@ -157,6 +181,9 @@ public sealed class AccountLockedOutException : ApplicationLayerException
 
     /// <summary>How long is left on the lockout.</summary>
     public TimeSpan Remaining { get; }
+
+    /// <inheritdoc />
+    public override bool IsRefusal => true;
 }
 
 /// <summary>
@@ -174,4 +201,7 @@ public sealed class PasswordChangeRequiredException : ApplicationLayerException
                "The master password must be changed before any other operation is permitted.")
     {
     }
+
+    /// <inheritdoc />
+    public override bool IsRefusal => true;
 }
