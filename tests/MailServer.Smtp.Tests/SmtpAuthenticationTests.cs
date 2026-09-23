@@ -838,4 +838,48 @@ public sealed class SmtpSubmissionPolicyTests
 
         (await SendAsync(processor, "MAIL FROM:<anyone@elsewhere.example>")).Code.ShouldBe(250);
     }
+
+    // ---------------------------------------------------------------------------------------
+    // The connection allowance, and the connections that sign in.
+    // ---------------------------------------------------------------------------------------
+
+    private static InboundRateLimiter OneConnectionAllowance() =>
+        new(new TestClock(), new InboundRateLimits(MaxConnections: 1, MaxMessages: 100, TimeSpan.FromHours(1)));
+
+    /// <summary>
+    /// The listener counted this connection at accept, before anything was known about it.
+    /// Signing in shows it is not the flood the allowance is for, so it is given back - or an
+    /// office submitting through one NAT address would spend its allowance on its own mail
+    /// clients.
+    /// </summary>
+    [Fact]
+    public async Task Signing_in_gives_the_connection_back_to_the_address_allowance()
+    {
+        InboundRateLimiter inbound = OneConnectionAllowance();
+
+        inbound.RecordConnection(Peer).ShouldBe(InboundRateOutcome.Allowed);
+
+        SmtpCommandProcessor processor = Processor(SmtpListenerRole.Submission, inbound);
+
+        await AuthenticateAsync(processor);
+
+        // The allowance is one, and it is free again.
+        inbound.RecordConnection(Peer).ShouldBe(InboundRateOutcome.Allowed);
+    }
+
+    [Fact]
+    public async Task A_failed_sign_in_keeps_the_connection_counted()
+    {
+        // What a guessing run is made of, and what the allowance exists to bound.
+        InboundRateLimiter inbound = OneConnectionAllowance();
+
+        inbound.RecordConnection(Peer);
+
+        SmtpCommandProcessor processor = Processor(SmtpListenerRole.Submission, inbound);
+
+        await SendAsync(processor, "EHLO client.example.net");
+        (await SendAsync(processor, $"AUTH PLAIN {Plain("alice@example.com", "wrong")}")).Code.ShouldBe(535);
+
+        inbound.RecordConnection(Peer).ShouldBe(InboundRateOutcome.TooManyConnections);
+    }
 }

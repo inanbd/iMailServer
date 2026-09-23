@@ -787,13 +787,21 @@ public sealed class LimitsOptions
     public int MaxConcurrentConnectionsTotal { get; set; } = 500;
 
     /// <summary>
-    /// Connections one address may open in an hour, across every SMTP listener.
+    /// Connections one address may open in an hour, across every SMTP listener, not counting
+    /// those that sign in.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The complement to <see cref="MaxConcurrentConnectionsPerIp"/>, which a peer that
     /// connects, delivers and disconnects never reaches however fast it repeats. Set from what
     /// a real exchanger does: a large provider working through a backlog opens connections in
     /// bursts, so this sits well above that and far below a delivery run of junk.
+    /// </para>
+    /// <para>
+    /// Every connection is counted when it is accepted, and one that then signs in is given
+    /// back, so mail clients behind one office address never spend it and a password-guessing
+    /// run, which never signs in, does.
+    /// </para>
     /// </remarks>
     public int MaxInboundConnectionsPerHour { get; set; } = 120;
 

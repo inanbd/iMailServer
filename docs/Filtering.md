@@ -229,9 +229,12 @@ shape of most junk delivery and of the cheapest denial of service against a mail
 **What is counted, and against whom:**
 
 - **Connections** are counted on every SMTP listener, submission included, because an address
-  past its allowance is past it whichever port it knocks on. An office whose staff all submit
-  through one NAT address shares one `MaxInboundConnectionsPerHour`; raise it for such a site.
-  A refused connection gets a 421 before any command is read.
+  past its allowance is past it whichever port it knocks on, and they are counted at accept,
+  before anything is known about them. **A connection that signs in is given back**: it has shown
+  it is not the flood the allowance exists to stop. So an office whose staff all submit through
+  one NAT address never spends it, while connections that never sign in — which is what a
+  password-guessing run is made of — spend it exactly as before. A refused connection gets a 421
+  before any command is read.
 - **Messages** are counted when a transaction starts, at `MAIL FROM`, whether or not a message
   is then accepted — Postfix's convention, and the only point at which the refusal arrives
   before the body has crossed the wire. Only sessions that have **not** signed in are counted.
@@ -299,7 +302,7 @@ anybody able to spoof a source address.
   "FailClosedOnScannerError": false
 },
 "Limits": {
-  "MaxInboundConnectionsPerHour": 120,   // per address, across every SMTP listener
+  "MaxInboundConnectionsPerHour": 120,   // per address, across every listener; sign-ins given back
   "MaxInboundMessagesPerHour": 600       // per address, transactions not signed in
 }
 ```

@@ -464,6 +464,12 @@ public sealed class SmtpCommandProcessor
             {
                 _session.Authenticate(result.Mailbox);
 
+                // This connection has proved who it is, so it stops counting against its
+                // address's hourly connection allowance - which is then spent only by
+                // connections that never sign in. From here on the session answers to its
+                // mailbox's limits instead. Once per session: AUTH cannot succeed twice.
+                _inboundRateLimiter?.ForgiveConnection(_session.RemoteAddress);
+
                 _logger.LogInformation(
                     "{Mailbox} authenticated from {RemoteAddress}.",
                     result.Mailbox.Value,

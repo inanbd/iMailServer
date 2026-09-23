@@ -10,6 +10,7 @@ using MailServer.Domain.Enums;
 using MailServer.Domain.Policies;
 using MailServer.Domain.Smtp;
 using MailServer.Domain.ValueObjects;
+using MailServer.Infrastructure.Filtering;
 using MailServer.Infrastructure.Smtp;
 using MailServer.Infrastructure.Spf;
 using Microsoft.Extensions.DependencyInjection;
@@ -81,23 +82,9 @@ public sealed class SmtpSubmissionWireTests : IAsyncLifetime
 
         _services = services.BuildServiceProvider();
 
-        SmtpConnectionOptions options = new(
-            SmtpListenerRole.Submission,
-            new SmtpProcessorOptions(
-                "mail.example.com",
-                "AetherMail",
-                100,
-                1_000_000,
-                IsAuthenticationAvailable: true,
-                MaxAuthenticationAttempts: 3),
-            MaxLineOctets: 4096,
-            CommandTimeout: TimeSpan.FromSeconds(10),
-            SessionTimeout: TimeSpan.FromSeconds(30),
-            CertificatePurpose.SmtpSubmission);
-
         _listener = new SmtpListener(
             new IPEndPoint(IPAddress.Loopback, 0),
-            options,
+            SubmissionOptions(),
             new SmtpConnectionLimiter(maxTotal: 10, maxPerAddress: 10),
             _services.GetRequiredService<IServiceScopeFactory>(),
             NullLogger<SmtpListener>.Instance);
@@ -107,6 +94,20 @@ public sealed class SmtpSubmissionWireTests : IAsyncLifetime
 
         return Task.CompletedTask;
     }
+
+    private static SmtpConnectionOptions SubmissionOptions() => new(
+        SmtpListenerRole.Submission,
+        new SmtpProcessorOptions(
+            "mail.example.com",
+            "AetherMail",
+            100,
+            1_000_000,
+            IsAuthenticationAvailable: true,
+            MaxAuthenticationAttempts: 3),
+        MaxLineOctets: 4096,
+        CommandTimeout: TimeSpan.FromSeconds(10),
+        SessionTimeout: TimeSpan.FromSeconds(30),
+        CertificatePurpose.SmtpSubmission);
 
     public async Task DisposeAsync()
     {
@@ -217,11 +218,11 @@ public sealed class SmtpSubmissionWireTests : IAsyncLifetime
         }
     }
 
-    private async Task<Client> ConnectAsync()
+    private async Task<Client> ConnectAsync(int? port = null)
     {
         TcpClient client = new();
 
-        await client.ConnectAsync(IPAddress.Loopback, _port);
+        await client.ConnectAsync(IPAddress.Loopback, port ?? _port);
 
         Client peer = new(client);
 
@@ -231,9 +232,9 @@ public sealed class SmtpSubmissionWireTests : IAsyncLifetime
     }
 
     /// <summary>Connects, upgrades to TLS and greets again.</summary>
-    private async Task<Client> ConnectSecureAsync()
+    private async Task<Client> ConnectSecureAsync(int? port = null)
     {
-        Client peer = await ConnectAsync();
+        Client peer = await ConnectAsync(port);
 
         await peer.SendAsync("EHLO client.example.net");
         await peer.StartTlsAsync();
@@ -522,6 +523,66 @@ public sealed class SmtpSubmissionWireTests : IAsyncLifetime
         for (int attempt = 0; attempt < 100 && _recorder.Written.Count < expected; attempt++)
         {
             await Task.Delay(20);
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The per-address connection allowance, which every listener shares.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// An office whose mail clients all submit through one NAT address. The listener counts each
+    /// connection at accept, before anything is known about it; each one that signs in is given
+    /// back, so the office never spends the allowance - while connections that never sign in,
+    /// which is what a guessing run is, still do.
+    /// </summary>
+    [Fact]
+    public async Task Connections_that_sign_in_do_not_spend_the_address_allowance()
+    {
+        InboundRateLimiter limiter = new(
+            new TestClock(),
+            new InboundRateLimits(MaxConnections: 2, MaxMessages: 100, TimeSpan.FromHours(1)));
+
+        SmtpListener listener = new(
+            new IPEndPoint(IPAddress.Loopback, 0),
+            SubmissionOptions(),
+            new SmtpConnectionLimiter(maxTotal: 10, maxPerAddress: 10),
+            _services.GetRequiredService<IServiceScopeFactory>(),
+            NullLogger<SmtpListener>.Instance,
+            limiter);
+
+        _ = listener.StartAsync(CancellationToken.None);
+
+        try
+        {
+            for (int i = 0; i < 5; i++)
+            {
+                await using Client client = await ConnectSecureAsync(listener.BoundPort);
+
+                (await client.SendAsync($"AUTH PLAIN {Plain(Mailbox, Password)}")).ShouldStartWith("235");
+                (await client.SendAsync("QUIT")).ShouldStartWith("221");
+            }
+
+            string banner = string.Empty;
+
+            for (int i = 0; i < 3; i++)
+            {
+                using TcpClient anonymous = new();
+
+                await anonymous.ConnectAsync(IPAddress.Loopback, listener.BoundPort);
+
+                using StreamReader reader = new(anonymous.GetStream(), Encoding.UTF8);
+
+                banner = await reader.ReadLineAsync() ?? string.Empty;
+            }
+
+            // Two anonymous connections were within the allowance; the third is past it.
+            banner.ShouldStartWith("421");
+        }
+        finally
+        {
+            await listener.StopAsync(TimeSpan.FromSeconds(2));
+            await listener.DisposeAsync();
         }
     }
 }

@@ -234,6 +234,75 @@ public sealed class InboundRateLimiterTests
         limiter.Sweep().ShouldBe(0);
         limiter.TrackedAddresses.ShouldBe(1);
     }
+
+    // ---- Connections that prove who they are -----------------------------------------------
+
+    [Fact]
+    public void A_forgiven_connection_no_longer_counts()
+    {
+        // An office's mail clients behind one address: every one signs in, so the allowance
+        // is never spent however many of them there are.
+        InboundRateLimiter limiter = Build(new ManualClock(Start), connections: 1);
+
+        for (int i = 0; i < 10; i++)
+        {
+            limiter.RecordConnection(Address()).ShouldBe(InboundRateOutcome.Allowed);
+            limiter.ForgiveConnection(Address());
+        }
+    }
+
+    [Fact]
+    public void Only_the_connections_that_sign_in_are_forgiven()
+    {
+        // A guessing run never signs in, so it spends the allowance exactly as before.
+        InboundRateLimiter limiter = Build(new ManualClock(Start), connections: 2);
+
+        limiter.RecordConnection(Address());
+        limiter.ForgiveConnection(Address());
+
+        limiter.RecordConnection(Address()).ShouldBe(InboundRateOutcome.Allowed);
+        limiter.RecordConnection(Address()).ShouldBe(InboundRateOutcome.Allowed);
+        limiter.RecordConnection(Address()).ShouldBe(InboundRateOutcome.TooManyConnections);
+    }
+
+    [Fact]
+    public void Forgiveness_never_builds_credit()
+    {
+        // Below zero would let an address bank sign-ins against a flood later in the window.
+        InboundRateLimiter limiter = Build(new ManualClock(Start), connections: 1);
+
+        limiter.RecordConnection(Address());
+
+        for (int i = 0; i < 5; i++)
+        {
+            limiter.ForgiveConnection(Address());
+        }
+
+        limiter.RecordConnection(Address()).ShouldBe(InboundRateOutcome.Allowed);
+        limiter.RecordConnection(Address()).ShouldBe(InboundRateOutcome.TooManyConnections);
+    }
+
+    [Fact]
+    public void Forgiving_an_address_the_limiter_is_not_tracking_remembers_nothing()
+    {
+        InboundRateLimiter limiter = Build(new ManualClock(Start));
+
+        limiter.ForgiveConnection(Address(99));
+
+        limiter.TrackedAddresses.ShouldBe(0);
+    }
+
+    [Fact]
+    public void Forgiveness_does_not_touch_the_message_count()
+    {
+        InboundRateLimiter limiter = Build(new ManualClock(Start), messages: 1);
+
+        limiter.RecordConnection(Address());
+        limiter.RecordMessage(Address());
+        limiter.ForgiveConnection(Address());
+
+        limiter.RecordMessage(Address()).ShouldBe(InboundRateOutcome.TooManyMessages);
+    }
 }
 
 /// <summary>

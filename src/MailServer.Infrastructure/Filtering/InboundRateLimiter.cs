@@ -142,6 +142,52 @@ public sealed class InboundRateLimiter(IClock clock, InboundRateLimits? limits =
     }
 
     /// <summary>
+    /// Takes back one counted connection from this address, because it has proved who it is.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Connections are counted on every listener, submission included, before anything is
+    /// known about them</b> — the count has to be taken at accept, or a flood would hold slots
+    /// while being refused. Left at that, an office whose staff all submit through one NAT
+    /// address would spend its hourly allowance on its own mail clients and then be refused
+    /// until the hour turned. A connection that signs in has shown it is not the flood the
+    /// allowance exists to stop, so it is given back; the address's allowance is then spent
+    /// only by connections that never prove who they are, which is what a password-guessing
+    /// run is made of.
+    /// </para>
+    /// <para>
+    /// <b>Never creates a counter, and never goes below zero.</b> An address the table has lost
+    /// track of — swept, or never admitted because the table was full — has nothing to give
+    /// back, and remembering it now would let sign-ins fill the table.
+    /// </para>
+    /// <para>
+    /// A connection accepted just before a window turns and signed in just after it is given
+    /// back from the new window. That is one connection's worth of generosity per window, to an
+    /// address that has just presented valid credentials, which is not the case worth a
+    /// timestamp per connection to get exactly right.
+    /// </para>
+    /// </remarks>
+    public void ForgiveConnection(IpAddressValue address)
+    {
+        ArgumentNullException.ThrowIfNull(address);
+
+        if (!_counters.TryGetValue(address.ToString(), out Counter? counter))
+        {
+            return;
+        }
+
+        lock (counter)
+        {
+            RollIfElapsed(counter);
+
+            if (counter.Connections > 0)
+            {
+                counter.Connections--;
+            }
+        }
+    }
+
+    /// <summary>
     /// Drops counters whose window has passed.
     /// </summary>
     /// <remarks>
