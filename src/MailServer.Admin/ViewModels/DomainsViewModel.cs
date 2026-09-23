@@ -65,6 +65,20 @@ public sealed partial class DomainsViewModel(
     [ObservableProperty]
     public partial string DeleteConfirmationText { get; set; } = string.Empty;
 
+    /// <summary>The mail hostname being typed for the selected domain.</summary>
+    /// <remarks>
+    /// A domain cannot be enabled without one, and the create form leaves it optional, so this
+    /// is how a domain created without one gets it. Filled from the selection and saved only
+    /// when it differs.
+    /// </remarks>
+    [ObservableProperty]
+    public partial string EditMailHostname { get; set; } = string.Empty;
+
+    public bool CanSetMailHostname =>
+        SelectedDomain is not null &&
+        !string.IsNullOrWhiteSpace(EditMailHostname) &&
+        !string.Equals(EditMailHostname.Trim(), SelectedDomain.MailHostname, StringComparison.OrdinalIgnoreCase);
+
     public bool CanDeletePermanently =>
         SelectedDomain is not null &&
         string.Equals(DeleteConfirmationText.Trim(), SelectedDomain.Name, StringComparison.OrdinalIgnoreCase);
@@ -160,6 +174,19 @@ public sealed partial class DomainsViewModel(
     });
 
     [RelayCommand]
+    private Task SetMailHostnameAsync() => ExecuteAsync(async () =>
+    {
+        if (SelectedDomain is null)
+        {
+            return;
+        }
+
+        // Through the gateway's setter rather than UpdateDomainAsync, which replaces every
+        // setting and would reset the domain's quotas and catch-all to their defaults.
+        await gateway.SetDomainMailHostnameAsync(SelectedDomain.Id, EditMailHostname).ConfigureAwait(true);
+    });
+
+    [RelayCommand]
     private Task EnableDomainAsync() => ExecuteAsync(async () =>
     {
         if (SelectedDomain is null)
@@ -216,7 +243,13 @@ public sealed partial class DomainsViewModel(
         // one domain can never authorise deleting another.
         DeleteConfirmationText = string.Empty;
         OnPropertyChanged(nameof(CanDeletePermanently));
+
+        EditMailHostname = value?.MailHostname ?? string.Empty;
+        OnPropertyChanged(nameof(CanSetMailHostname));
     }
+
+    partial void OnEditMailHostnameChanged(string value) =>
+        OnPropertyChanged(nameof(CanSetMailHostname));
 
     partial void OnDeleteConfirmationTextChanged(string value) =>
         OnPropertyChanged(nameof(CanDeletePermanently));

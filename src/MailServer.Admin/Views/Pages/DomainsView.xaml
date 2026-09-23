@@ -90,6 +90,7 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
 
             <Border Grid.Column="0" Style="{StaticResource Card}">
@@ -116,11 +117,36 @@
             </Border>
 
             <!--
+                The way out of the one dead end in a domain's life: created without a mail
+                hostname, it cannot be enabled until it has one, and the create form leaves it
+                optional.
+            -->
+            <Border Grid.Column="1" Style="{StaticResource Card}">
+                <StackPanel>
+                    <TextBlock Text="Mail hostname" Style="{StaticResource SectionHeader}" Margin="0,0,0,6" />
+                    <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
+                               Text="The selected domain's outbound identity: the name this server uses when it sends the domain's mail, which its reverse DNS and certificate must match. A domain cannot be enabled without one." />
+
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,10,0,0">
+                        <Run Text="For: " />
+                        <Run Text="{Binding SelectedDomain.Name, Mode=OneWay, FallbackValue=(select a domain)}"
+                             FontWeight="SemiBold" />
+                    </TextBlock>
+
+                    <TextBox Text="{Binding EditMailHostname, UpdateSourceTrigger=PropertyChanged}"
+                             Margin="0,4,0,10" />
+
+                    <Button Content="Save hostname" Command="{Binding SetMailHostnameCommand}"
+                            IsEnabled="{Binding CanSetMailHostname}" HorizontalAlignment="Left" MinWidth="120" />
+                </StackPanel>
+            </Border>
+
+            <!--
                 Permanent deletion is guarded by typing the domain name, matching how Windows
                 Server tooling protects destructive operations. The button stays disabled
                 until the typed text matches the selected row exactly.
             -->
-            <Border Grid.Column="1" Style="{StaticResource Card}">
+            <Border Grid.Column="2" Style="{StaticResource Card}">
                 <StackPanel>
                     <TextBlock Text="Delete permanently" Style="{StaticResource SectionHeader}" Margin="0,0,0,6" />
                     <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"

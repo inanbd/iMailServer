@@ -176,6 +176,18 @@ public static class SmtpReplies
     public static SmtpReply RelayDenied(string reason) =>
         new(554, "5.7.1", $"Relay access denied. {reason}");
 
+    /// <summary>
+    /// 450 4.3.2 — the recipient's domain is configured here but not yet in service.
+    /// </summary>
+    /// <remarks>
+    /// Transient on purpose. A domain is created Pending and enabled once its DNS and signing
+    /// are in place, and mail that arrives in between — from a sender that saw the new MX early
+    /// — is worth retrying rather than bouncing. A permanent refusal here would lose mail during
+    /// every cut-over. It does not claim the domain is not hosted here, because it is.
+    /// </remarks>
+    public static SmtpReply DomainNotYetInService(string address) =>
+        new(450, "4.3.2", $"<{address}>: this domain is not accepting mail yet; try again later");
+
     public static SmtpReply MailboxNotFound(string address) =>
         new(550, "5.1.1", $"<{address}>: recipient address rejected: no such user here");
 

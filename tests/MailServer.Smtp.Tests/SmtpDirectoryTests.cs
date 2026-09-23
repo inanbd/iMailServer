@@ -3,6 +3,7 @@ using Dapper;
 using MailServer.Application;
 using MailServer.Application.Abstractions.Persistence;
 using MailServer.Application.Abstractions.Smtp;
+using MailServer.Domain.Enums;
 using MailServer.Domain.ValueObjects;
 using MailServer.Infrastructure;
 using MailServer.Persistence.Sqlite;
@@ -206,6 +207,35 @@ public sealed class SmtpDirectoryTests : IAsyncLifetime
         }
 
         (await IsLocalAsync("example.com")).ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(0, DomainStatus.Pending)]
+    [InlineData(1, DomainStatus.Active)]
+    [InlineData(2, DomainStatus.Disabled)]
+    [InlineData(3, DomainStatus.PendingDeletion)]
+    public async Task A_configured_domain_reports_its_status_from_the_database(int stored, DomainStatus expected)
+    {
+        await using (DbConnection connection = await OpenAsync())
+        {
+            await connection.ExecuteAsync(
+                "UPDATE Domains SET Status = @Status WHERE Id = @Id",
+                new { Status = stored, Id = _domainId });
+        }
+
+        (await WithDirectoryAsync(async d =>
+            await d.GetConfiguredDomainStatusAsync(DomainName.Parse("Example.COM"), default)))
+            .ShouldBe(expected);
+    }
+
+    [Fact]
+    public async Task A_domain_that_is_not_configured_has_no_status()
+    {
+        // Null, not Pending: "not ours" is the ordinary relay refusal, and mistaking a stranger's
+        // domain for one being set up here would defer mail this server should refuse outright.
+        (await WithDirectoryAsync(async d =>
+            await d.GetConfiguredDomainStatusAsync(DomainName.Parse("elsewhere.example"), default)))
+            .ShouldBeNull();
     }
 
     [Fact]

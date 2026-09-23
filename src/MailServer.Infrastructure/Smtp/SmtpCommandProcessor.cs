@@ -741,14 +741,7 @@ public sealed class SmtpCommandProcessor
 
         if (decision.Decision == RelayDecision.Deny)
         {
-            _logger.LogWarning(
-                "Relay refused for {Recipient} from {RemoteAddress} on {Role}: {Reason}",
-                recipient.ToString(),
-                _session.RemoteAddress.Value,
-                _session.Role,
-                decision.Reason);
-
-            return new SmtpCommandResult(SmtpReplies.RelayDenied(decision.Reason));
+            return await RefuseRelayAsync(recipient, decision.Reason, cancellationToken).ConfigureAwait(false);
         }
 
         if (decision.Decision == RelayDecision.AcceptLocal)
@@ -789,6 +782,70 @@ public sealed class SmtpCommandProcessor
     /// acceptance: it can only supply facts, and the shape of the code is what keeps the single
     /// most consequential decision in the product in one reviewable place.
     /// </remarks>
+    /// <summary>
+    /// Words the relay policy's refusal, having asked whether the domain is configured here.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The policy has already decided, and nothing here can overturn it: every path returns a
+    /// refusal. What the directory's answer changes is only how the refusal reads and whether
+    /// it is temporary.
+    /// </para>
+    /// <para>
+    /// <b>A Pending domain is refused transiently.</b> It is ours and being set up, and mail from
+    /// a sender that saw the new MX early should be retried until the domain is enabled, not
+    /// bounced for good. The log says what to do, because "the domain is not hosted here" is
+    /// what the operator who just created it was being told before.
+    /// </para>
+    /// <para>
+    /// <b>A Disabled domain, or one scheduled for deletion, is refused as before</b> — "we no
+    /// longer take mail for that domain" is a permanent answer and the peer is told nothing more.
+    /// Only the log is more specific.
+    /// </para>
+    /// </remarks>
+    private async ValueTask<SmtpCommandResult> RefuseRelayAsync(
+        EmailAddress recipient,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        DomainStatus? configured = await _directory
+            .GetConfiguredDomainStatusAsync(recipient.Domain, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (configured == DomainStatus.Pending)
+        {
+            _logger.LogWarning(
+                "Deferred {Recipient} from {RemoteAddress}: the domain {Domain} is configured here but still Pending. Enable it on the Domains page to accept its mail; until then senders are told to retry.",
+                recipient.ToString(),
+                _session.RemoteAddress.Value,
+                recipient.Domain.Value);
+
+            return new SmtpCommandResult(SmtpReplies.DomainNotYetInService(recipient.ToString()));
+        }
+
+        if (configured is { } status && status != DomainStatus.Active)
+        {
+            _logger.LogWarning(
+                "Refused {Recipient} from {RemoteAddress} on {Role}: the domain {Domain} is configured here but {Status}, so its mail is refused.",
+                recipient.ToString(),
+                _session.RemoteAddress.Value,
+                _session.Role,
+                recipient.Domain.Value,
+                status);
+        }
+        else
+        {
+            _logger.LogWarning(
+                "Relay refused for {Recipient} from {RemoteAddress} on {Role}: {Reason}",
+                recipient.ToString(),
+                _session.RemoteAddress.Value,
+                _session.Role,
+                reason);
+        }
+
+        return new SmtpCommandResult(SmtpReplies.RelayDenied(reason));
+    }
+
     private async ValueTask<RelayPolicy.Result> EvaluateRelayAsync(
         EmailAddress recipient,
         CancellationToken cancellationToken)

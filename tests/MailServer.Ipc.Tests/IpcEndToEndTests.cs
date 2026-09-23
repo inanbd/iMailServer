@@ -628,4 +628,71 @@ public sealed class IpcEndToEndTests : IAsyncLifetime
         missing.Error!.Code.ShouldBe(forged.Error!.Code);
         missing.Error!.Message.ShouldBe(forged.Error!.Message);
     }
+
+    // ---------------------------------------------------------------------------------------
+    // The gateway, through the real client.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// UpdateDomainCommand replaces every setting at once, so a client that sends only a new
+    /// hostname resets the rest to their defaults. The gateway's hostname setter is how the
+    /// console gives a domain created without one the hostname it needs before it can be
+    /// enabled - and it must change nothing else.
+    /// </summary>
+    [Fact]
+    public async Task Setting_a_mail_hostname_leaves_every_other_setting_as_it_was()
+    {
+        DateTimeOffset now = new FixedClock().UtcNow;
+        MailDomain domain = MailDomain.Create(DomainId.New(), DomainName.Parse("keep.example"), now);
+
+        domain.SetQuotas(QuotaBytes.FromBytes(123_000_000), QuotaBytes.FromBytes(9_000_000_000), now);
+        domain.SetMaxMessageSize(10L * 1024 * 1024, now);
+        domain.SetRequireTlsForOutbound(true, now);
+        domain.SetCatchAllPolicy(CatchAllPolicy.DeliverToCatchAll, EmailAddress.Parse("all@keep.example"), now);
+
+        await _domains.AddAsync(domain, CancellationToken.None);
+
+        await using Client.IpcClient client = new(
+            new Client.IpcClientOptions { PipeName = _pipeName },
+            NullLogger<Client.IpcClient>.Instance);
+
+        client.SetSessionToken(_sessionToken);
+
+        await new Client.AdminGateway(client).SetDomainMailHostnameAsync(domain.Id.Value, " mail.keep.example ");
+
+        MailDomain after = (await _domains.GetByIdAsync(domain.Id, CancellationToken.None))!;
+
+        after.MailHostname!.Value.ShouldBe("mail.keep.example");
+        after.DefaultMailboxQuota.ShouldBe(QuotaBytes.FromBytes(123_000_000));
+        after.DomainQuota.ShouldBe(QuotaBytes.FromBytes(9_000_000_000));
+        after.MaxMessageSizeBytes.ShouldBe(10L * 1024 * 1024);
+        after.RequireTlsForOutbound.ShouldBeTrue();
+        after.CatchAllPolicy.ShouldBe(CatchAllPolicy.DeliverToCatchAll);
+        after.CatchAllMailbox!.Value.ShouldBe("all@keep.example");
+        after.Status.ShouldBe(DomainStatus.Pending);
+    }
+
+    /// <summary>
+    /// The setter copies each field by name, so a field added to the command later and not
+    /// copied would be reset by every hostname change. This makes adding one fail here until
+    /// the setter is taught it.
+    /// </summary>
+    [Fact]
+    public void The_hostname_setter_copies_every_setting_the_update_replaces()
+    {
+        string[] settings =
+        [
+            .. typeof(UpdateDomainCommand)
+                .GetProperties()
+                .Where(p => p.SetMethod is not null)
+                .Select(p => p.Name)
+                .Except([nameof(UpdateDomainCommand.DomainId), nameof(UpdateDomainCommand.MailHostname)]),
+        ];
+
+        string known = string.Join(",", settings.Order());
+
+        known.ShouldBe(
+            "CatchAllMailbox,CatchAllPolicy,DefaultMailboxQuotaBytes,DomainQuotaBytes,MaxMessageSizeBytes,RequireTlsForOutbound",
+            "UpdateDomainCommand gained or lost a setting. Copy it in AdminGateway.SetDomainMailHostnameAsync, then update this list.");
+    }
 }

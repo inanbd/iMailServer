@@ -135,6 +135,18 @@ public interface IAdminGateway
 
     Task UpdateDomainAsync(UpdateDomainCommand command, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Sets a domain's mail hostname and leaves every other setting as it is.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="UpdateDomainAsync"/> replaces every setting at once, so a caller that filled
+    /// in only the hostname would reset the domain's quotas, catch-all and message size to
+    /// their defaults. This reads the current settings and writes them back beside the new
+    /// hostname. A domain cannot be enabled without one, and this is how one created without
+    /// it gets it.
+    /// </remarks>
+    Task SetDomainMailHostnameAsync(Guid domainId, string mailHostname, CancellationToken cancellationToken = default);
+
     Task SetDomainStatusAsync(Guid domainId, bool enabled, CancellationToken cancellationToken = default);
 
     Task DeleteDomainAsync(
@@ -635,6 +647,32 @@ public sealed class AdminGateway(IpcClient client) : IAdminGateway
         await client
             .SendAsync<UpdateDomainCommand, Unit>("Domains.Update", command, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    public async Task SetDomainMailHostnameAsync(
+        Guid domainId,
+        string mailHostname,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(mailHostname);
+
+        DomainDetailDto current = await GetDomainAsync(domainId, cancellationToken).ConfigureAwait(false);
+
+        // Every field copied, because the command replaces them all. A field added to the
+        // command later and not copied here would be reset by every hostname change.
+        await UpdateDomainAsync(
+            new UpdateDomainCommand
+            {
+                DomainId = current.Id,
+                MailHostname = mailHostname.Trim(),
+                CatchAllPolicy = current.CatchAllPolicy,
+                CatchAllMailbox = current.CatchAllMailbox,
+                DefaultMailboxQuotaBytes = current.DefaultMailboxQuotaBytes,
+                DomainQuotaBytes = current.DomainQuotaBytes,
+                MaxMessageSizeBytes = current.MaxMessageSizeBytes,
+                RequireTlsForOutbound = current.RequireTlsForOutbound,
+            },
+            cancellationToken).ConfigureAwait(false);
     }
 
     public async Task SetDomainStatusAsync(

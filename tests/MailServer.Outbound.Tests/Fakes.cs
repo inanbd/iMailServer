@@ -414,6 +414,10 @@ internal sealed class FakeHostedDomains : ISmtpDirectory
     public ValueTask<bool> IsLocalDomainAsync(DomainName domain, CancellationToken cancellationToken) =>
         ValueTask.FromResult(Hosted.Contains(domain.Value));
 
+    public ValueTask<DomainStatus?> GetConfiguredDomainStatusAsync(
+        DomainName domain, CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
+
     public ValueTask<LocalRecipientStatus> InspectLocalRecipientAsync(
         EmailAddress recipient, CancellationToken cancellationToken) =>
         throw new NotSupportedException();

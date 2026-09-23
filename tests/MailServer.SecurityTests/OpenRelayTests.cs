@@ -23,6 +23,10 @@ internal sealed class SingleDomainDirectory : ISmtpDirectory
     public ValueTask<bool> IsLocalDomainAsync(DomainName domain, CancellationToken cancellationToken) =>
         ValueTask.FromResult(string.Equals(domain.Value, "example.com", StringComparison.OrdinalIgnoreCase));
 
+    public ValueTask<DomainStatus?> GetConfiguredDomainStatusAsync(DomainName domain, CancellationToken cancellationToken) =>
+        ValueTask.FromResult<DomainStatus?>(
+            string.Equals(domain.Value, "example.com", StringComparison.OrdinalIgnoreCase) ? DomainStatus.Active : null);
+
     public ValueTask<LocalRecipientStatus> InspectLocalRecipientAsync(
         EmailAddress recipient,
         CancellationToken cancellationToken) =>

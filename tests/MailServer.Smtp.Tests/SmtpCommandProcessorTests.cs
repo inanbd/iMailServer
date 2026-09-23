@@ -160,6 +160,69 @@ public sealed class SmtpCommandProcessorTests
         (await SendAsync(processor, "RCPT TO:<victim@elsewhere.example>")).Code.ShouldBe(554);
     }
 
+    // ---- Domains configured here but not in service ------------------------------------------
+
+    /// <summary>
+    /// A domain is created Pending and enabled once its DNS is ready. Mail that arrives in
+    /// between is worth retrying, and the refusal must not claim the domain is not hosted here -
+    /// which is what the operator who had just created it used to be told.
+    /// </summary>
+    [Fact]
+    public async Task A_recipient_in_a_pending_domain_is_deferred_not_bounced()
+    {
+        _directory.ConfiguredButNotActive["new.example"] = DomainStatus.Pending;
+
+        SmtpCommandProcessor processor = Processor(SmtpListenerRole.InboundMta);
+
+        await ConverseAsync(processor, "EHLO relay.example.net", "MAIL FROM:<s@example.net>");
+
+        SmtpReply reply = await SendAsync(processor, "RCPT TO:<user@new.example>");
+
+        reply.Code.ShouldBe(450);
+        reply.EnhancedStatus.ShouldBe("4.3.2");
+        reply.IsTransientFailure.ShouldBeTrue();
+        reply.Format().ShouldNotContain("not hosted");
+        processor.Session.Recipients.ShouldBeEmpty();
+    }
+
+    [Theory]
+    [InlineData(DomainStatus.Disabled)]
+    [InlineData(DomainStatus.PendingDeletion)]
+    public async Task A_recipient_in_a_domain_taken_out_of_service_is_still_refused_permanently(DomainStatus status)
+    {
+        // "We no longer take mail for that domain" is a permanent answer, and the peer is told
+        // nothing about why.
+        _directory.ConfiguredButNotActive["old.example"] = status;
+
+        SmtpCommandProcessor processor = Processor(SmtpListenerRole.InboundMta);
+
+        await ConverseAsync(processor, "EHLO relay.example.net", "MAIL FROM:<s@example.net>");
+
+        SmtpReply reply = await SendAsync(processor, "RCPT TO:<user@old.example>");
+
+        reply.Code.ShouldBe(554);
+        reply.EnhancedStatus.ShouldBe("5.7.1");
+        processor.Session.Recipients.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task A_pending_domain_never_turns_a_refusal_into_an_acceptance()
+    {
+        // The directory's answer changes only the wording and the retry. Whatever it says, the
+        // transaction gains no recipient and DATA stays out of sequence.
+        _directory.ConfiguredButNotActive["new.example"] = DomainStatus.Pending;
+
+        SmtpCommandProcessor processor = Processor(SmtpListenerRole.InboundMta);
+
+        await ConverseAsync(
+            processor,
+            "EHLO relay.example.net",
+            "MAIL FROM:<s@example.net>",
+            "RCPT TO:<user@new.example>");
+
+        (await SendAsync(processor, "DATA")).Code.ShouldBe(503);
+    }
+
     [Fact]
     public async Task A_refused_recipient_does_not_let_data_through()
     {

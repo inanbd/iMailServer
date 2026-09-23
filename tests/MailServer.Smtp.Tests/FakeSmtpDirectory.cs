@@ -1,4 +1,5 @@
 using MailServer.Application.Abstractions.Smtp;
+using MailServer.Domain.Enums;
 using MailServer.Domain.ValueObjects;
 
 namespace MailServer.Smtp.Tests;
@@ -38,6 +39,15 @@ internal sealed class FakeSmtpDirectory : ISmtpDirectory
 
         return ValueTask.FromResult(LocalDomains.Contains(domain.Value));
     }
+
+    /// <summary>Domains configured here but not in service, with their status.</summary>
+    public Dictionary<string, DomainStatus> ConfiguredButNotActive { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public ValueTask<DomainStatus?> GetConfiguredDomainStatusAsync(DomainName domain, CancellationToken cancellationToken) =>
+        ValueTask.FromResult<DomainStatus?>(
+            LocalDomains.Contains(domain.Value) ? DomainStatus.Active
+            : ConfiguredButNotActive.TryGetValue(domain.Value, out DomainStatus status) ? status
+            : null);
 
     public ValueTask<LocalRecipientStatus> InspectLocalRecipientAsync(
         EmailAddress recipient,

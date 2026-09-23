@@ -1,6 +1,7 @@
 using MailServer.Application.Abstractions.Repositories;
 using MailServer.Application.Abstractions.Smtp;
 using MailServer.Domain.Entities;
+using MailServer.Domain.Enums;
 using MailServer.Domain.Policies;
 using MailServer.Domain.ValueObjects;
 using MailServer.Infrastructure.Configuration;
@@ -47,6 +48,18 @@ public sealed class SmtpDirectory(
         // Exact match only: a subdomain of a hosted domain is a different domain, and treating
         // it as local would accept mail for names the operator never configured.
         return found is { IsOperational: true };
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<DomainStatus?> GetConfiguredDomainStatusAsync(
+        DomainName domain,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(domain);
+
+        MailDomain? found = await domains.GetByNameAsync(domain, cancellationToken).ConfigureAwait(false);
+
+        return found?.Status;
     }
 
     /// <inheritdoc />

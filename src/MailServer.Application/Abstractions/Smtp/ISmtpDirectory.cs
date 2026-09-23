@@ -1,3 +1,4 @@
+using MailServer.Domain.Enums;
 using MailServer.Domain.ValueObjects;
 
 namespace MailServer.Application.Abstractions.Smtp;
@@ -44,6 +45,18 @@ public interface ISmtpDirectory
 {
     /// <summary>Whether this server hosts the domain.</summary>
     ValueTask<bool> IsLocalDomainAsync(DomainName domain, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The status of a domain configured here, or null when it is not configured at all.
+    /// </summary>
+    /// <remarks>
+    /// Asked only after the relay policy has refused a recipient, to tell "not ours" from "ours,
+    /// but not in service", which deserve different answers: mail for a domain still being set
+    /// up is worth retrying rather than bouncing, and an operator reading the log should be told
+    /// to enable the domain rather than that it does not exist. The answer can change a refusal's
+    /// wording and whether it is temporary; it can never turn a refusal into an acceptance.
+    /// </remarks>
+    ValueTask<DomainStatus?> GetConfiguredDomainStatusAsync(DomainName domain, CancellationToken cancellationToken);
 
     /// <summary>Whether a recipient in a hosted domain can actually be delivered to.</summary>
     /// <remarks>

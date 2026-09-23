@@ -47,6 +47,21 @@ RelayDecision Evaluate(SmtpSessionContext session, EmailAddress recipient)
 `Deny` is the fall-through. The function is **total** — there is no default-allow branch
 anywhere in it. There is no configuration switch that turns port 25 into an open relay.
 
+**A domain configured here but not Active is not local**, so it reaches `Deny` too. After the
+decision, the processor asks the directory whether the domain is configured here at all, and
+only the wording and the retry change:
+
+| The recipient's domain | Reply |
+|---|---|
+| Not configured here | `554 5.7.1 Relay access denied. …` |
+| **Pending** — created, not yet enabled | `450 4.3.2 <…>: this domain is not accepting mail yet; try again later` |
+| Disabled, or marked for deletion | `554 5.7.1 Relay access denied. …`, as if not hosted |
+
+The Pending case is transient so that mail arriving during a cut-over — the MX published before
+the domain was enabled — is retried and delivered rather than bounced, and its log line tells the
+operator to enable the domain. None of the three can become an acceptance: the answer is read
+only after the policy has refused.
+
 The test suite attempts a relay through every listener role in every authentication state.
 Those tests are `OpenRelayTests` in `MailServer.SecurityTests`, and they were Milestone 6's exit
 criterion.

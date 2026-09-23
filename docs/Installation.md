@@ -167,6 +167,38 @@ deliberately bypasses the lockout.
 
 ---
 
+## Adding a domain
+
+Until the Milestone 13 wizard exists, a domain is added on the **Domains** page, and it does not
+take mail the moment it is created. That is deliberate: a domain that sent mail before its DNS
+and signing were in place would fail authentication at every major receiver and damage the
+sending IP's reputation for weeks.
+
+```text
+Create (Pending) → Mail hostname set → DNS published → Enable (Active)
+```
+
+1. **Create it.** It starts **Pending**. Give it a **mail hostname** now if you know it — the
+   name this server uses when it sends the domain's mail, which the reverse DNS and the
+   certificate must match; on a single server it is usually the server's own hostname.
+2. **Set the mail hostname if you skipped it.** A domain cannot be enabled without one. Select
+   the domain and use the **Mail hostname** box; it changes nothing else about the domain.
+3. **Publish its DNS.** Deliverability → Readiness builds the records for the domain and checks
+   them once published.
+4. **Enable it.** Only now does it accept mail and allow its mailboxes to send.
+
+**What senders see while it is Pending.** Mail for the domain is answered
+`450 4.3.2 ... this domain is not accepting mail yet; try again later`. Senders queue it and
+retry for days, so mail that arrives early because the MX record was published first is
+delivered once you enable the domain rather than bounced. The server log says which domain is
+waiting and that it needs enabling.
+
+**Disabling a domain is different.** A Disabled domain — or one marked for deletion — is refused
+permanently, exactly as if it were not hosted here: that is the correct answer to "we no longer
+take mail for this domain". Its mailboxes and stored mail are kept.
+
+---
+
 ## The full first-run wizard (Milestone 13)
 
 Sixteen steps, in this order, because each depends on the last:
