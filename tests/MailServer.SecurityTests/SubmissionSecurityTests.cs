@@ -20,6 +20,7 @@ internal sealed class OneAccountAuthenticator : IMailboxAuthenticator
 
     public Task<MailboxAuthenticationResult> AuthenticateAsync(
         SaslCredential credential,
+        MailboxAccess protocol,
         IpAddressValue remoteAddress,
         CancellationToken cancellationToken)
     {

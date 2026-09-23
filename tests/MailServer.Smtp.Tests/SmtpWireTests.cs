@@ -66,6 +66,7 @@ internal sealed class RefusingAuthenticator(ISecurityEventRecorder recorder) : I
 {
     public async Task<MailboxAuthenticationResult> AuthenticateAsync(
         SaslCredential credential,
+        MailboxAccess protocol,
         IpAddressValue remoteAddress,
         CancellationToken cancellationToken)
     {

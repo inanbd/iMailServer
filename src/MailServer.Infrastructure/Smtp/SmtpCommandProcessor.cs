@@ -450,7 +450,7 @@ public sealed class SmtpCommandProcessor
         using (credential)
         {
             MailboxAuthenticationResult result = await _authenticator
-                .AuthenticateAsync(credential, _session.RemoteAddress, cancellationToken)
+                .AuthenticateAsync(credential, MailboxAccess.Submission, _session.RemoteAddress, cancellationToken)
                 .ConfigureAwait(false);
 
             if (result.IsSuccess && result.Mailbox is not null)
@@ -519,6 +519,7 @@ public sealed class SmtpCommandProcessor
 
         public Task<MailboxAuthenticationResult> AuthenticateAsync(
             SaslCredential credential,
+            MailboxAccess protocol,
             IpAddressValue remoteAddress,
             CancellationToken cancellationToken) =>
             Task.FromResult(new MailboxAuthenticationResult(

@@ -2,6 +2,7 @@ using System.Globalization;
 using MailServer.Application.Abstractions.Repositories;
 using MailServer.Application.Abstractions.Smtp;
 using MailServer.Domain.Entities;
+using MailServer.Domain.Enums;
 using MailServer.Domain.Imap;
 using MailServer.Domain.Pop3;
 using MailServer.Domain.Smtp;
@@ -333,7 +334,7 @@ public sealed class Pop3CommandProcessor
         using SaslCredential credential = new(name, string.Empty, command.Argument.ToCharArray());
 
         MailboxAuthenticationResult result = await _authenticator!
-            .AuthenticateAsync(credential, _session.RemoteAddress, cancellationToken)
+            .AuthenticateAsync(credential, MailboxAccess.Pop3, _session.RemoteAddress, cancellationToken)
             .ConfigureAwait(false);
 
         if (!result.IsSuccess || result.Mailbox is null || result.MailboxId is null)

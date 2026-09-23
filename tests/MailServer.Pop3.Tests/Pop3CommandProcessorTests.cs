@@ -1,4 +1,5 @@
 using System.Text;
+using MailServer.Domain.Enums;
 using MailServer.Domain.Pop3;
 using MailServer.Domain.ValueObjects;
 using MailServer.Infrastructure.Pop3;
@@ -229,6 +230,21 @@ public sealed class Pop3CommandProcessorTests
         wire.ShouldStartWith("+OK maildrop has 2 messages (");
         harness.Processor.Session.State.ShouldBe(Pop3SessionState.Transaction);
         harness.Processor.Session.AuthenticatedMailbox!.Value.ShouldBe("alice@example.com");
+    }
+
+    /// <summary>
+    /// POP3 asks the authenticator about POP3 access. Its flag was once never consulted at all,
+    /// so every mailbox that could submit could also read and delete its mail here.
+    /// </summary>
+    [Fact]
+    public async Task Pass_asks_for_pop3_access()
+    {
+        Harness harness = Build();
+
+        await RunAsync(harness.Processor, "USER alice@example.com");
+        await RunAsync(harness.Processor, "PASS hunter2");
+
+        harness.Authenticator.SeenProtocols.ShouldBe([MailboxAccess.Pop3]);
     }
 
     /// <summary>

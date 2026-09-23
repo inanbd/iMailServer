@@ -25,11 +25,16 @@ internal sealed class ScriptedAuthenticator : IMailboxAuthenticator
 
     public int Calls { get; private set; }
 
+    /// <summary>Which access each attempt asked for, to prove the listener named its own.</summary>
+    public List<MailboxAccess> SeenProtocols { get; } = [];
+
     public Task<MailboxAuthenticationResult> AuthenticateAsync(
         SaslCredential credential,
+        MailboxAccess protocol,
         IpAddressValue remoteAddress,
         CancellationToken cancellationToken)
     {
+        SeenProtocols.Add(protocol);
         Calls++;
         SeenIdentities.Add(credential.AuthenticationIdentity);
         SeenPasswords.Add(credential.Password.ToString());
@@ -122,6 +127,15 @@ public sealed class SmtpAuthenticationTests
 
         processor.Session.IsAuthenticated.ShouldBeTrue();
         processor.Session.AuthenticatedMailbox!.Value.ShouldBe("alice@example.com");
+    }
+
+    /// <summary>Submission asks about submission access, now that it has to say so.</summary>
+    [Fact]
+    public async Task Auth_asks_for_submission_access()
+    {
+        await AuthPlainAsync(Processor(), "alice@example.com", "hunter2");
+
+        _authenticator.SeenProtocols.ShouldBe([MailboxAccess.Submission]);
     }
 
     [Fact]
@@ -511,6 +525,7 @@ public sealed class SmtpAuthenticationTests
     {
         public Task<MailboxAuthenticationResult> AuthenticateAsync(
             SaslCredential credential,
+            MailboxAccess protocol,
             IpAddressValue remoteAddress,
             CancellationToken cancellationToken)
         {

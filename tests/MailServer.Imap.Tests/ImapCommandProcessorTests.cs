@@ -27,11 +27,16 @@ internal sealed class ScriptedImapAuthenticator : IMailboxAuthenticator
 
     public int Calls { get; private set; }
 
+    /// <summary>Which access each attempt asked for, to prove the listener named its own.</summary>
+    public List<MailboxAccess> SeenProtocols { get; } = [];
+
     public Task<MailboxAuthenticationResult> AuthenticateAsync(
         SaslCredential credential,
+        MailboxAccess protocol,
         IpAddressValue remoteAddress,
         CancellationToken cancellationToken)
     {
+        SeenProtocols.Add(protocol);
         Calls++;
         SeenIdentities.Add(credential.AuthenticationIdentity);
         SeenPasswords.Add(credential.Password.ToString());
@@ -1671,6 +1676,23 @@ public sealed class ImapCommandProcessorTests
         processor.Session.State.ShouldBe(ImapSessionState.Authenticated);
         processor.Session.AuthenticatedMailbox!.Value.ShouldBe("alice@example.com");
         processor.Session.AuthenticatedMailboxId.ShouldBe(authenticator.KnownMailboxId);
+    }
+
+    /// <summary>
+    /// IMAP asks the authenticator about IMAP access, not about the protocol it was written for.
+    /// </summary>
+    /// <remarks>
+    /// It once asked about nothing, and the authenticator checked the submission flag: an
+    /// IMAP-only mailbox could not sign in and a send-only one could read its mail here.
+    /// </remarks>
+    [Fact]
+    public async Task Login_asks_for_imap_access()
+    {
+        ScriptedImapAuthenticator authenticator = new();
+
+        await ExecuteAsync(Processor(authenticator: authenticator), "a1 LOGIN alice@example.com hunter2");
+
+        authenticator.SeenProtocols.ShouldBe([MailboxAccess.Imap]);
     }
 
     [Fact]

@@ -17,12 +17,18 @@ namespace MailServer.Infrastructure.Smtp;
 /// <remarks>
 /// <para>
 /// <b>Every refusal costs the same and says the same.</b> An unknown address, a disabled
-/// mailbox, a mailbox not permitted to submit and a wrong password all return
+/// mailbox, a mailbox not permitted to use the protocol asking and a wrong password all return
 /// <see cref="MailboxAuthenticationOutcome.Failed"/>, and every one of them spends a full Argon2
 /// verification first. Returning early on an unknown address would make the refusal arrive in
 /// microseconds instead of ~100 ms, and that difference is measurable from anywhere on the
-/// Internet — it turns the submission port into an address-enumeration oracle, which is the
+/// Internet — it turns every sign-in port into an address-enumeration oracle, which is the
 /// first step of every credential-stuffing run against a mail server.
+/// </para>
+/// <para>
+/// <b>Access is judged against the protocol that asked, never a fixed one.</b> Submission, IMAP
+/// and POP3 each have their own flag on the mailbox, and a send-only service account that could
+/// sign in to IMAP would be a way to read — and over POP3, delete — the mail it was only ever
+/// meant to send.
 /// </para>
 /// <para>
 /// The credential belongs to the caller. This class reads it and does not dispose it, because
@@ -40,11 +46,20 @@ public sealed class MailboxAuthenticator(
     /// <inheritdoc />
     public async Task<MailboxAuthenticationResult> AuthenticateAsync(
         SaslCredential credential,
+        MailboxAccess protocol,
         IpAddressValue remoteAddress,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(credential);
         ArgumentNullException.ThrowIfNull(remoteAddress);
+
+        if (protocol is not (MailboxAccess.Submission or MailboxAccess.Imap or MailboxAccess.Pop3))
+        {
+            // Exactly one protocol. A combination would ask the mailbox to allow all of them at
+            // once, and None would ask for nothing and so be satisfied by every mailbox.
+            throw new ArgumentOutOfRangeException(
+                nameof(protocol), protocol, "Name exactly one protocol: Submission, Imap or Pop3.");
+        }
 
         if (!EmailAddress.TryParse(credential.AuthenticationIdentity, out EmailAddress? address))
         {
@@ -53,6 +68,7 @@ public sealed class MailboxAuthenticator(
             return await RefuseAsync(
                 credential,
                 subject: null,
+                protocol,
                 remoteAddress,
                 "The authentication identity is not a valid address.",
                 cancellationToken).ConfigureAwait(false);
@@ -69,6 +85,7 @@ public sealed class MailboxAuthenticator(
             return await RefuseAsync(
                 credential,
                 address.Value,
+                protocol,
                 remoteAddress,
                 "The authorization identity names a different mailbox, which this server does not permit.",
                 cancellationToken).ConfigureAwait(false);
@@ -87,6 +104,7 @@ public sealed class MailboxAuthenticator(
             return await RefuseAsync(
                 credential,
                 address.Value,
+                protocol,
                 remoteAddress,
                 mailbox is null
                     ? "No mailbox with that address."
@@ -144,23 +162,25 @@ public sealed class MailboxAuthenticator(
                 "The password did not match.");
         }
 
-        // Correct password. Everything below is about whether this mailbox may submit at all,
-        // and each refusal is still reported to the client as an ordinary failure.
+        // Correct password. Everything below is about whether this mailbox may use this protocol
+        // at all, and each refusal is still reported to the client as an ordinary failure.
         if (!mailbox.AllowsLogin)
         {
             return await RefuseAfterCorrectPasswordAsync(
                 address,
+                protocol,
                 remoteAddress,
                 $"The mailbox is {mailbox.Status} and may not sign in.",
                 cancellationToken).ConfigureAwait(false);
         }
 
-        if (!mailbox.AllowsAccess(MailboxAccess.Submission))
+        if (!mailbox.AllowsAccess(protocol))
         {
             return await RefuseAfterCorrectPasswordAsync(
                 address,
+                protocol,
                 remoteAddress,
-                "The mailbox is not permitted to submit mail.",
+                $"The mailbox is not permitted to use {Describe(protocol)}.",
                 cancellationToken).ConfigureAwait(false);
         }
 
@@ -184,7 +204,7 @@ public sealed class MailboxAuthenticator(
             SecurityEventType.MailboxAuthenticationSucceeded,
             address.Value,
             remoteAddress.Value,
-            "Authenticated on a submission listener.",
+            $"Authenticated for {Describe(protocol)}.",
             cancellationToken).ConfigureAwait(false);
 
         return new MailboxAuthenticationResult(
@@ -195,9 +215,18 @@ public sealed class MailboxAuthenticator(
     }
 
     /// <summary>Refuses, having first spent a verification's worth of work.</summary>
+    /// <summary>How a protocol is named in the audit trail and the log.</summary>
+    private static string Describe(MailboxAccess protocol) => protocol switch
+    {
+        MailboxAccess.Imap => "IMAP",
+        MailboxAccess.Pop3 => "POP3",
+        _ => "mail submission",
+    };
+
     private async Task<MailboxAuthenticationResult> RefuseAsync(
         SaslCredential credential,
         string? subject,
+        MailboxAccess protocol,
         IpAddressValue remoteAddress,
         string diagnostic,
         CancellationToken cancellationToken)
@@ -217,7 +246,11 @@ public sealed class MailboxAuthenticator(
             "Authentication failed.",
             cancellationToken).ConfigureAwait(false);
 
-        logger.LogDebug("Submission authentication refused from {RemoteAddress}: {Reason}", remoteAddress.Value, diagnostic);
+        logger.LogDebug(
+            "{Protocol} authentication refused from {RemoteAddress}: {Reason}",
+            Describe(protocol),
+            remoteAddress.Value,
+            diagnostic);
 
         return new MailboxAuthenticationResult(MailboxAuthenticationOutcome.Failed, null, diagnostic);
     }
@@ -225,6 +258,7 @@ public sealed class MailboxAuthenticator(
     /// <summary>Refuses after a correct password, where no further work is needed.</summary>
     private async Task<MailboxAuthenticationResult> RefuseAfterCorrectPasswordAsync(
         EmailAddress address,
+        MailboxAccess protocol,
         IpAddressValue remoteAddress,
         string diagnostic,
         CancellationToken cancellationToken)
@@ -239,7 +273,8 @@ public sealed class MailboxAuthenticator(
             cancellationToken).ConfigureAwait(false);
 
         logger.LogInformation(
-            "Submission refused for {Mailbox} from {RemoteAddress}: {Reason}",
+            "{Protocol} sign-in refused for {Mailbox} from {RemoteAddress}: {Reason}",
+            Describe(protocol),
             address.Value,
             remoteAddress.Value,
             diagnostic);

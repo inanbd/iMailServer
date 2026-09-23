@@ -16,6 +16,14 @@ that, and it refuses `USER` and `PASS` until `STLS` has run.
 
 ## Authentication
 
+**Enabling the listeners is not enough: each mailbox needs its own POP3 access.** A new mailbox is
+created with IMAP and submission access and without POP3, so turning on port 995 exposes no
+mailbox until an operator grants POP3 to the ones that need it — which is the point, since POP3's
+destructive read is the one way a client can remove mail the others still expect. IMAP and
+submission are checked the same way against their own flags. (Until the end-to-end testing after
+Milestone 12, every protocol was checked against the submission flag and the POP3 flag was never
+read; a mailbox that could submit could also read and delete its mail here.)
+
 **`USER` and `PASS` are refused until TLS is active, and the `USER` capability is withheld to say
 so.** RFC 2449 §6.2 makes that capability mean "that the USER and PASS commands are supported",
 so not announcing it is the only vocabulary POP3 has for IMAP's `LOGINDISABLED` — RFC 2595 gives

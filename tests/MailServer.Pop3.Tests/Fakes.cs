@@ -25,11 +25,16 @@ internal sealed class ScriptedPop3Authenticator : IMailboxAuthenticator
     /// <summary>Every (identity, password) pair this fake was asked about.</summary>
     public List<(string Identity, string Password)> Attempts { get; } = [];
 
+    /// <summary>Which access each attempt asked for, to prove the listener named its own.</summary>
+    public List<MailboxAccess> SeenProtocols { get; } = [];
+
     public Task<MailboxAuthenticationResult> AuthenticateAsync(
         SaslCredential credential,
+        MailboxAccess protocol,
         IpAddressValue remoteAddress,
         CancellationToken cancellationToken)
     {
+        SeenProtocols.Add(protocol);
         string password = new(credential.Password);
 
         Attempts.Add((credential.AuthenticationIdentity, password));

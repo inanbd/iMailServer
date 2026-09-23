@@ -543,7 +543,7 @@ public sealed class ImapCommandProcessor
         CancellationToken cancellationToken)
     {
         MailboxAuthenticationResult result = await _authenticator
-            .AuthenticateAsync(credential, _session.RemoteAddress, cancellationToken)
+            .AuthenticateAsync(credential, MailboxAccess.Imap, _session.RemoteAddress, cancellationToken)
             .ConfigureAwait(false);
 
         if (!result.IsSuccess || result.Mailbox is null || result.MailboxId is null)
@@ -2406,6 +2406,7 @@ public sealed class ImapCommandProcessor
 
         public Task<MailboxAuthenticationResult> AuthenticateAsync(
             SaslCredential credential,
+            MailboxAccess protocol,
             IpAddressValue remoteAddress,
             CancellationToken cancellationToken) =>
             Task.FromResult(new MailboxAuthenticationResult(

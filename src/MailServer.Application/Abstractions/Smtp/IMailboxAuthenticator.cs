@@ -1,3 +1,4 @@
+using MailServer.Domain.Enums;
 using MailServer.Domain.Smtp;
 using MailServer.Domain.ValueObjects;
 
@@ -15,7 +16,7 @@ public enum MailboxAuthenticationOutcome
     /// <summary>Refused. Covers a wrong password, an unknown mailbox, and a disabled one alike.</summary>
     Failed = 0,
 
-    /// <summary>The credential is correct and the mailbox may submit.</summary>
+    /// <summary>The credential is correct and the mailbox may use the protocol that asked.</summary>
     Succeeded = 1,
 
     /// <summary>
@@ -73,9 +74,23 @@ public interface IMailboxAuthenticator
     /// The credential, still in its clearable buffer. This method does not dispose it — the
     /// caller owns it and must, whatever the outcome.
     /// </param>
+    /// <param name="protocol">
+    /// The access being asked for — exactly one of <see cref="MailboxAccess.Submission"/>,
+    /// <see cref="MailboxAccess.Imap"/> or <see cref="MailboxAccess.Pop3"/> — checked against the
+    /// mailbox's own access flags.
+    /// </param>
     /// <param name="remoteAddress">The peer, for the security event.</param>
+    /// <remarks>
+    /// <b>The protocol is required and has no default, on purpose.</b> This port was written for
+    /// submission and IMAP and POP3 later reused it without saying who was asking, so every
+    /// sign-in was checked against the submission flag: an IMAP-only mailbox could not read its
+    /// mail, and a send-only one could read and delete it over IMAP and POP3, whose flags were
+    /// never consulted at all. A caller that cannot compile without naming its protocol cannot
+    /// make that mistake again.
+    /// </remarks>
     Task<MailboxAuthenticationResult> AuthenticateAsync(
         SaslCredential credential,
+        MailboxAccess protocol,
         IpAddressValue remoteAddress,
         CancellationToken cancellationToken);
 }

@@ -129,11 +129,12 @@ public sealed class SmtpSubmissionWireTests : IAsyncLifetime
     {
         public async Task<MailboxAuthenticationResult> AuthenticateAsync(
             SaslCredential credential,
+            MailboxAccess protocol,
             IpAddressValue remoteAddress,
             CancellationToken cancellationToken)
         {
             MailboxAuthenticationResult result = await inner
-                .AuthenticateAsync(credential, remoteAddress, cancellationToken)
+                .AuthenticateAsync(credential, protocol, remoteAddress, cancellationToken)
                 .ConfigureAwait(false);
 
             await recorder.RecordAsync(
