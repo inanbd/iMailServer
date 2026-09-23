@@ -309,8 +309,22 @@ public interface IAdminGateway
         CancellationToken cancellationToken = default);
 
     /// <summary>Reads an RFC 8460 TLS report and says what it means.</summary>
+    /// <remarks>
+    /// For a report this server did not collect itself — one forwarded by somebody, or received
+    /// before the <c>rua</c> mailbox existed. The JSON, already decompressed.
+    /// </remarks>
     Task<TlsReportDto> AnalyseTlsReportAsync(
         string report,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>The TLS reports collected for one hosted domain, newest first.</summary>
+    /// <remarks>
+    /// Filed under the domain whose <c>rua</c> mailbox received each report, never the
+    /// policy-domain the sender wrote — and every field is the sender's unauthenticated claim.
+    /// </remarks>
+    Task<IReadOnlyList<CollectedTlsReportDto>> GetCollectedTlsReportsAsync(
+        string domain,
+        int limit = 50,
         CancellationToken cancellationToken = default);
 
     /// <summary>Lists the messages the filter is holding.</summary>
@@ -1121,6 +1135,18 @@ public sealed class AdminGateway(IpcClient client) : IAdminGateway
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false)
         ?? throw new InvalidOperationException("The service returned an empty TLS report analysis.");
+
+    public async Task<IReadOnlyList<CollectedTlsReportDto>> GetCollectedTlsReportsAsync(
+        string domain,
+        int limit = 50,
+        CancellationToken cancellationToken = default) =>
+        await client
+            .SendAsync<GetCollectedTlsReportsQuery, IReadOnlyList<CollectedTlsReportDto>>(
+                "Deliverability.TlsReports",
+                new GetCollectedTlsReportsQuery { Domain = domain, Limit = limit },
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false)
+        ?? [];
 
     public async Task<IReadOnlyList<QuarantinedMessageDto>> GetQuarantineAsync(
         bool includeResolved = false,

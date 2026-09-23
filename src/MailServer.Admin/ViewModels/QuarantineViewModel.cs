@@ -101,6 +101,9 @@ public sealed partial class QuarantineViewModel(
     partial void OnIncludeResolvedChanged(bool value) => _ = LoadAsync();
 
     [RelayCommand]
+    private Task RefreshAsync() => LoadAsync();
+
+    [RelayCommand]
     private Task ReleaseAsync() => ExecuteAsync(async () =>
     {
         if (Selected is not { } message)

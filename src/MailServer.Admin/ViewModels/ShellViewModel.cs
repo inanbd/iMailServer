@@ -184,6 +184,10 @@ public sealed partial class ShellViewModel : ObservableObject, IDisposable
         // The report, the DNS plan, the header analyser and the delivery test share a page
         // because they share a subject - the domain named at the top of it.
         new("Readiness", "Deliverability", typeof(DeliverabilityViewModel)),
+        // The one exception, and why it is one: the readiness report checks that TLS-RPT is
+        // published; this page reads what senders actually reported. Configuration and what
+        // happened are different questions, and the answer to the second arrives by mail.
+        new("TLS Reports", "Deliverability", typeof(TlsReportsViewModel)),
 
         new("Statistics", "Monitoring", typeof(DashboardViewModel), IsAvailable: false),
         new("SMTP Sessions", "Monitoring", typeof(DashboardViewModel), IsAvailable: false),

@@ -596,8 +596,14 @@ Three sizes in a report message are a stranger's choice — the MIME part, the t
 the compression — so each is bounded separately. A small attachment that decompresses to gigabytes
 is the classic version of this attack, and a bound on the attachment alone would not catch it.
 
-A report can still be submitted by hand, which is the route to use before the record is published
-or when somebody forwards you one.
+**Where to read them.** The admin console's **Deliverability → TLS Reports** page lists what was
+collected for each hosted domain, newest first, with the selected report's failures and remedies
+beside it. An empty list there usually means collection is off or the record is not published,
+and the page says so rather than reading silence as success.
+
+A report can still be submitted by hand on the same page — paste the JSON, decompressed — which
+is the route to use before the record is published or when somebody forwards you one. Nothing
+submitted that way is stored.
 
 ## Header analyser
 

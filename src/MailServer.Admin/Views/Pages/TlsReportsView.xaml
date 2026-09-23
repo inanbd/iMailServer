@@ -1,0 +1,151 @@
+<UserControl x:Class="MailServer.Admin.Views.Pages.TlsReportsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="clr-namespace:MailServer.Admin.ViewModels"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=vm:TlsReportsViewModel}">
+
+    <UserControl.Resources>
+        <!--
+            One failure line, shared by the collected and the pasted report. The result type is
+            the RFC 8460 wire name so an operator can look it up; the remedy says when the cause
+            is the sender's policy rather than this server's configuration.
+        -->
+        <DataTemplate x:Key="FailureTemplate">
+            <StackPanel Margin="0,0,0,10">
+                <TextBlock FontWeight="SemiBold">
+                    <Run Text="{Binding ResultType, Mode=OneWay}" />
+                    <Run Text="-" />
+                    <Run Text="{Binding FailedSessionCount, Mode=OneWay}" />
+                    <Run Text="session(s)" />
+                </TextBlock>
+                <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
+                           Text="{Binding ReceivingMxHostnames, Converter={StaticResource JoinStrings}}" />
+                <TextBlock Text="{Binding Remedy}" TextWrapping="Wrap" Margin="0,2,0,0" />
+            </StackPanel>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="16">
+        <StackPanel>
+
+            <TextBlock Text="TLS Reports" Style="{StaticResource PageTitle}" />
+            <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
+                       Text="What other mail servers reported about their TLS sessions with this one (RFC 8460). The only feedback that shows a real handshake from a real sender." />
+
+            <Border Style="{StaticResource ErrorBanner}" Margin="0,12,0,0"
+                    Visibility="{Binding ErrorMessage, Converter={StaticResource StringToVisibility}}">
+                <TextBlock Text="{Binding ErrorMessage}" TextWrapping="Wrap" />
+            </Border>
+
+            <!--
+                Said on the page because it decides how much weight a row deserves. Anyone who
+                can reach the rua address can send a report, and nothing proves the organisation
+                named sent it.
+            -->
+            <Border Background="#FFF3F3F3" BorderBrush="#FFD0D0D0" BorderThickness="1"
+                    Padding="10" Margin="0,12,0,0">
+                <TextBlock TextWrapping="Wrap"
+                           Text="Reports are unauthenticated: every figure below is the sending organisation's claim. Act when several independent senders agree, never on one report alone." />
+            </Border>
+
+            <!-- ==== Collected reports ======================================================= -->
+
+            <TextBlock Text="Collected reports" Style="{StaticResource SectionHeader}" Margin="0,20,0,0" />
+
+            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                <TextBlock Text="Domain" VerticalAlignment="Center" Width="70" />
+                <ComboBox ItemsSource="{Binding Domains}" SelectedItem="{Binding SelectedDomain}"
+                          DisplayMemberPath="Name" Width="260" />
+                <Button Content="Refresh" Command="{Binding RefreshCommand}" Margin="8,0,0,0" />
+            </StackPanel>
+
+            <!--
+                Silence is not a clean bill of health. Collection is off by default and needs the
+                _smtp._tls record published, so an empty list usually means nobody is sending
+                reports here yet.
+            -->
+            <Border Background="#FFFFF8E1" BorderBrush="#FFE0C080" BorderThickness="1"
+                    Padding="10" Margin="0,12,0,0"
+                    Visibility="{Binding HasNoReports, Converter={StaticResource BoolToVisibility}}">
+                <TextBlock TextWrapping="Wrap"
+                           Text="Nothing has been collected for this domain. Collection is off by default: publish a _smtp._tls TXT record whose rua address is a mailbox here, set MailServer:Deliverability:TlsRpt:ReportMailbox to that address and enable it. Senders typically report once a day." />
+            </Border>
+
+            <Grid Margin="0,12,0,0" MinHeight="260">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="380" />
+                </Grid.ColumnDefinitions>
+
+                <DataGrid Grid.Column="0" ItemsSource="{Binding Reports}"
+                          SelectedItem="{Binding SelectedReport}"
+                          AutoGenerateColumns="False" IsReadOnly="True" MaxHeight="420"
+                          HeadersVisibility="Column" GridLinesVisibility="Horizontal">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Collected" Width="130"
+                                            Binding="{Binding CollectedUtc, StringFormat=yyyy-MM-dd HH:mm}" />
+                        <DataGridTextColumn Header="Reported by" Width="*" Binding="{Binding OrganizationName}" />
+                        <DataGridTextColumn Header="Period from" Width="100"
+                                            Binding="{Binding StartUtc, StringFormat=yyyy-MM-dd}" />
+                        <DataGridTextColumn Header="Succeeded" Width="80" Binding="{Binding SuccessfulSessionCount}" />
+                        <DataGridTextColumn Header="Failed" Width="70" Binding="{Binding FailedSessionCount}" />
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <Border Grid.Column="1" BorderBrush="#FFD0D0D0" BorderThickness="1,0,0,0"
+                        Padding="12,0,0,0" Margin="12,0,0,0">
+                    <StackPanel>
+                        <TextBlock Text="{Binding SelectedReport.Summary}" TextWrapping="Wrap"
+                                   FontWeight="SemiBold" />
+                        <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,4,0,0"
+                                   Visibility="{Binding SelectedReport, Converter={StaticResource NullToVisibility}}">
+                            <Run Text="Report" />
+                            <Run Text="{Binding SelectedReport.ReportId, Mode=OneWay}" />
+                            <Run Text="- contact" />
+                            <Run Text="{Binding SelectedReport.ContactInfo, Mode=OneWay}" />
+                        </TextBlock>
+
+                        <ItemsControl ItemsSource="{Binding SelectedReport.Failures}" Margin="0,12,0,0"
+                                      ItemTemplate="{StaticResource FailureTemplate}" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <!-- ==== A report supplied by hand =============================================== -->
+
+            <TextBlock Text="Analyse a report" Style="{StaticResource SectionHeader}" Margin="0,24,0,0" />
+            <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,4,0,0"
+                       Text="For a report this server did not collect: one somebody forwarded, or one that arrived before collection was set up. Paste the JSON; a .json.gz attachment needs decompressing first. Nothing pasted here is stored." />
+
+            <TextBox Text="{Binding PastedReport, UpdateSourceTrigger=PropertyChanged}"
+                     AcceptsReturn="True" TextWrapping="Wrap" FontFamily="Consolas"
+                     VerticalScrollBarVisibility="Auto" Height="160" Margin="0,8,0,0" />
+
+            <Button Content="Analyse" Command="{Binding AnalyseCommand}" HorizontalAlignment="Left"
+                    IsEnabled="{Binding CanAnalyse}" MinWidth="90" Margin="0,8,0,0" />
+
+            <Border BorderBrush="#FFD0D0D0" BorderThickness="1" Padding="12" Margin="0,12,0,0"
+                    Visibility="{Binding HasAnalysis, Converter={StaticResource BoolToVisibility}}">
+                <StackPanel>
+                    <TextBlock Text="{Binding Analysis.Summary}" TextWrapping="Wrap" FontWeight="SemiBold" />
+                    <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,4,0,0">
+                        <Run Text="Reported by" />
+                        <Run Text="{Binding Analysis.OrganizationName, Mode=OneWay}" />
+                        <Run Text="-" />
+                        <Run Text="{Binding Analysis.SuccessfulSessionCount, Mode=OneWay}" />
+                        <Run Text="succeeded," />
+                        <Run Text="{Binding Analysis.FailedSessionCount, Mode=OneWay}" />
+                        <Run Text="failed" />
+                    </TextBlock>
+
+                    <ItemsControl ItemsSource="{Binding Analysis.Failures}" Margin="0,12,0,0"
+                                  ItemTemplate="{StaticResource FailureTemplate}" />
+                </StackPanel>
+            </Border>
+
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

@@ -75,6 +75,10 @@
                 <pages:DeliverabilityView />
             </DataTemplate>
 
+            <DataTemplate DataType="{x:Type vm:TlsReportsViewModel}">
+                <pages:TlsReportsView />
+            </DataTemplate>
+
         </ResourceDictionary>
     </Application.Resources>
 </Application>

@@ -114,6 +114,7 @@ public partial class App : System.Windows.Application
         builder.Services.AddTransient<SecurityEventsViewModel>();
         builder.Services.AddTransient<SmtpViewModel>();
         builder.Services.AddTransient<DeliverabilityViewModel>();
+        builder.Services.AddTransient<TlsReportsViewModel>();
         builder.Services.AddTransient<QuarantineViewModel>();
 
         return builder.Build();
