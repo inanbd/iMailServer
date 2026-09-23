@@ -1,3 +1,4 @@
+using MailServer.Application.Abstractions.Certificates;
 using MailServer.Application.Abstractions.Deliverability;
 using MailServer.Application.Abstractions.Dns;
 using MailServer.Application.Abstractions.Repositories;
@@ -66,7 +67,9 @@ public sealed class DeliverabilityReportServiceTests
         IReputationProvider? reputationProvider = null,
         RecordedRelayTests? relay = null,
         IDkimKeyRepository? dkim = null,
-        IDomainRepository? domainRepository = null)
+        IDomainRepository? domainRepository = null,
+        ITlsCertificateProvider? tls = null,
+        FakeCertificates? certificates = null)
     {
         IDnsDiagnosticsService dns = resolver ?? Resolver();
         MailServerOptions opts = settings ?? Settings();
@@ -84,8 +87,8 @@ public sealed class DeliverabilityReportServiceTests
                 clock,
                 new FixedVolume((OneHundredGb / 2, OneHundredGb)),
                 new FixedStore("/var/mail")),
-            new FakeCertificates(),
-            new NoTlsCertificate(),
+            certificates ?? new FakeCertificates(),
+            tls ?? new NoTlsCertificate(),
             dkim ?? new FakeDkimKeys(),
             domainRepository ?? new FakeDomains(),
             clock,
@@ -96,6 +99,80 @@ public sealed class DeliverabilityReportServiceTests
     // ---------------------------------------------------------------------------------------
     // What a run produces.
     // ---------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// A run must leave the certificate the listeners are serving exactly as it found it.
+    /// </summary>
+    /// <remarks>
+    /// The regression this pins was found by running the server rather than by a test: the chain
+    /// check wrapped the provider's shared instance in a <c>using</c>, so one readiness report
+    /// disposed the certificate every listener presents, and every TLS handshake on every port
+    /// failed until the next reload. The provider's contract now says so; this is what holds the
+    /// report to it.
+    /// </remarks>
+    [Fact]
+    public async Task A_run_does_not_dispose_the_certificate_the_listeners_are_serving()
+    {
+        using LiveTlsCertificate tls = new("mail.example.com");
+
+        await Service(tls: tls).RunAsync(Domain, DeliverabilityRunOptions.Full, CancellationToken.None);
+
+        tls.Certificate.Handle.ShouldNotBe(IntPtr.Zero);
+
+        // And it is still usable for what a listener does with it.
+        Should.NotThrow(() =>
+        {
+            using X509Chain chain = new();
+            chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+            chain.Build(tls.Certificate);
+        });
+    }
+
+    /// <summary>
+    /// The second of two runs reaches the same conclusion about the certificate as the first.
+    /// </summary>
+    /// <remarks>
+    /// The shape the fault had from the outside: the first report was right and every report
+    /// after it said the certificate could not be read, because the first had destroyed it.
+    /// </remarks>
+    [Fact]
+    public async Task Consecutive_runs_judge_the_certificate_identically()
+    {
+        using LiveTlsCertificate tls = new("mail.example.com");
+
+        // Registered as CA-issued, so the trust check has to consult the chain the report built
+        // from the live certificate. (A certificate registered as self-signed fails the check on
+        // its metadata alone, and the chain would never be looked at.)
+        Certificate registered = Certificate.Register(
+            CertificateThumbprint.Parse(tls.Certificate.Thumbprint),
+            "CN=mail.example.com",
+            "CN=Test CA",
+            "01",
+            [CertificateSubjectName.Parse("mail.example.com")],
+            CertificateSource.ImportedPfx,
+            CertificateKeyLocation.InWindowsStore(CertificateThumbprint.Parse(tls.Certificate.Thumbprint)),
+            Now.AddDays(-10),
+            Now.AddDays(80),
+            Now);
+        CertificateBinding binding = CertificateBinding.Create(
+            DomainName.Parse("mail.example.com"), registered.Id, CertificatePurpose.All, isDefault: true, Now);
+
+        DeliverabilityReportService service = Service(tls: tls, certificates: new FakeCertificates(registered, binding));
+
+        DeliverabilityCheck first = (await service.RunAsync(Domain, DeliverabilityRunOptions.Full, CancellationToken.None))
+            .Checks.Single(c => c.Id == TlsChecks.CertificateTrustedId);
+        DeliverabilityCheck second = (await service.RunAsync(Domain, DeliverabilityRunOptions.Full, CancellationToken.None))
+            .Checks.Single(c => c.Id == TlsChecks.CertificateTrustedId);
+
+        // The chain was actually built: a test root is not trusted, so it fails on the chain
+        // rather than being unmeasured.
+        first.Outcome.ShouldBe(DeliverabilityOutcome.Fail);
+        first.Evidence!.Found.ShouldBe("chain does not build");
+
+        second.Outcome.ShouldBe(first.Outcome);
+        second.Evidence!.Found.ShouldBe(first.Evidence.Found);
+    }
+
 
     /// <summary>
     /// One run covers every category the report scores.

@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using MailServer.Application.Abstractions.Certificates;
 using MailServer.Application.Abstractions.Repositories;
 using MailServer.Domain.Entities;
@@ -132,6 +133,44 @@ internal sealed class FakeCertificates(
 }
 
 /// <summary>A provider with no certificate, so no chain is built in a test.</summary>
+/// <summary>
+/// A provider that behaves like the real one: one live certificate, handed out on every call.
+/// </summary>
+/// <remarks>
+/// <see cref="NoTlsCertificate"/> answers null, which is why the report's certificate-chain
+/// path went untested and why a <c>using</c> around the shared instance — disposing the
+/// certificate every listener was serving — reached a running server. This fake returns the
+/// same instance each time, exactly as <c>TlsCertificateProvider</c> does, so a caller that
+/// disposes it breaks the next caller the way it would break the next handshake.
+/// </remarks>
+internal sealed class LiveTlsCertificate : ITlsCertificateProvider, IDisposable
+{
+    public LiveTlsCertificate(string hostname)
+    {
+        using RSA key = RSA.Create(2048);
+
+        CertificateRequest request = new($"CN={hostname}", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        SubjectAlternativeNameBuilder names = new();
+        names.AddDnsName(hostname);
+        request.CertificateExtensions.Add(names.Build());
+
+        Certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(30));
+    }
+
+    /// <summary>The one instance every "listener" would be presenting.</summary>
+    public X509Certificate2 Certificate { get; }
+
+    public X509Certificate2? Select(string? hostname, CertificatePurpose purpose) => Certificate;
+
+    public Task ReloadAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public IReadOnlyCollection<DomainName> ConfiguredHostnames => [];
+
+    public bool IsReady => true;
+
+    public void Dispose() => Certificate.Dispose();
+}
+
 internal sealed class NoTlsCertificate : ITlsCertificateProvider
 {
     public X509Certificate2? Select(string? hostname, CertificatePurpose purpose) => null;

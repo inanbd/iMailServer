@@ -339,12 +339,20 @@ public sealed class DeliverabilityReportService(
     {
         try
         {
-            using X509Certificate2? leaf = tlsCertificates.Select(hostname.Value, CertificatePurpose.SmtpInbound);
+            // The provider's instance is the one every listener is presenting right now, and it is
+            // shared rather than lent: disposing it takes TLS down on every port - SMTP, IMAP,
+            // POP3, submission and the MTA-STS endpoint - until the next certificate reload. That
+            // is exactly what this method once did, and one run of the report was enough. The
+            // chain is built on a copy of the public certificate instead: the report needs the
+            // chain, not the private key, and a copy is this method's own to dispose.
+            X509Certificate2? served = tlsCertificates.Select(hostname.Value, CertificatePurpose.SmtpInbound);
 
-            if (leaf is null)
+            if (served is null)
             {
                 return CertificateChainStatus.NotBuilt;
             }
+
+            using X509Certificate2 leaf = X509CertificateLoader.LoadCertificate(served.RawData);
 
             using X509Chain chain = new();
 

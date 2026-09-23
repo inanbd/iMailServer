@@ -43,6 +43,13 @@ public interface ITlsCertificateProvider
     /// The certificate to present, or null when none is configured — at which point the
     /// handshake cannot proceed and the caller logs it.
     /// </returns>
+    /// <remarks>
+    /// <b>The instance belongs to the provider and must never be disposed by a caller.</b> It is
+    /// the one object every listener hands to every handshake, so a caller that disposes it —
+    /// with a <c>using</c> that looks like ordinary hygiene — breaks TLS on every port until the
+    /// next reload. A caller that needs a certificate of its own, to build a chain for instance,
+    /// loads a copy from <see cref="X509Certificate2.RawData"/> and disposes that.
+    /// </remarks>
     X509Certificate2? Select(string? hostname, CertificatePurpose purpose);
 
     /// <summary>Rebuilds the snapshot from current bindings and swaps it in atomically.</summary>
